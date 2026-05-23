@@ -2,14 +2,13 @@ package ovnflow
 
 import (
 	"context"
-	"sync/atomic"
+	"errors"
 
-	"github.com/ovn-kubernetes/libovsdb/cache"
 	ovsclient "github.com/ovn-kubernetes/libovsdb/client"
 	libmodel "github.com/ovn-kubernetes/libovsdb/model"
 )
 
-// SBClient exposes read-only OVN Southbound APIs.
+// SBClient exposes OVN Southbound APIs.
 type SBClient struct {
 	db *dbClient
 }
@@ -35,234 +34,632 @@ type ChassisEvent struct {
 	New  *SBChassis
 }
 
-func (e PortBindingEvent) isZero() bool {
-	return e.Type == "" && e.Old == nil && e.New == nil
+type DatapathEvent struct {
+	Type EventType
+	Old  *SBDatapathBinding
+	New  *SBDatapathBinding
 }
 
-func (e ChassisEvent) isZero() bool {
-	return e.Type == "" && e.Old == nil && e.New == nil
+type LogicalFlowEvent struct {
+	Type EventType
+	Old  *SBLogicalFlow
+	New  *SBLogicalFlow
+}
+
+type MACBindingEvent struct {
+	Type EventType
+	Old  *SBMACBinding
+	New  *SBMACBinding
+}
+
+type FDBEvent struct {
+	Type EventType
+	Old  *SBFDB
+	New  *SBFDB
+}
+
+type MulticastGroupEvent struct {
+	Type EventType
+	Old  *SBMulticastGroup
+	New  *SBMulticastGroup
+}
+
+type ServiceMonitorEvent struct {
+	Type EventType
+	Old  *SBServiceMonitor
+	New  *SBServiceMonitor
+}
+
+type RBACRoleEvent struct {
+	Type EventType
+	Old  *SBRBACRole
+	New  *SBRBACRole
+}
+
+type RBACPermissionEvent struct {
+	Type EventType
+	Old  *SBRBACPermission
+	New  *SBRBACPermission
+}
+
+type MeterEvent struct {
+	Type EventType
+	Old  *SBMeter
+	New  *SBMeter
+}
+
+type MeterBandEvent struct {
+	Type EventType
+	Old  *SBMeterBand
+	New  *SBMeterBand
+}
+
+type DNSEvent struct {
+	Type EventType
+	Old  *SBDNS
+	New  *SBDNS
+}
+
+type BFDEvent struct {
+	Type EventType
+	Old  *SBBFD
+	New  *SBBFD
 }
 
 func (s *SBClient) ListChassis(ctx context.Context) ([]SBChassis, error) {
-	var out []SBChassis
-	if err := s.db.raw.List(ctx, &out); err != nil {
-		return nil, classifyTransactError(err, dbOVNSouthbound, tableChassis, "list", "")
-	}
-	return out, nil
+	return listSB[SBChassis](ctx, s, tableChassis)
 }
 
 func (s *SBClient) ListPortBindings(ctx context.Context) ([]SBPortBinding, error) {
-	var out []SBPortBinding
-	if err := s.db.raw.List(ctx, &out); err != nil {
-		return nil, classifyTransactError(err, dbOVNSouthbound, tablePortBinding, "list", "")
-	}
-	return out, nil
+	return listSB[SBPortBinding](ctx, s, tablePortBinding)
 }
 
 func (s *SBClient) ListDatapaths(ctx context.Context) ([]SBDatapathBinding, error) {
-	var out []SBDatapathBinding
+	return listSB[SBDatapathBinding](ctx, s, tableDatapathBinding)
+}
+
+func (s *SBClient) ListLogicalFlows(ctx context.Context) ([]SBLogicalFlow, error) {
+	return listSB[SBLogicalFlow](ctx, s, tableLogicalFlow)
+}
+
+func (s *SBClient) ListMACBindings(ctx context.Context) ([]SBMACBinding, error) {
+	return listSB[SBMACBinding](ctx, s, tableMACBinding)
+}
+
+func (s *SBClient) ListFDB(ctx context.Context) ([]SBFDB, error) {
+	return listSB[SBFDB](ctx, s, tableFDB)
+}
+
+func (s *SBClient) ListMulticastGroups(ctx context.Context) ([]SBMulticastGroup, error) {
+	return listSB[SBMulticastGroup](ctx, s, tableMulticastGroup)
+}
+
+func (s *SBClient) ListServiceMonitors(ctx context.Context) ([]SBServiceMonitor, error) {
+	return listSB[SBServiceMonitor](ctx, s, tableServiceMonitor)
+}
+
+func (s *SBClient) ListRBACRoles(ctx context.Context) ([]SBRBACRole, error) {
+	return listSB[SBRBACRole](ctx, s, tableRBACRole)
+}
+
+func (s *SBClient) ListRBACPermissions(ctx context.Context) ([]SBRBACPermission, error) {
+	return listSB[SBRBACPermission](ctx, s, tableRBACPermission)
+}
+
+func (s *SBClient) ListMeters(ctx context.Context) ([]SBMeter, error) {
+	return listSB[SBMeter](ctx, s, tableMeter)
+}
+
+func (s *SBClient) ListMeterBands(ctx context.Context) ([]SBMeterBand, error) {
+	return listSB[SBMeterBand](ctx, s, tableMeterBand)
+}
+
+func (s *SBClient) ListDNS(ctx context.Context) ([]SBDNS, error) {
+	return listSB[SBDNS](ctx, s, tableDNS)
+}
+
+func (s *SBClient) ListBFD(ctx context.Context) ([]SBBFD, error) {
+	return listSB[SBBFD](ctx, s, tableBFD)
+}
+
+func (s *SBClient) GetChassis(ctx context.Context, name string) (*SBChassis, error) {
+	return getSB(ctx, s, tableChassis, &SBChassis{Name: name}, name)
+}
+
+func (s *SBClient) GetPortBinding(ctx context.Context, logicalPort string) (*SBPortBinding, error) {
+	return getSB(ctx, s, tablePortBinding, &SBPortBinding{LogicalPort: logicalPort}, logicalPort)
+}
+
+func (s *SBClient) GetDatapath(ctx context.Context, tunnelKey int) (*SBDatapathBinding, error) {
+	return getSB(ctx, s, tableDatapathBinding, &SBDatapathBinding{TunnelKey: tunnelKey}, "")
+}
+
+func (s *SBClient) GetDatapathByUUID(ctx context.Context, uuid string) (*SBDatapathBinding, error) {
+	return getSB(ctx, s, tableDatapathBinding, &SBDatapathBinding{UUID: uuid}, uuid)
+}
+
+func (s *SBClient) GetLogicalFlow(ctx context.Context, uuid string) (*SBLogicalFlow, error) {
+	return getSB(ctx, s, tableLogicalFlow, &SBLogicalFlow{UUID: uuid}, uuid)
+}
+
+func (s *SBClient) GetMACBinding(ctx context.Context, logicalPort, ip string) (*SBMACBinding, error) {
+	return getSB(ctx, s, tableMACBinding, &SBMACBinding{LogicalPort: logicalPort, IP: ip}, logicalPort)
+}
+
+func (s *SBClient) GetFDB(ctx context.Context, mac string, dpKey int) (*SBFDB, error) {
+	return getSB(ctx, s, tableFDB, &SBFDB{MAC: mac, DPKey: dpKey}, mac)
+}
+
+func (s *SBClient) GetMulticastGroup(ctx context.Context, datapath string, tunnelKey int) (*SBMulticastGroup, error) {
+	return getSB(ctx, s, tableMulticastGroup, &SBMulticastGroup{Datapath: datapath, TunnelKey: tunnelKey}, datapath)
+}
+
+func (s *SBClient) GetServiceMonitor(ctx context.Context, logicalPort, ip, protocol string, port int) (*SBServiceMonitor, error) {
+	return getSB(ctx, s, tableServiceMonitor, &SBServiceMonitor{LogicalPort: logicalPort, IP: ip, Protocol: stringPtr(protocol), Port: port}, logicalPort)
+}
+
+func (s *SBClient) GetRBACRole(ctx context.Context, name string) (*SBRBACRole, error) {
+	return getSB(ctx, s, tableRBACRole, &SBRBACRole{Name: name}, name)
+}
+
+func (s *SBClient) GetRBACPermission(ctx context.Context, uuid string) (*SBRBACPermission, error) {
+	return getSB(ctx, s, tableRBACPermission, &SBRBACPermission{UUID: uuid}, uuid)
+}
+
+func (s *SBClient) GetMeter(ctx context.Context, name string) (*SBMeter, error) {
+	return getSB(ctx, s, tableMeter, &SBMeter{Name: name}, name)
+}
+
+func (s *SBClient) GetMeterBand(ctx context.Context, uuid string) (*SBMeterBand, error) {
+	return getSB(ctx, s, tableMeterBand, &SBMeterBand{UUID: uuid}, uuid)
+}
+
+func (s *SBClient) GetDNS(ctx context.Context, uuid string) (*SBDNS, error) {
+	return getSB(ctx, s, tableDNS, &SBDNS{UUID: uuid}, uuid)
+}
+
+func (s *SBClient) GetBFD(ctx context.Context, logicalPort, dstIP string, srcPort, disc int) (*SBBFD, error) {
+	return getSB(ctx, s, tableBFD, &SBBFD{LogicalPort: logicalPort, DstIP: dstIP, SrcPort: srcPort, Disc: disc}, logicalPort)
+}
+
+func (s *SBClient) WatchPortBindings(ctx context.Context) (<-chan PortBindingEvent, <-chan error) {
+	return watchSB(ctx, s, tablePortBinding, portBindingEventFromRowEvent)
+}
+
+func (s *SBClient) WatchTable(ctx context.Context, table string) (<-chan RowEvent, <-chan error) {
+	if s == nil || s.db == nil {
+		events := make(chan RowEvent)
+		errs := make(chan error, 1)
+		errs <- wrap(ErrorUnavailable, dbOVNSouthbound, table, "watch", "", "southbound client is nil", nil)
+		close(events)
+		return events, errs
+	}
+	return s.Table(table).Watch(ctx)
+}
+
+func (s *SBClient) WatchChassis(ctx context.Context) (<-chan ChassisEvent, <-chan error) {
+	return watchSB(ctx, s, tableChassis, chassisEventFromRowEvent)
+}
+
+func (s *SBClient) WatchDatapaths(ctx context.Context) (<-chan DatapathEvent, <-chan error) {
+	return watchSB(ctx, s, tableDatapathBinding, datapathEventFromRowEvent)
+}
+
+func (s *SBClient) WatchLogicalFlows(ctx context.Context) (<-chan LogicalFlowEvent, <-chan error) {
+	return watchSB(ctx, s, tableLogicalFlow, logicalFlowEventFromRowEvent)
+}
+
+func (s *SBClient) WatchMACBindings(ctx context.Context) (<-chan MACBindingEvent, <-chan error) {
+	return watchSB(ctx, s, tableMACBinding, macBindingEventFromRowEvent)
+}
+
+func (s *SBClient) WatchFDB(ctx context.Context) (<-chan FDBEvent, <-chan error) {
+	return watchSB(ctx, s, tableFDB, fdbEventFromRowEvent)
+}
+
+func (s *SBClient) WatchMulticastGroups(ctx context.Context) (<-chan MulticastGroupEvent, <-chan error) {
+	return watchSB(ctx, s, tableMulticastGroup, multicastGroupEventFromRowEvent)
+}
+
+func (s *SBClient) WatchServiceMonitors(ctx context.Context) (<-chan ServiceMonitorEvent, <-chan error) {
+	return watchSB(ctx, s, tableServiceMonitor, serviceMonitorEventFromRowEvent)
+}
+
+func (s *SBClient) WatchRBACRoles(ctx context.Context) (<-chan RBACRoleEvent, <-chan error) {
+	return watchSB(ctx, s, tableRBACRole, rbacRoleEventFromRowEvent)
+}
+
+func (s *SBClient) WatchRBACPermissions(ctx context.Context) (<-chan RBACPermissionEvent, <-chan error) {
+	return watchSB(ctx, s, tableRBACPermission, rbacPermissionEventFromRowEvent)
+}
+
+func (s *SBClient) WatchMeters(ctx context.Context) (<-chan MeterEvent, <-chan error) {
+	return watchSB(ctx, s, tableMeter, meterEventFromRowEvent)
+}
+
+func (s *SBClient) WatchMeterBands(ctx context.Context) (<-chan MeterBandEvent, <-chan error) {
+	return watchSB(ctx, s, tableMeterBand, meterBandEventFromRowEvent)
+}
+
+func (s *SBClient) WatchDNS(ctx context.Context) (<-chan DNSEvent, <-chan error) {
+	return watchSB(ctx, s, tableDNS, dnsEventFromRowEvent)
+}
+
+func (s *SBClient) WatchBFD(ctx context.Context) (<-chan BFDEvent, <-chan error) {
+	return watchSB(ctx, s, tableBFD, bfdEventFromRowEvent)
+}
+
+func listSB[T any](ctx context.Context, s *SBClient, table string) ([]T, error) {
+	var out []T
+	if s == nil || s.db == nil || s.db.raw == nil {
+		return nil, wrap(ErrorUnavailable, dbOVNSouthbound, table, "list", "", "southbound client is nil", nil)
+	}
 	if err := s.db.raw.List(ctx, &out); err != nil {
-		return nil, classifyTransactError(err, dbOVNSouthbound, tableDatapathBinding, "list", "")
+		return nil, classifySBReadError(err, table, "list", "")
 	}
 	return out, nil
 }
 
-func (s *SBClient) WatchPortBindings(ctx context.Context) (<-chan PortBindingEvent, <-chan error) {
-	events := make(chan PortBindingEvent, 64)
+func getSB[T libmodel.Model](ctx context.Context, s *SBClient, table string, row T, object string) (T, error) {
+	var zero T
+	if s == nil || s.db == nil || s.db.raw == nil {
+		return zero, wrap(ErrorUnavailable, dbOVNSouthbound, table, "get", object, "southbound client is nil", nil)
+	}
+	if err := s.db.raw.Get(ctx, row); err != nil {
+		return zero, classifySBReadError(err, table, "get", object)
+	}
+	return row, nil
+}
+
+func classifySBReadError(err error, table, op, object string) error {
+	if errors.Is(err, ovsclient.ErrNotFound) {
+		return wrap(ErrorNotFound, dbOVNSouthbound, table, op, object, "", err)
+	}
+	return classifyTransactError(err, dbOVNSouthbound, table, op, object)
+}
+
+func watchSB[E any](ctx context.Context, s *SBClient, table string, convert func(RowEvent) E) (<-chan E, <-chan error) {
+	events := make(chan E, defaultWatchEventBuffer)
 	errs := make(chan error, 1)
-	queue := make(chan PortBindingEvent, 256)
-	var active atomic.Bool
-	active.Store(true)
-	push := func(event PortBindingEvent) {
-		if !active.Load() || ctx.Err() != nil || event.isZero() {
-			return
-		}
-		select {
-		case queue <- event:
-		default:
-			select {
-			case errs <- wrap(ErrorPartial, dbOVNSouthbound, tablePortBinding, "watch", "", "port binding watch event queue overflow", nil):
-			default:
-			}
-		}
-	}
-	handler := &cache.EventHandlerFuncs{
-		AddFunc: func(table string, m libmodel.Model) {
-			if !active.Load() {
-				return
-			}
-			if table != tablePortBinding {
-				return
-			}
-			if pb, ok := m.(*SBPortBinding); ok {
-				push(PortBindingEvent{Type: EventAdd, New: pb})
-			}
-		},
-		UpdateFunc: func(table string, old libmodel.Model, newModel libmodel.Model) {
-			if !active.Load() {
-				return
-			}
-			if table != tablePortBinding {
-				return
-			}
-			oldPB, _ := old.(*SBPortBinding)
-			newPB, _ := newModel.(*SBPortBinding)
-			push(PortBindingEvent{Type: EventUpdate, Old: oldPB, New: newPB})
-		},
-		DeleteFunc: func(table string, m libmodel.Model) {
-			if !active.Load() {
-				return
-			}
-			if table != tablePortBinding {
-				return
-			}
-			if pb, ok := m.(*SBPortBinding); ok {
-				push(PortBindingEvent{Type: EventDelete, Old: pb})
-			}
-		},
-	}
-	s.db.raw.Cache().AddEventHandler(handler)
-	startDedicatedMonitor(ctx, s.db.raw, &SBPortBinding{})
+	rowEvents, rowErrs := watchSBTable(ctx, s, table)
 	go func() {
 		defer close(events)
 		for {
 			select {
-			case event := <-queue:
+			case event, ok := <-rowEvents:
+				if !ok {
+					return
+				}
 				select {
-				case events <- event:
+				case events <- convert(event):
 				case <-ctx.Done():
 					return
+				}
+			case err := <-rowErrs:
+				if err != nil {
+					select {
+					case errs <- err:
+					default:
+					}
 				}
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
-	go func() {
-		defer active.Store(false)
-		rows, err := s.ListPortBindings(ctx)
-		if err != nil {
-			errs <- err
-			return
-		}
-		for i := range rows {
-			row := rows[i]
-			select {
-			case queue <- PortBindingEvent{Type: EventInitial, New: &row}:
-			case <-ctx.Done():
-				errs <- classifyContext(ctx.Err(), dbOVNSouthbound, tablePortBinding, "watch", "")
-				return
-			}
-		}
-		<-ctx.Done()
-	}()
 	return events, errs
 }
 
-func (s *SBClient) WatchChassis(ctx context.Context) (<-chan ChassisEvent, <-chan error) {
-	events := make(chan ChassisEvent, 64)
-	errs := make(chan error, 1)
-	queue := make(chan ChassisEvent, 256)
-	var active atomic.Bool
-	active.Store(true)
-	push := func(event ChassisEvent) {
-		if !active.Load() || ctx.Err() != nil || event.isZero() {
-			return
-		}
-		select {
-		case queue <- event:
-		default:
-			select {
-			case errs <- wrap(ErrorPartial, dbOVNSouthbound, tableChassis, "watch", "", "chassis watch event queue overflow", nil):
-			default:
-			}
-		}
+func watchSBTable(ctx context.Context, s *SBClient, table string) (<-chan RowEvent, <-chan error) {
+	if s == nil {
+		events := make(chan RowEvent)
+		errs := make(chan error, 1)
+		errs <- wrap(ErrorUnavailable, dbOVNSouthbound, table, "watch", "", "southbound client is nil", nil)
+		close(events)
+		return events, errs
 	}
-	handler := &cache.EventHandlerFuncs{
-		AddFunc: func(table string, m libmodel.Model) {
-			if !active.Load() {
-				return
-			}
-			if table != tableChassis {
-				return
-			}
-			if ch, ok := m.(*SBChassis); ok {
-				push(ChassisEvent{Type: EventAdd, New: ch})
-			}
-		},
-		UpdateFunc: func(table string, old libmodel.Model, newModel libmodel.Model) {
-			if !active.Load() {
-				return
-			}
-			if table != tableChassis {
-				return
-			}
-			oldCh, _ := old.(*SBChassis)
-			newCh, _ := newModel.(*SBChassis)
-			push(ChassisEvent{Type: EventUpdate, Old: oldCh, New: newCh})
-		},
-		DeleteFunc: func(table string, m libmodel.Model) {
-			if !active.Load() {
-				return
-			}
-			if table != tableChassis {
-				return
-			}
-			if ch, ok := m.(*SBChassis); ok {
-				push(ChassisEvent{Type: EventDelete, Old: ch})
-			}
-		},
-	}
-	s.db.raw.Cache().AddEventHandler(handler)
-	startDedicatedMonitor(ctx, s.db.raw, &SBChassis{})
-	go func() {
-		defer close(events)
-		for {
-			select {
-			case event := <-queue:
-				select {
-				case events <- event:
-				case <-ctx.Done():
-					return
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	go func() {
-		defer active.Store(false)
-		rows, err := s.ListChassis(ctx)
-		if err != nil {
-			errs <- err
-			return
-		}
-		for i := range rows {
-			row := rows[i]
-			select {
-			case queue <- ChassisEvent{Type: EventInitial, New: &row}:
-			case <-ctx.Done():
-				errs <- classifyContext(ctx.Err(), dbOVNSouthbound, tableChassis, "watch", "")
-				return
-			}
-		}
-		<-ctx.Done()
-	}()
-	return events, errs
+	return s.WatchTable(ctx, table)
 }
 
-func startDedicatedMonitor(ctx context.Context, raw ovsclient.Client, model libmodel.Model) {
-	monitor := raw.NewMonitor(ovsclient.WithTable(model))
-	if len(monitor.Errors) > 0 {
-		return
+func portBindingEventFromRowEvent(event RowEvent) PortBindingEvent {
+	return PortBindingEvent{Type: event.Type, Old: sbPortBindingFromRow(event.Old), New: sbPortBindingFromRow(event.New)}
+}
+
+func chassisEventFromRowEvent(event RowEvent) ChassisEvent {
+	return ChassisEvent{Type: event.Type, Old: sbChassisFromRow(event.Old), New: sbChassisFromRow(event.New)}
+}
+
+func datapathEventFromRowEvent(event RowEvent) DatapathEvent {
+	return DatapathEvent{Type: event.Type, Old: sbDatapathFromRow(event.Old), New: sbDatapathFromRow(event.New)}
+}
+
+func logicalFlowEventFromRowEvent(event RowEvent) LogicalFlowEvent {
+	return LogicalFlowEvent{Type: event.Type, Old: sbLogicalFlowFromRow(event.Old), New: sbLogicalFlowFromRow(event.New)}
+}
+
+func macBindingEventFromRowEvent(event RowEvent) MACBindingEvent {
+	return MACBindingEvent{Type: event.Type, Old: sbMACBindingFromRow(event.Old), New: sbMACBindingFromRow(event.New)}
+}
+
+func fdbEventFromRowEvent(event RowEvent) FDBEvent {
+	return FDBEvent{Type: event.Type, Old: sbFDBFromRow(event.Old), New: sbFDBFromRow(event.New)}
+}
+
+func multicastGroupEventFromRowEvent(event RowEvent) MulticastGroupEvent {
+	return MulticastGroupEvent{Type: event.Type, Old: sbMulticastGroupFromRow(event.Old), New: sbMulticastGroupFromRow(event.New)}
+}
+
+func serviceMonitorEventFromRowEvent(event RowEvent) ServiceMonitorEvent {
+	return ServiceMonitorEvent{Type: event.Type, Old: sbServiceMonitorFromRow(event.Old), New: sbServiceMonitorFromRow(event.New)}
+}
+
+func rbacRoleEventFromRowEvent(event RowEvent) RBACRoleEvent {
+	return RBACRoleEvent{Type: event.Type, Old: sbRBACRoleFromRow(event.Old), New: sbRBACRoleFromRow(event.New)}
+}
+
+func rbacPermissionEventFromRowEvent(event RowEvent) RBACPermissionEvent {
+	return RBACPermissionEvent{Type: event.Type, Old: sbRBACPermissionFromRow(event.Old), New: sbRBACPermissionFromRow(event.New)}
+}
+
+func meterEventFromRowEvent(event RowEvent) MeterEvent {
+	return MeterEvent{Type: event.Type, Old: sbMeterFromRow(event.Old), New: sbMeterFromRow(event.New)}
+}
+
+func meterBandEventFromRowEvent(event RowEvent) MeterBandEvent {
+	return MeterBandEvent{Type: event.Type, Old: sbMeterBandFromRow(event.Old), New: sbMeterBandFromRow(event.New)}
+}
+
+func dnsEventFromRowEvent(event RowEvent) DNSEvent {
+	return DNSEvent{Type: event.Type, Old: sbDNSFromRow(event.Old), New: sbDNSFromRow(event.New)}
+}
+
+func bfdEventFromRowEvent(event RowEvent) BFDEvent {
+	return BFDEvent{Type: event.Type, Old: sbBFDFromRow(event.Old), New: sbBFDFromRow(event.New)}
+}
+
+func sbChassisFromRow(row Row) *SBChassis {
+	if row == nil {
+		return nil
 	}
-	cookie, err := raw.Monitor(ctx, monitor)
-	if err != nil {
-		return
+	return &SBChassis{
+		UUID:        anyString(row[colUUID]),
+		Name:        anyString(row[colName]),
+		Hostname:    anyString(row["hostname"]),
+		ExternalIDs: anyStringMap(row[colExternalIDs]),
+		Encaps:      anyStringSlice(row["encaps"]),
+		NbCfg:       anyInt(row["nb_cfg"]),
+		OtherConfig: anyStringMap(row[colOtherConfig]),
 	}
-	go func() {
-		<-ctx.Done()
-		cancelCtx := context.Background()
-		_ = raw.MonitorCancel(cancelCtx, cookie)
-	}()
+}
+
+func sbPortBindingFromRow(row Row) *SBPortBinding {
+	if row == nil {
+		return nil
+	}
+	return &SBPortBinding{
+		UUID:           anyString(row[colUUID]),
+		LogicalPort:    anyString(row[colLogicalPort]),
+		Type:           anyString(row[colType]),
+		Chassis:        optionalString(row[colChassis]),
+		Datapath:       anyString(row[colDatapath]),
+		TunnelKey:      anyInt(row[colTunnelKey]),
+		ParentPort:     optionalString(row["parent_port"]),
+		Tag:            optionalInt(row["tag"]),
+		VirtualParent:  optionalString(row["virtual_parent"]),
+		Encap:          optionalString(row["encap"]),
+		GatewayChassis: anyStringSlice(row["gateway_chassis"]),
+		HAChassisGroup: optionalString(row["ha_chassis_group"]),
+		MAC:            anyStringSlice(row[colMAC]),
+		NatAddresses:   anyStringSlice(row["nat_addresses"]),
+		Up:             optionalBool(row["up"]),
+		Options:        anyStringMap(row[colOptions]),
+		ExternalIDs:    anyStringMap(row[colExternalIDs]),
+	}
+}
+
+func sbDatapathFromRow(row Row) *SBDatapathBinding {
+	if row == nil {
+		return nil
+	}
+	return &SBDatapathBinding{
+		UUID:          anyString(row[colUUID]),
+		TunnelKey:     anyInt(row[colTunnelKey]),
+		LoadBalancers: anyStringSlice(row["load_balancers"]),
+		ExternalIDs:   anyStringMap(row[colExternalIDs]),
+	}
+}
+
+func sbLogicalFlowFromRow(row Row) *SBLogicalFlow {
+	if row == nil {
+		return nil
+	}
+	return &SBLogicalFlow{
+		UUID:            anyString(row[colUUID]),
+		LogicalDatapath: optionalString(row["logical_datapath"]),
+		LogicalDPGroup:  optionalString(row["logical_dp_group"]),
+		Pipeline:        anyString(row["pipeline"]),
+		TableID:         anyInt(row["table_id"]),
+		Priority:        anyInt(row[colPriority]),
+		Match:           anyString(row[colMatch]),
+		Actions:         anyString(row["actions"]),
+		ExternalIDs:     anyStringMap(row[colExternalIDs]),
+	}
+}
+
+func sbMACBindingFromRow(row Row) *SBMACBinding {
+	if row == nil {
+		return nil
+	}
+	return &SBMACBinding{
+		UUID:        anyString(row[colUUID]),
+		LogicalPort: anyString(row[colLogicalPort]),
+		IP:          anyString(row[colIP]),
+		MAC:         anyString(row[colMAC]),
+		Datapath:    anyString(row[colDatapath]),
+	}
+}
+
+func sbFDBFromRow(row Row) *SBFDB {
+	if row == nil {
+		return nil
+	}
+	return &SBFDB{
+		UUID:    anyString(row[colUUID]),
+		MAC:     anyString(row[colMAC]),
+		DPKey:   anyInt(row[colDPKey]),
+		PortKey: anyInt(row[colPortKey]),
+	}
+}
+
+func sbMulticastGroupFromRow(row Row) *SBMulticastGroup {
+	if row == nil {
+		return nil
+	}
+	return &SBMulticastGroup{
+		UUID:      anyString(row[colUUID]),
+		Datapath:  anyString(row[colDatapath]),
+		Name:      anyString(row[colName]),
+		TunnelKey: anyInt(row[colTunnelKey]),
+		Ports:     anyStringSlice(row[colPorts]),
+	}
+}
+
+func sbServiceMonitorFromRow(row Row) *SBServiceMonitor {
+	if row == nil {
+		return nil
+	}
+	return &SBServiceMonitor{
+		UUID:        anyString(row[colUUID]),
+		IP:          anyString(row[colIP]),
+		Protocol:    optionalString(row[colProtocol]),
+		Port:        anyInt(row[colPort]),
+		LogicalPort: anyString(row[colLogicalPort]),
+		SrcMAC:      anyString(row["src_mac"]),
+		SrcIP:       anyString(row["src_ip"]),
+		Status:      optionalString(row[colStatus]),
+		Options:     anyStringMap(row[colOptions]),
+		ExternalIDs: anyStringMap(row[colExternalIDs]),
+	}
+}
+
+func sbRBACRoleFromRow(row Row) *SBRBACRole {
+	if row == nil {
+		return nil
+	}
+	return &SBRBACRole{
+		UUID:        anyString(row[colUUID]),
+		Name:        anyString(row[colName]),
+		Permissions: anyStringMap(row["permissions"]),
+	}
+}
+
+func sbRBACPermissionFromRow(row Row) *SBRBACPermission {
+	if row == nil {
+		return nil
+	}
+	return &SBRBACPermission{
+		UUID:          anyString(row[colUUID]),
+		Table:         anyString(row["table"]),
+		Authorization: anyStringSlice(row["authorization"]),
+		InsertDelete:  anyBool(row["insert_delete"]),
+		Update:        anyStringSlice(row["update"]),
+	}
+}
+
+func sbMeterFromRow(row Row) *SBMeter {
+	if row == nil {
+		return nil
+	}
+	return &SBMeter{
+		UUID:  anyString(row[colUUID]),
+		Name:  anyString(row[colName]),
+		Unit:  anyString(row["unit"]),
+		Bands: anyStringSlice(row["bands"]),
+	}
+}
+
+func sbMeterBandFromRow(row Row) *SBMeterBand {
+	if row == nil {
+		return nil
+	}
+	return &SBMeterBand{
+		UUID:      anyString(row[colUUID]),
+		Action:    anyString(row[colAction]),
+		Rate:      anyInt(row["rate"]),
+		BurstSize: anyInt(row["burst_size"]),
+	}
+}
+
+func sbDNSFromRow(row Row) *SBDNS {
+	if row == nil {
+		return nil
+	}
+	return &SBDNS{
+		UUID:        anyString(row[colUUID]),
+		Records:     anyStringMap(row["records"]),
+		Datapaths:   anyStringSlice(row["datapaths"]),
+		ExternalIDs: anyStringMap(row[colExternalIDs]),
+	}
+}
+
+func sbBFDFromRow(row Row) *SBBFD {
+	if row == nil {
+		return nil
+	}
+	return &SBBFD{
+		UUID:        anyString(row[colUUID]),
+		SrcPort:     anyInt(row[colSrcPort]),
+		Disc:        anyInt(row[colDisc]),
+		LogicalPort: anyString(row[colLogicalPort]),
+		DstIP:       anyString(row[colDstIP]),
+		MinTx:       anyInt(row["min_tx"]),
+		MinRx:       anyInt(row["min_rx"]),
+		DetectMult:  anyInt(row["detect_mult"]),
+		Status:      anyString(row[colStatus]),
+		ExternalIDs: anyStringMap(row[colExternalIDs]),
+		Options:     anyStringMap(row[colOptions]),
+	}
+}
+
+func optionalString(value any) *string {
+	if s := anyString(value); s != "" {
+		return &s
+	}
+	values := anyStringSlice(value)
+	if len(values) > 0 {
+		return &values[0]
+	}
+	return nil
+}
+
+func optionalInt(value any) *int {
+	if value == nil {
+		return nil
+	}
+	i := anyInt(value)
+	return &i
+}
+
+func anyBool(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	default:
+		return false
+	}
+}
+
+func optionalBool(value any) *bool {
+	if value == nil {
+		return nil
+	}
+	v := anyBool(value)
+	return &v
+}
+
+func stringPtr(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }

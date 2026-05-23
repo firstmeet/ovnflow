@@ -38,6 +38,9 @@ type dbClient struct {
 	database string
 	address  string
 	raw      ovsclient.Client
+	executor executor
+	schema   *SchemaRegistry
+	watches  *watchManager
 }
 
 // Connect creates and connects all configured OVN/OVS clients.
@@ -103,7 +106,9 @@ func connectDB(ctx context.Context, database, address string) (*dbClient, error)
 		raw.Close()
 		return nil, classifyContext(err, database, "", "monitor", "")
 	}
-	return &dbClient{database: database, address: address, raw: raw}, nil
+	d := &dbClient{database: database, address: address, raw: raw, executor: raw, schema: newSchemaRegistry(database, raw.Schema())}
+	d.watches = newWatchManager(d)
+	return d, nil
 }
 
 func (d *dbClient) close() {

@@ -14,8 +14,18 @@ jobs:
           go-version-file: go.mod
       - run: go test -count=1 ./...
 
+  unit-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 ./...
+
   integration-linux:
     runs-on: ubuntu-22.04
+    needs: unit-linux
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -36,6 +46,7 @@ jobs:
           OVNFLOW_OVS_ADDR: tcp:127.0.0.1:6640
           OVNFLOW_OVN_NB_ADDR: tcp:127.0.0.1:6641
           OVNFLOW_OVN_SB_ADDR: tcp:127.0.0.1:6642
+          OVNFLOW_V02_SCHEMA_CHECKS: "1"
       - if: always()
         run: docker compose logs
       - if: always()

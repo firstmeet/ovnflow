@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -49,6 +50,22 @@ func validateExternalID(key string) error {
 func ovsSet(values ...any) libovsdb.OvsSet {
 	set, _ := libovsdb.NewOvsSet(values)
 	return set
+}
+
+func ovsSetFromSlice(values any) libovsdb.OvsSet {
+	if values == nil {
+		return libovsdb.OvsSet{}
+	}
+	value := reflect.ValueOf(values)
+	if value.Kind() != reflect.Slice {
+		set, _ := libovsdb.NewOvsSet(values)
+		return set
+	}
+	items := make([]any, 0, value.Len())
+	for i := 0; i < value.Len(); i++ {
+		items = append(items, value.Index(i).Interface())
+	}
+	return ovsSet(items...)
 }
 
 func stringSet(values []string) libovsdb.OvsSet {
@@ -128,8 +145,10 @@ func classifyTransactError(err error, database, table, op, object string) error 
 	switch {
 	case strings.Contains(msg, "constraint violation"), strings.Contains(msg, "duplicate"):
 		return wrap(ErrorAlreadyExists, database, table, op, object, "", err)
-	case strings.Contains(msg, "not found"), strings.Contains(msg, "not exist"), strings.Contains(msg, "referential integrity"):
+	case strings.Contains(msg, "not found"), strings.Contains(msg, "not exist"):
 		return wrap(ErrorNotFound, database, table, op, object, "", err)
+	case strings.Contains(msg, "referential integrity"):
+		return wrap(ErrorConflict, database, table, op, object, "", err)
 	default:
 		var netErr net.Error
 		if errors.As(err, &netErr) {
@@ -149,11 +168,10 @@ func checkOperationResults(results []libovsdb.OperationResult, database, table, 
 			msg += ": " + result.Details
 		}
 		kind := ErrorConflict
-		if strings.Contains(msg, "constraint") || strings.Contains(msg, "duplicate") {
-			kind = ErrorAlreadyExists
-		}
-		if strings.Contains(msg, "referential integrity") || strings.Contains(msg, "not found") || strings.Contains(msg, "not exist") {
+		if strings.Contains(msg, "not found") || strings.Contains(msg, "not exist") {
 			kind = ErrorNotFound
+		} else if strings.Contains(msg, "constraint") || strings.Contains(msg, "duplicate") {
+			kind = ErrorAlreadyExists
 		}
 		return wrap(kind, database, table, op, object, msg, nil)
 	}
@@ -292,6 +310,39 @@ func rowUUIDSliceValue(row libovsdb.Row, column string) []string {
 	}
 }
 
+func rowOptionalUUIDValue(row libovsdb.Row, column string) *string {
+	values := rowUUIDSliceValue(row, column)
+	if len(values) == 0 {
+		return nil
+	}
+	value := values[0]
+	return &value
+}
+
+func rowIntUUIDMapValue(row libovsdb.Row, column string) map[int]string {
+	value, ok := row[column]
+	if !ok {
+		return nil
+	}
+	out := map[int]string{}
+	switch typed := value.(type) {
+	case map[int]string:
+		return typed
+	case libovsdb.OvsMap:
+		for k, v := range typed.GoMap {
+			key, keyOK := anyIntValue(k)
+			val, valOK := anyUUIDString(v)
+			if keyOK && valOK {
+				out[key] = val
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func rowStringMapValue(row libovsdb.Row, column string) map[string]string {
 	value, ok := row[column]
 	if !ok {
@@ -314,6 +365,30 @@ func rowStringMapValue(row libovsdb.Row, column string) map[string]string {
 		return nil
 	}
 	return out
+}
+
+func anyIntValue(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	default:
+		return 0, false
+	}
+}
+
+func anyUUIDString(value any) (string, bool) {
+	switch typed := value.(type) {
+	case libovsdb.UUID:
+		return typed.GoUUID, typed.GoUUID != ""
+	case string:
+		return typed, typed != ""
+	default:
+		return "", false
+	}
 }
 
 func containsString(values []string, want string) bool {

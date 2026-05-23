@@ -4,6 +4,15 @@
 [`libovsdb`](https://github.com/ovn-kubernetes/libovsdb) for production OVSDB
 connections, schema monitoring, typed models, watches, and transactions.
 
+The current SDK surface covers:
+
+| Area | Coverage |
+| --- | --- |
+| OVN Northbound | logical switch/port plus router, router port, ACL, NAT, load balancer, DHCP, DNS, QoS, meter, port group, address set, gateway/HA/BFD builders |
+| OVN Southbound | typed list/get/watch for chassis, port binding, datapath, logical flow, MAC/FDB, multicast, service monitor, RBAC, meter, DNS, and BFD |
+| Open_vSwitch | bridge/port/interface lifecycle plus controller, manager, mirror, QoS, queue, flow table, NetFlow, sFlow, IPFIX, SSL, and AutoAttach fluent table APIs |
+| Runtime | schema-aware `TableRef` create/ensure/update/delete/get/list/watch with optional columns and map/set mutations |
+
 ```go
 ctx := context.Background()
 client, err := ovnflow.Connect(ctx, ovnflow.ConfigFromEnv())
@@ -50,8 +59,25 @@ $env:OVNFLOW_OVN_SB_ADDR="tcp:172.27.192.120:6642"
 go test -tags=integration ./...
 ```
 
+Optional v0.2 readiness checks are also integration-tagged. They are read-only
+and validate the NB, SB, and OVS runtime schemas:
+
+```powershell
+$env:OVNFLOW_V02_SCHEMA_CHECKS="1"
+go test -tags=integration ./...
+```
+
+Runnable examples live under `examples/`:
+
+```powershell
+go run ./examples/logical_switch
+go run ./examples/local_ovs
+go run ./examples/southbound_watch
+```
+
 See [Windows + WSL integration tests](docs/windows-wsl-integration.md) for WSL
 listener setup, safety settings, and Docker/CI notes.
 
-See [v0.1 scope](docs/v0.1-scope.md) for the current API coverage and
-acceptance matrix.
+See [v0.1 scope](docs/v0.1-scope.md) for current API coverage and
+[v0.2 scope](docs/v0.2-scope.md) for the v0.2 API surface, acceptance matrix,
+and integration-test gates.

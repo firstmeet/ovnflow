@@ -369,7 +369,7 @@ func dialOVSDBOrSkip(t *testing.T, address string) *ovsdbjson.Client {
 	defer cancel()
 	client, err := ovsdbjson.Dial(ctx, address)
 	if err != nil {
-		t.Skipf("OVSDB endpoint %s is not reachable: %v. Check WSL with `ss -lntp | grep -E '6640|6641|6642'` and expose services with `ovs-vsctl set-manager ptcp:6640:0.0.0.0`, `ovn-nbctl set-connection ptcp:6641:0.0.0.0`, `ovn-sbctl set-connection ptcp:6642:0.0.0.0`.", address, err)
+		t.Skipf("OVSDB endpoint %s is not reachable: %v. %s", address, err, integrationTroubleshootingHint())
 	}
 	return client
 }
@@ -384,9 +384,13 @@ func connectSDKOrSkip(t *testing.T, cfg IntegrationConfig) *Client {
 		OVNSBAddr: cfg.OVNSBAddr,
 	})
 	if err != nil {
-		t.Skipf("SDK could not connect to WSL OVN/OVS endpoints: %v", err)
+		t.Skipf("SDK could not connect to WSL OVN/OVS endpoints: %v. %s", err, integrationTroubleshootingHint())
 	}
 	return client
+}
+
+func integrationTroubleshootingHint() string {
+	return "Check WSL with `ss -lntp | grep -E '6640|6641|6642'` and expose services with `ovs-vsctl set-manager ptcp:6640:0.0.0.0`, `ovn-nbctl set-connection ptcp:6641:0.0.0.0`, `ovn-sbctl set-connection ptcp:6642:0.0.0.0`."
 }
 
 func requireDatabase(t *testing.T, client *ovsdbjson.Client, expected string) {

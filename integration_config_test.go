@@ -31,11 +31,11 @@ func TestLoadIntegrationConfigFromEnvDefaults(t *testing.T) {
 }
 
 func TestLoadIntegrationConfigFromEnvOverrides(t *testing.T) {
-	t.Setenv(EnvOVSAddr, "tcp:172.27.192.120:6640")
-	t.Setenv(EnvOVNNBAddr, "tcp:172.27.192.120:6641")
-	t.Setenv(EnvOVNSBAddr, "tcp:172.27.192.120:6642")
-	t.Setenv(EnvTestResourcePrefix, "case-")
-	t.Setenv(EnvTestBridge, "br-case")
+	t.Setenv(EnvOVSAddr, " tcp:172.27.192.120:6640 ")
+	t.Setenv(EnvOVNNBAddr, " tcp:172.27.192.120:6641 ")
+	t.Setenv(EnvOVNSBAddr, " tcp:172.27.192.120:6642 ")
+	t.Setenv(EnvTestResourcePrefix, " case- ")
+	t.Setenv(EnvTestBridge, " br-case ")
 	t.Setenv(EnvAllowBRInt, "yes")
 
 	cfg := LoadIntegrationConfigFromEnv()
@@ -100,5 +100,27 @@ func TestIntegrationConfigRejectsNonTCPEndpoints(t *testing.T) {
 	cfg.OVSAddr = "tcp:127.0.0.1:6640"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() with tcp endpoints = %v", err)
+	}
+}
+
+func TestIntegrationConfigRejectsEmptySafetyNames(t *testing.T) {
+	base := IntegrationConfig{
+		OVSAddr:        "tcp:127.0.0.1:6640",
+		OVNNBAddr:      "tcp:127.0.0.1:6641",
+		OVNSBAddr:      "tcp:127.0.0.1:6642",
+		ResourcePrefix: DefaultIntegrationResourcePrefix,
+		BridgeName:     DefaultIntegrationBridge,
+	}
+
+	cfg := base
+	cfg.ResourcePrefix = " "
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() succeeded with blank resource prefix, want error")
+	}
+
+	cfg = base
+	cfg.BridgeName = " "
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() succeeded with blank bridge name, want error")
 	}
 }

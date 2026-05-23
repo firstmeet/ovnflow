@@ -1,0 +1,133 @@
+package ovnflow
+
+import (
+	"testing"
+
+	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
+)
+
+func TestRowMatchesConditionsSupportsNameAndUUIDIdentity(t *testing.T) {
+	row := Row{
+		colUUID: "row-uuid",
+		colName: "ls-web",
+	}
+
+	conditions := []libovsdb.Condition{
+		libovsdb.NewCondition(colName, libovsdb.ConditionEqual, "ls-web"),
+		libovsdb.NewCondition(colUUID, libovsdb.ConditionEqual, uuidValue("row-uuid")),
+	}
+	if !rowMatches(conditions, row) {
+		t.Fatalf("rowMatches() = false, want true")
+	}
+
+	conditions[0] = libovsdb.NewCondition(colName, libovsdb.ConditionEqual, "other")
+	if rowMatches(conditions, row) {
+		t.Fatalf("rowMatches() = true, want false")
+	}
+}
+
+func TestRowEventMatchesUpdateWhenOldOrNewMatches(t *testing.T) {
+	conditions := []libovsdb.Condition{
+		libovsdb.NewCondition(colName, libovsdb.ConditionEqual, "ls-web"),
+	}
+	event := RowEvent{
+		Type: EventUpdate,
+		Old:  Row{colName: "ls-web"},
+		New:  Row{colName: "ls-renamed"},
+	}
+	if !eventMatches(conditions, event) {
+		t.Fatal("eventMatches() = false, want true for old matching row")
+	}
+}
+
+func TestDecodeModelRowUsesOVSDBTags(t *testing.T) {
+	row := decodeModelRow(&SBPortBinding{
+		UUID:        "pb-uuid",
+		LogicalPort: "lp0",
+		ExternalIDs: map[string]string{"owner": "test"},
+	})
+	if got := anyString(row[colUUID]); got != "pb-uuid" {
+		t.Fatalf("decoded _uuid = %q, want pb-uuid: %#v", got, row)
+	}
+	if got := anyString(row[colLogicalPort]); got != "lp0" {
+		t.Fatalf("decoded logical_port = %q, want lp0: %#v", got, row)
+	}
+	if got := anyStringMap(row[colExternalIDs])["owner"]; got != "test" {
+		t.Fatalf("decoded external_ids.owner = %q, want test: %#v", got, row)
+	}
+}
+
+func TestWatchSubscriptionFanoutCancelAndOverflow(t *testing.T) {
+	manager := newWatchManager(&dbClient{database: dbOVNSouthbound})
+
+	errsA := make(chan error, 1)
+	errsB := make(chan error, 1)
+	eventsA := make(chan RowEvent, 1)
+	eventsB := make(chan RowEvent, 1)
+	subA := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: eventsA, errs: errsA, done: make(chan struct{})}
+	subB := &rowWatchSubscription{
+		id:     2,
+		m:      manager,
+		table:  tablePortBinding,
+		where:  []libovsdb.Condition{libovsdb.NewCondition(colLogicalPort, libovsdb.ConditionEqual, "lp0")},
+		events: eventsB,
+		errs:   errsB,
+		done:   make(chan struct{}),
+	}
+	manager.byTable[tablePortBinding] = map[uint64]*rowWatchSubscription{subA.id: subA, subB.id: subB}
+
+	event := RowEvent{Type: EventAdd, New: Row{colLogicalPort: "lp0"}}
+	manager.publish(tablePortBinding, event)
+	if got := <-eventsA; got.Type != EventAdd {
+		t.Fatalf("subscriber A got %s, want add", got.Type)
+	}
+	if got := <-eventsB; got.Type != EventAdd {
+		t.Fatalf("subscriber B got %s, want add", got.Type)
+	}
+
+	eventsA <- event
+	if subA.offer(event) {
+		t.Fatal("offer succeeded with a full subscriber queue, want overflow")
+	}
+	if !IsKind(<-errsA, ErrorPartial) {
+		t.Fatal("subscriber A overflow did not report partial error")
+	}
+	if !subA.closed.Load() {
+		t.Fatal("subscriber A was not canceled after overflow")
+	}
+
+	subB.cancel()
+	manager.publish(tablePortBinding, RowEvent{Type: EventDelete, Old: Row{colLogicalPort: "lp0"}})
+	select {
+	case got := <-eventsB:
+		t.Fatalf("canceled subscriber received event %#v", got)
+	default:
+	}
+}
+
+func TestWatchSubscriptionOverflowThenPublishDoesNotPanic(t *testing.T) {
+	manager := newWatchManager(&dbClient{database: dbOVNSouthbound})
+	errs := make(chan error, 1)
+	events := make(chan RowEvent, 1)
+	sub := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: events, errs: errs, done: make(chan struct{})}
+	manager.byTable[tablePortBinding] = map[uint64]*rowWatchSubscription{sub.id: sub}
+
+	event := RowEvent{Type: EventAdd, New: Row{colLogicalPort: "lp0"}}
+	events <- event
+	if sub.offer(event) {
+		t.Fatal("offer succeeded with a full subscriber queue, want overflow")
+	}
+	if !IsKind(<-errs, ErrorPartial) {
+		t.Fatal("subscriber overflow did not report partial error")
+	}
+
+	manager.publish(tablePortBinding, event)
+	select {
+	case got := <-events:
+		if got.Type != EventAdd {
+			t.Fatalf("queued event type = %s, want add", got.Type)
+		}
+	default:
+		t.Fatal("original queued event was unexpectedly removed")
+	}
+}
