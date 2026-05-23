@@ -307,6 +307,59 @@ func TestWatchManagerInitializesOnceUnderConcurrentWatch(t *testing.T) {
 	}
 }
 
+func TestTableWatchCancelRemovesSubscriptionAndStopsPoller(t *testing.T) {
+	db := &dbClient{
+		database: dbOVNNorthbound,
+		schema: newSchemaRegistry(dbOVNNorthbound, databaseSchemaWithColumns(dbOVNNorthbound, map[string][]string{
+			tableLogicalSwitch: {colName},
+		})),
+		executor: &nbRecordingExecutor{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	events, _ := db.Table(tableLogicalSwitch).Watch(ctx)
+
+	waitForWatchSubscriptions(t, db.watchManager(), tableLogicalSwitch, 1)
+	cancel()
+	waitForWatchSubscriptions(t, db.watchManager(), tableLogicalSwitch, 0)
+
+	select {
+	case _, ok := <-events:
+		if ok {
+			t.Fatal("watch event channel delivered an event after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watch event channel did not close after cancellation")
+	}
+}
+
+func TestTableWatchConcurrentSubscribeCancelLeavesNoSubscriptions(t *testing.T) {
+	db := &dbClient{
+		database: dbOVNNorthbound,
+		schema: newSchemaRegistry(dbOVNNorthbound, databaseSchemaWithColumns(dbOVNNorthbound, map[string][]string{
+			tableLogicalSwitch: {colName},
+		})),
+		executor: &nbRecordingExecutor{},
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithCancel(context.Background())
+			events, _ := db.Table(tableLogicalSwitch).Watch(ctx)
+			cancel()
+			select {
+			case <-events:
+			case <-time.After(time.Second):
+				t.Error("watch event channel did not close after cancellation")
+			}
+		}()
+	}
+	wg.Wait()
+	waitForWatchSubscriptions(t, db.watchManager(), tableLogicalSwitch, 0)
+}
+
 func TestWatchSubscriptionDoesNotReportLateErrorAfterCancel(t *testing.T) {
 	manager := newWatchManager(&dbClient{database: dbOVNSouthbound})
 	errs := make(chan error, 1)
@@ -321,5 +374,23 @@ func TestWatchSubscriptionDoesNotReportLateErrorAfterCancel(t *testing.T) {
 	case err := <-errs:
 		t.Fatalf("received late error after cancel: %v", err)
 	default:
+	}
+}
+
+func waitForWatchSubscriptions(t *testing.T, manager *watchManager, table string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		manager.mu.RLock()
+		got := len(manager.byTable[table])
+		_, pollerRunning := manager.pollOnce[table]
+		manager.mu.RUnlock()
+		if got == want && (want > 0 || !pollerRunning) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("watch subscriptions for %s = %d, poller running = %v, want %d", table, got, pollerRunning, want)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
