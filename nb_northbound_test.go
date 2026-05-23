@@ -660,6 +660,65 @@ func TestNBDeleteReportsScalarStrongReferenceConflict(t *testing.T) {
 	}
 }
 
+func TestNBDeleteUnreferencesSameTableSetReferrers(t *testing.T) {
+	db := testNBDBClient(t)
+	const sameTableRefs = "same_table_refs"
+	db.schema.schema.Tables[tableLogicalRouterPort].Columns[sameTableRefs] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Logical_Router_Port"},"min":0,"max":"unlimited"}}`)
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("lrp-uuid")}}},
+			{Rows: []libovsdb.Row{
+				{colUUID: uuidValue("lrp-uuid")},
+				{colUUID: uuidValue("peer-lrp-uuid")},
+			}},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).TableBy(tableLogicalRouterPort, colName, "lrp0").Delete().Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Delete() = %v", err)
+	}
+	if len(rec.ops) != 4 {
+		t.Fatalf("ops = %d, want select target/select refs/mutate peer/delete target: %#v", len(rec.ops), rec.ops)
+	}
+	cleanup := rec.ops[2]
+	if cleanup.Op != libovsdb.OperationMutate || cleanup.Table != tableLogicalRouterPort {
+		t.Fatalf("cleanup op = %#v, want same-table mutate", cleanup)
+	}
+	if cleanup.Where[0].Value != uuidValue("peer-lrp-uuid") {
+		t.Fatalf("cleanup where = %#v, want peer UUID only", cleanup.Where)
+	}
+}
+
+func TestNBDeleteReportsSameTableScalarStrongReferenceConflict(t *testing.T) {
+	db := testNBDBClient(t)
+	const sameTableScalar = "same_table_scalar"
+	db.schema.schema.Tables[tableLogicalRouterPort].Columns[sameTableScalar] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Logical_Router_Port"}}}`)
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("lrp-uuid")}}},
+			{Rows: []libovsdb.Row{
+				{colUUID: uuidValue("lrp-uuid")},
+				{colUUID: uuidValue("peer-lrp-uuid")},
+			}},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).TableBy(tableLogicalRouterPort, colName, "lrp0").Delete().Execute(context.Background())
+	if !IsKind(err, ErrorConflict) {
+		t.Fatalf("Delete() = %v, want ErrorConflict for same-table scalar strong reference", err)
+	}
+	for _, op := range rec.ops {
+		if op.Op == libovsdb.OperationMutate && op.Table == tableLogicalRouterPort && len(op.Mutations) > 0 && op.Mutations[0].Column == sameTableScalar {
+			t.Fatalf("unexpected scalar UUID mutate: %#v; ops=%#v", op, rec.ops)
+		}
+	}
+}
+
 func TestTableRefEnsureHandlesConcurrentInsertRace(t *testing.T) {
 	db := testNBDBClient(t)
 	rec := &nbRecordingExecutor{

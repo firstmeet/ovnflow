@@ -426,59 +426,7 @@ func (b *TableBuilder) executeOVSManagerDelete(ctx context.Context) error {
 }
 
 func (d *dbClient) ovsUnreferenceOps(ctx context.Context, targetTable, targetUUID string) ([]libovsdb.Operation, error) {
-	var ops []libovsdb.Operation
-	for tableName := range d.schema.schema.Tables {
-		if tableName == targetTable {
-			continue
-		}
-		for _, ref := range d.schema.ReferenceColumnInfos(tableName, targetTable) {
-			switch ref.Kind {
-			case referenceColumnMapUUID:
-				rows, err := newTableRef(d, tableName, "", "").selectRows(ctx, nil, []string{colUUID, ref.Name})
-				if err != nil {
-					return nil, err
-				}
-				for _, row := range rows {
-					referrerUUID := anyString(row[colUUID])
-					deleteKeys := ovsMapDeleteKeysForUUID(row[ref.Name], targetUUID, ref.KeyRef, ref.ValueRef)
-					if referrerUUID == "" || len(deleteKeys) == 0 {
-						continue
-					}
-					ops = append(ops, ovsUnreferenceMapOp(tableName, ref.Name, referrerUUID, deleteKeys...))
-				}
-			case referenceColumnSetUUID:
-				rows, err := newTableRef(d, tableName, "", "").selectRows(ctx,
-					[]libovsdb.Condition{libovsdb.NewCondition(ref.Name, libovsdb.ConditionIncludes, uuidValue(targetUUID))},
-					[]string{colUUID},
-				)
-				if err != nil {
-					return nil, err
-				}
-				for _, row := range rows {
-					referrerUUID := anyString(row[colUUID])
-					if referrerUUID == "" {
-						continue
-					}
-					ops = append(ops, ovsUnreferenceUUIDSetOp(tableName, ref.Name, referrerUUID, targetUUID))
-				}
-			case referenceColumnScalarUUID:
-				if ref.Reference == libovsdb.Weak {
-					continue
-				}
-				rows, err := newTableRef(d, tableName, "", "").selectRows(ctx,
-					[]libovsdb.Condition{libovsdb.NewCondition(ref.Name, libovsdb.ConditionEqual, uuidValue(targetUUID))},
-					[]string{colUUID},
-				)
-				if err != nil {
-					return nil, err
-				}
-				if len(rows) > 0 {
-					return nil, wrap(ErrorConflict, dbOpenVSwitch, targetTable, "delete", targetUUID, "row is still referenced by "+tableName+"."+ref.Name, nil)
-				}
-			}
-		}
-	}
-	return ops, nil
+	return d.referenceCleanupOps(ctx, targetTable, targetUUID, dbOpenVSwitch)
 }
 
 func ovsUnreferenceUUIDSetOp(tableName, column, referrerUUID, targetUUID string) libovsdb.Operation {

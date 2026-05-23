@@ -622,11 +622,15 @@ func (d *dbClient) unreferenceOps(ctx context.Context, targetTable, targetUUID s
 	if targetTable == "" || targetUUID == "" || d == nil || d.schema == nil {
 		return nil, nil
 	}
+	return d.referenceCleanupOps(ctx, targetTable, targetUUID, d.database)
+}
+
+func (d *dbClient) referenceCleanupOps(ctx context.Context, targetTable, targetUUID, database string) ([]libovsdb.Operation, error) {
+	if targetTable == "" || targetUUID == "" || d == nil || d.schema == nil {
+		return nil, nil
+	}
 	var ops []libovsdb.Operation
 	for tableName := range d.schema.schema.Tables {
-		if tableName == targetTable {
-			continue
-		}
 		for _, ref := range d.schema.ReferenceColumnInfos(tableName, targetTable) {
 			switch ref.Kind {
 			case referenceColumnMapUUID:
@@ -636,6 +640,9 @@ func (d *dbClient) unreferenceOps(ctx context.Context, targetTable, targetUUID s
 				}
 				for _, row := range rows {
 					referrerUUID := anyString(row[colUUID])
+					if tableName == targetTable && referrerUUID == targetUUID {
+						continue
+					}
 					deleteKeys := ovsMapDeleteKeysForUUID(row[ref.Name], targetUUID, ref.KeyRef, ref.ValueRef)
 					if referrerUUID == "" || len(deleteKeys) == 0 {
 						continue
@@ -652,6 +659,9 @@ func (d *dbClient) unreferenceOps(ctx context.Context, targetTable, targetUUID s
 				}
 				for _, row := range rows {
 					referrerUUID := anyString(row[colUUID])
+					if tableName == targetTable && referrerUUID == targetUUID {
+						continue
+					}
 					if referrerUUID == "" {
 						continue
 					}
@@ -668,8 +678,12 @@ func (d *dbClient) unreferenceOps(ctx context.Context, targetTable, targetUUID s
 				if err != nil {
 					return nil, err
 				}
-				if len(rows) > 0 {
-					return nil, wrap(ErrorConflict, d.database, targetTable, "delete", targetUUID, fmt.Sprintf("row is still referenced by %s.%s", tableName, ref.Name), nil)
+				for _, row := range rows {
+					referrerUUID := anyString(row[colUUID])
+					if tableName == targetTable && referrerUUID == targetUUID {
+						continue
+					}
+					return nil, wrap(ErrorConflict, database, targetTable, "delete", targetUUID, fmt.Sprintf("row is still referenced by %s.%s", tableName, ref.Name), nil)
 				}
 			}
 		}

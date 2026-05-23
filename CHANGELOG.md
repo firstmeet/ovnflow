@@ -29,6 +29,8 @@ All notable changes to `ovnflow` are tracked here.
 - Delete cleanup now distinguishes scalar UUID references from set/map UUID
   references and reports `ErrorConflict` for scalar strong references instead
   of issuing invalid mutate operations.
+- Delete cleanup now handles same-table UUID set/map referrers while ignoring
+  the target row itself.
 - OVS bridge and port delete paths now keep shared Port and Interface rows
   instead of deleting objects still referenced by other rows.
 - CI now includes `go vet` and Linux race testing.
