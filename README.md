@@ -2,7 +2,7 @@
 
 `ovnflow` is a fluent Go SDK for OVN and Open vSwitch. The SDK core uses
 [`libovsdb`](https://github.com/ovn-kubernetes/libovsdb) for production OVSDB
-connections, schema monitoring, typed models, watches, and transactions.
+connections, runtime schema discovery, watches, and transactions.
 
 ```powershell
 go get github.com/firstmeet/ovnflow

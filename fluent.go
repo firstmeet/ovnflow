@@ -103,6 +103,13 @@ func (r *TableRef) WhereCondition(column string, fn libovsdb.ConditionFunction, 
 	return &next
 }
 
+// WhereConditions adds prebuilt OVSDB conditions to this table reference.
+func (r *TableRef) WhereConditions(conditions ...libovsdb.Condition) *TableRef {
+	next := *r
+	next.conditions = append(append([]libovsdb.Condition{}, r.conditions...), conditions...)
+	return &next
+}
+
 func (r *TableRef) withDefaultMap(column string, values map[string]string) *TableRef {
 	next := *r
 	next.defaultMutations = append(append([]libovsdb.Mutation{}, r.defaultMutations...), *libovsdb.NewMutation(column, libovsdb.MutateOperationInsert, ovsMap(values)))
@@ -424,6 +431,9 @@ func (b *TableBuilder) validate() error {
 }
 
 func (b *TableBuilder) executeCreate(ctx context.Context, ensure bool) error {
+	if b.ref != nil && b.ref.db != nil && b.ref.db.database == dbOpenVSwitch && b.ref.table == tableManager {
+		return b.executeOVSManagerCreate(ctx, ensure)
+	}
 	if ensure && len(b.ref.identityConditions()) > 0 {
 		rows, err := b.ref.selectRows(ctx, b.ref.identityConditions(), []string{colUUID})
 		if err != nil {
@@ -506,7 +516,10 @@ func (b *TableBuilder) executeDelete(ctx context.Context) error {
 		if id == "" {
 			return wrap(ErrorConflict, b.ref.db.database, b.ref.table, string(b.mode), b.ref.identityValue, "row UUID missing", nil)
 		}
-		refOps := b.ref.db.genericUnreferenceOps(b.ref.table, id)
+		refOps, err := b.ref.db.unreferenceOps(ctx, b.ref.table, id)
+		if err != nil {
+			return err
+		}
 		ops = append(ops, refOps...)
 		ops = append(ops, libovsdb.Operation{
 			Op:    libovsdb.OperationDelete,
@@ -604,9 +617,9 @@ func (d *dbClient) validateOperationColumns(op libovsdb.Operation) error {
 	return d.schema.RequireConditionColumns(op.Table, op.Where...)
 }
 
-func (d *dbClient) genericUnreferenceOps(targetTable, targetUUID string) []libovsdb.Operation {
+func (d *dbClient) unreferenceOps(ctx context.Context, targetTable, targetUUID string) ([]libovsdb.Operation, error) {
 	if targetTable == "" || targetUUID == "" || d == nil || d.schema == nil {
-		return nil
+		return nil, nil
 	}
 	var ops []libovsdb.Operation
 	for tableName := range d.schema.schema.Tables {
@@ -614,17 +627,39 @@ func (d *dbClient) genericUnreferenceOps(targetTable, targetUUID string) []libov
 			continue
 		}
 		for _, column := range d.schema.ReferenceColumns(tableName, targetTable) {
-			ops = append(ops, libovsdb.Operation{
-				Op:    libovsdb.OperationMutate,
-				Table: tableName,
-				Where: []libovsdb.Condition{},
-				Mutations: []libovsdb.Mutation{
-					*libovsdb.NewMutation(column, libovsdb.MutateOperationDelete, uuidSet(targetUUID)),
-				},
-			})
+			columnSchema := d.schema.column(tableName, column)
+			if columnSchema != nil && columnSchema.Type == libovsdb.TypeMap {
+				rows, err := newTableRef(d, tableName, "", "").selectRows(ctx, nil, []string{colUUID, column})
+				if err != nil {
+					return nil, err
+				}
+				for _, row := range rows {
+					referrerUUID := anyString(row[colUUID])
+					deleteKeys := ovsMapDeleteKeysForUUID(row[column], targetUUID)
+					if referrerUUID == "" || len(deleteKeys) == 0 {
+						continue
+					}
+					ops = append(ops, ovsUnreferenceMapOp(tableName, column, referrerUUID, deleteKeys...))
+				}
+				continue
+			}
+			rows, err := newTableRef(d, tableName, "", "").selectRows(ctx,
+				[]libovsdb.Condition{libovsdb.NewCondition(column, libovsdb.ConditionIncludes, uuidValue(targetUUID))},
+				[]string{colUUID},
+			)
+			if err != nil {
+				return nil, err
+			}
+			for _, row := range rows {
+				referrerUUID := anyString(row[colUUID])
+				if referrerUUID == "" {
+					continue
+				}
+				ops = append(ops, ovsUnreferenceUUIDOp(tableName, column, referrerUUID, targetUUID))
+			}
 		}
 	}
-	return ops
+	return ops, nil
 }
 
 func cloneRow(in libovsdb.Row) libovsdb.Row {

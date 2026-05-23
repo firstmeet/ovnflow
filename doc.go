@@ -1,8 +1,8 @@
 // Package ovnflow provides a fluent Go SDK for OVN and Open vSwitch.
 //
 // The SDK uses github.com/ovn-kubernetes/libovsdb for all production OVSDB
-// connections, schema monitoring, typed cache reads, and transactions. The
-// The stable API covers distributed-virtualization control-plane paths that are
+// connections, schema discovery, and transactions. The stable API covers
+// distributed-virtualization control-plane paths that are
 // painful to express with shell commands: OVN Northbound topology, policy,
 // service, DHCP/DNS, QoS, meter, group, HA, gateway, and BFD builders; OVN
 // Southbound typed reads and watches for the main runtime tables; and local

@@ -42,7 +42,7 @@ type dbClient struct {
 	schema   *SchemaRegistry
 
 	watchesMu sync.Mutex
-	watches  *watchManager
+	watches   *watchManager
 }
 
 // Connect creates and connects all configured OVN/OVS clients.
@@ -103,10 +103,6 @@ func connectDB(ctx context.Context, database, address string) (*dbClient, error)
 	if err := validateDatabaseSchema(raw.Schema(), requiredSchema(database)); err != nil {
 		raw.Close()
 		return nil, wrap(ErrorInvalidSchema, database, "", "schema", "", "", err)
-	}
-	if _, err := raw.MonitorAll(ctx); err != nil {
-		raw.Close()
-		return nil, classifyContext(err, database, "", "monitor", "")
 	}
 	d := &dbClient{database: database, address: address, raw: raw, executor: raw, schema: newSchemaRegistry(database, raw.Schema())}
 	d.watches = newWatchManager(d)

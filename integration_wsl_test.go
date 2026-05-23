@@ -350,7 +350,7 @@ func requireIntegrationConfig(t *testing.T) IntegrationConfig {
 	t.Helper()
 	cfg := LoadIntegrationConfigFromEnv()
 	if missing := cfg.MissingEndpoints(); len(missing) > 0 {
-		t.Skipf("integration endpoints are not configured: missing %s. Example: $env:%s=\"tcp:172.27.192.120:6640\"; $env:%s=\"tcp:172.27.192.120:6641\"; $env:%s=\"tcp:172.27.192.120:6642\"",
+		skipOrFailIntegration(t, "integration endpoints are not configured: missing %s. Example: $env:%s=\"tcp:172.27.192.120:6640\"; $env:%s=\"tcp:172.27.192.120:6641\"; $env:%s=\"tcp:172.27.192.120:6642\"",
 			strings.Join(missing, ", "), EnvOVSAddr, EnvOVNNBAddr, EnvOVNSBAddr)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -369,7 +369,7 @@ func dialOVSDBOrSkip(t *testing.T, address string) *ovsdbjson.Client {
 	defer cancel()
 	client, err := ovsdbjson.Dial(ctx, address)
 	if err != nil {
-		t.Skipf("OVSDB endpoint %s is not reachable: %v. %s", address, err, integrationTroubleshootingHint())
+		skipOrFailIntegration(t, "OVSDB endpoint %s is not reachable: %v. %s", address, err, integrationTroubleshootingHint())
 	}
 	return client
 }
@@ -384,9 +384,17 @@ func connectSDKOrSkip(t *testing.T, cfg IntegrationConfig) *Client {
 		OVNSBAddr: cfg.OVNSBAddr,
 	})
 	if err != nil {
-		t.Skipf("SDK could not connect to WSL OVN/OVS endpoints: %v. %s", err, integrationTroubleshootingHint())
+		skipOrFailIntegration(t, "SDK could not connect to WSL OVN/OVS endpoints: %v. %s", err, integrationTroubleshootingHint())
 	}
 	return client
+}
+
+func skipOrFailIntegration(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if LoadIntegrationConfigFromEnv().ShouldRequireEndpoints() {
+		t.Fatalf(format, args...)
+	}
+	t.Skipf(format, args...)
 }
 
 func integrationTroubleshootingHint() string {

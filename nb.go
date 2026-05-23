@@ -320,7 +320,7 @@ func (b *LogicalSwitchBuilder) executeCreateOnce(ctx context.Context, ensure boo
 	if err != nil {
 		return classifyTransactError(err, dbOVNNorthbound, tableLogicalSwitch, string(b.mode), b.name)
 	}
-	return checkOperationResults(results, dbOVNNorthbound, tableLogicalSwitch, string(b.mode), b.name)
+	return ensureAffected(results, mustAffectNonInsertOps(ops), dbOVNNorthbound, tableLogicalSwitch, string(b.mode), b.name)
 }
 
 func (b *LogicalSwitchBuilder) executeDelete(ctx context.Context) error {
@@ -352,6 +352,11 @@ func (b *LogicalSwitchBuilder) executeDelete(ctx context.Context) error {
 	})
 	mustAffect = append(mustAffect, len(ops)-1)
 	for _, portUUID := range portUUIDs {
+		refOps, err := b.client.unreferenceOps(ctx, tableLogicalSwitchPort, portUUID)
+		if err != nil {
+			return err
+		}
+		ops = append(ops, refOps...)
 		ops = append(ops, libovsdb.Operation{
 			Op:    libovsdb.OperationDelete,
 			Table: tableLogicalSwitchPort,

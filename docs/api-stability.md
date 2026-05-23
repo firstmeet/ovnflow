@@ -20,6 +20,8 @@ Compatibility rules:
   connected schema.
 - Required table or column mismatches return `ErrorInvalidSchema`.
 - Production database operations continue to use `libovsdb`.
+- Connected clients are safe for concurrent use. Fluent builders are mutable
+  one-shot values: construct and execute each builder from one goroutine.
 
-Pre-v1 naming artifacts such as file names containing `v02` are internal
-implementation details and are not part of the Go API.
+Repository file names are organized by domain. They are not part of the Go API,
+but the v1.0 tree avoids pre-release naming in production files.

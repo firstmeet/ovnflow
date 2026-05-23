@@ -30,6 +30,11 @@ const (
 	// EnvAllowBRInt must be set to a truthy value before integration tests are
 	// allowed to target br-int directly.
 	EnvAllowBRInt = "OVNFLOW_ALLOW_BR_INT"
+
+	// EnvRequireIntegration turns endpoint/SDK connection skips into failures.
+	// CI and release gates should enable it so regressions cannot hide behind
+	// skipped integration tests.
+	EnvRequireIntegration = "OVNFLOW_REQUIRE_INTEGRATION"
 )
 
 const (
@@ -47,6 +52,7 @@ type IntegrationConfig struct {
 	ResourcePrefix string
 	BridgeName     string
 	AllowBRInt     bool
+	Require        bool
 }
 
 // LoadIntegrationConfigFromEnv reads the Windows + WSL integration-test
@@ -59,6 +65,7 @@ func LoadIntegrationConfigFromEnv() IntegrationConfig {
 		ResourcePrefix: envOrDefault(EnvTestResourcePrefix, DefaultIntegrationResourcePrefix),
 		BridgeName:     envOrDefault(EnvTestBridge, DefaultIntegrationBridge),
 		AllowBRInt:     parseEnvBool(os.Getenv(EnvAllowBRInt)),
+		Require:        parseEnvBool(os.Getenv(EnvRequireIntegration)),
 	}
 }
 
@@ -76,6 +83,12 @@ func (c IntegrationConfig) MissingEndpoints() []string {
 		missing = append(missing, EnvOVNSBAddr)
 	}
 	return missing
+}
+
+// ShouldRequireEndpoints reports whether integration endpoint failures should
+// fail the test process instead of being reported as skips.
+func (c IntegrationConfig) ShouldRequireEndpoints() bool {
+	return c.Require || parseEnvBool(os.Getenv("CI"))
 }
 
 // Validate rejects configuration that could accidentally target production-like

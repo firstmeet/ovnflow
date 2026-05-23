@@ -213,7 +213,9 @@ type LogicalRouterPort struct {
 	ExternalIDs    map[string]string `ovsdb:"external_ids"`
 }
 
-// ACL is an OVN Northbound ACL model.
+// ACL is an OVN Northbound ACL model. Version-specific fields are decoded by
+// the runtime fluent layer and intentionally left out of the libovsdb cache
+// model so older schemas can still connect.
 type ACL struct {
 	UUID        string            `ovsdb:"_uuid"`
 	Name        *string           `ovsdb:"name"`
@@ -225,9 +227,9 @@ type ACL struct {
 	Meter       *string           `ovsdb:"meter"`
 	Severity    *string           `ovsdb:"severity"`
 	Label       int               `ovsdb:"label"`
-	Tier        int               `ovsdb:"tier"`
-	Options     map[string]string `ovsdb:"options"`
 	ExternalIDs map[string]string `ovsdb:"external_ids"`
+	Tier        int
+	Options     map[string]string
 }
 
 // NAT is an OVN Northbound NAT model.
@@ -239,13 +241,13 @@ type NAT struct {
 	LogicalPort       *string           `ovsdb:"logical_port"`
 	ExternalMAC       *string           `ovsdb:"external_mac"`
 	ExternalPortRange string            `ovsdb:"external_port_range"`
-	GatewayPort       *string           `ovsdb:"gateway_port"`
 	AllowedExtIPs     *string           `ovsdb:"allowed_ext_ips"`
 	ExemptedExtIPs    *string           `ovsdb:"exempted_ext_ips"`
 	Match             string            `ovsdb:"match"`
 	Priority          int               `ovsdb:"priority"`
 	Options           map[string]string `ovsdb:"options"`
 	ExternalIDs       map[string]string `ovsdb:"external_ids"`
+	GatewayPort       *string
 }
 
 // LoadBalancer is an OVN Northbound Load_Balancer model.
@@ -273,8 +275,8 @@ type DHCPOptions struct {
 type DNS struct {
 	UUID        string            `ovsdb:"_uuid"`
 	Records     map[string]string `ovsdb:"records"`
-	Options     map[string]string `ovsdb:"options"`
 	ExternalIDs map[string]string `ovsdb:"external_ids"`
+	Options     map[string]string
 }
 
 // QoS is an OVN Northbound QoS model.
@@ -662,22 +664,6 @@ func nbDBModel() (libmodel.ClientDBModel, error) {
 	db, err := libmodel.NewClientDBModel(dbOVNNorthbound, map[string]libmodel.Model{
 		tableLogicalSwitch:     &LogicalSwitch{},
 		tableLogicalSwitchPort: &LogicalSwitchPort{},
-		tableLogicalRouter:     &LogicalRouter{},
-		tableLogicalRouterPort: &LogicalRouterPort{},
-		tableACL:               &ACL{},
-		tableNAT:               &NAT{},
-		tableLoadBalancer:      &LoadBalancer{},
-		tableDHCPOptions:       &DHCPOptions{},
-		tableDNS:               &DNS{},
-		tableQoS:               &QoS{},
-		tableMeter:             &Meter{},
-		tableMeterBand:         &MeterBand{},
-		tablePortGroup:         &PortGroup{},
-		tableAddressSet:        &AddressSet{},
-		tableGatewayChassis:    &GatewayChassis{},
-		tableHAChassis:         &HAChassis{},
-		tableHAChassisGroup:    &HAChassisGroup{},
-		tableBFD:               &BFD{},
 	})
 	if err != nil {
 		return db, err
@@ -689,59 +675,13 @@ func nbDBModel() (libmodel.ClientDBModel, error) {
 		tableLogicalSwitchPort: {
 			{Columns: []libmodel.ColumnKey{{Column: colName}}},
 		},
-		tableLogicalRouter: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableLogicalRouterPort: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableLoadBalancer: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableDHCPOptions: {
-			{Columns: []libmodel.ColumnKey{{Column: colCIDR}}},
-		},
-		tableMeter: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tablePortGroup: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableAddressSet: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableGatewayChassis: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableHAChassis: {
-			{Columns: []libmodel.ColumnKey{{Column: colChassisName}}},
-		},
-		tableHAChassisGroup: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableBFD: {
-			{Columns: []libmodel.ColumnKey{{Column: colLogicalPort}, {Column: colDstIP}}},
-		},
 	})
 	return db, nil
 }
 
 func sbDBModel() (libmodel.ClientDBModel, error) {
 	db, err := libmodel.NewClientDBModel(dbOVNSouthbound, map[string]libmodel.Model{
-		tableChassis:         &SBChassis{},
-		tablePortBinding:     &SBPortBinding{},
-		tableDatapathBinding: &SBDatapathBinding{},
-		tableLogicalFlow:     &SBLogicalFlow{},
-		tableMACBinding:      &SBMACBinding{},
-		tableFDB:             &SBFDB{},
-		tableMulticastGroup:  &SBMulticastGroup{},
-		tableServiceMonitor:  &SBServiceMonitor{},
-		tableRBACRole:        &SBRBACRole{},
-		tableRBACPermission:  &SBRBACPermission{},
-		tableMeter:           &SBMeter{},
-		tableMeterBand:       &SBMeterBand{},
-		tableDNS:             &SBDNS{},
-		tableBFD:             &SBBFD{},
+		tableChassis: &SBChassis{},
 	})
 	if err != nil {
 		return db, err
@@ -750,34 +690,6 @@ func sbDBModel() (libmodel.ClientDBModel, error) {
 		tableChassis: {
 			{Columns: []libmodel.ColumnKey{{Column: colName}}},
 		},
-		tablePortBinding: {
-			{Columns: []libmodel.ColumnKey{{Column: colLogicalPort}}},
-		},
-		tableDatapathBinding: {
-			{Columns: []libmodel.ColumnKey{{Column: colTunnelKey}}},
-		},
-		tableMACBinding: {
-			{Columns: []libmodel.ColumnKey{{Column: colLogicalPort}, {Column: colIP}}},
-		},
-		tableFDB: {
-			{Columns: []libmodel.ColumnKey{{Column: colMAC}, {Column: colDPKey}}},
-		},
-		tableMulticastGroup: {
-			{Columns: []libmodel.ColumnKey{{Column: colDatapath}, {Column: colTunnelKey}}},
-			{Columns: []libmodel.ColumnKey{{Column: colDatapath}, {Column: colName}}},
-		},
-		tableServiceMonitor: {
-			{Columns: []libmodel.ColumnKey{{Column: colLogicalPort}, {Column: colIP}, {Column: colPort}, {Column: colProtocol}}},
-		},
-		tableRBACRole: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableMeter: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableBFD: {
-			{Columns: []libmodel.ColumnKey{{Column: colLogicalPort}, {Column: colDstIP}, {Column: colSrcPort}, {Column: colDisc}}},
-		},
 	})
 	return db, nil
 }
@@ -785,49 +697,9 @@ func sbDBModel() (libmodel.ClientDBModel, error) {
 func ovsDBModel() (libmodel.ClientDBModel, error) {
 	db, err := libmodel.NewClientDBModel(dbOpenVSwitch, map[string]libmodel.Model{
 		tableOpenVSwitch: &OpenVSwitch{},
-		tableBridge:      &OVSBridge{},
-		tablePort:        &OVSPort{},
-		tableInterface:   &OVSInterface{},
-		tableController:  &OVSController{},
-		tableManager:     &OVSManager{},
-		tableMirror:      &OVSMirror{},
-		tableQoS:         &OVSQoS{},
-		tableQueue:       &OVSQueue{},
-		tableFlowTable:   &OVSFlowTable{},
-		tableNetFlow:     &OVSNetFlow{},
-		tableSFlow:       &OVSSFlow{},
-		tableIPFIX:       &OVSIPFIX{},
-		tableSSL:         &OVSSSL{},
-		tableAutoAttach:  &OVSAutoAttach{},
 	})
 	if err != nil {
 		return db, err
 	}
-	db.SetIndexes(map[string][]libmodel.ClientIndex{
-		tableBridge: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tablePort: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableInterface: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableController: {
-			{Columns: []libmodel.ColumnKey{{Column: colTarget}}},
-		},
-		tableManager: {
-			{Columns: []libmodel.ColumnKey{{Column: colTarget}}},
-		},
-		tableMirror: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableFlowTable: {
-			{Columns: []libmodel.ColumnKey{{Column: colName}}},
-		},
-		tableAutoAttach: {
-			{Columns: []libmodel.ColumnKey{{Column: colSystemName}}},
-		},
-	})
 	return db, nil
 }

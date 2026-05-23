@@ -81,23 +81,25 @@ type NATRef struct {
 
 // NATBuilder builds NAT operations.
 type NATBuilder struct {
-	once              useOnce
-	client            *NBClient
-	name              string
-	kind              string
-	logicalIP         string
-	mode              nbMode
-	externalIP        string
-	logicalPort       string
-	externalMAC       string
-	externalPortRange string
-	gatewayPort       string
-	allowedExtIPs     string
-	exemptedExtIPs    string
-	match             string
-	priority          *int
-	options           map[string]string
-	externalIDs       map[string]string
+	once                 useOnce
+	client               *NBClient
+	name                 string
+	kind                 string
+	logicalIP            string
+	mode                 nbMode
+	externalIP           string
+	logicalPort          string
+	externalMAC          string
+	externalPortRange    string
+	externalPortRangeSet bool
+	gatewayPort          string
+	allowedExtIPs        string
+	exemptedExtIPs       string
+	match                string
+	matchSet             bool
+	priority             *int
+	options              map[string]string
+	externalIDs          map[string]string
 }
 
 // LoadBalancerRef identifies one Load_Balancer row by name.

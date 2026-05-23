@@ -28,38 +28,6 @@ func TestOVSBridgeControllerUsesSingularControllerColumn(t *testing.T) {
 	}
 }
 
-func TestOVSBridgeReferencedRowsIncludesUUIDRefs(t *testing.T) {
-	netflow := "netflow-uuid"
-	sflow := "sflow-uuid"
-	ipfix := "ipfix-uuid"
-	autoAttach := "auto-uuid"
-
-	refs := ovsBridgeReferencedRows(OVSBridge{
-		Controllers: []string{"controller-uuid"},
-		Mirrors:     []string{"mirror-uuid"},
-		NetFlow:     &netflow,
-		SFlow:       &sflow,
-		IPFIX:       &ipfix,
-		AutoAttach:  &autoAttach,
-		FlowTables:  map[int]string{0: "flow-table-uuid"},
-	})
-
-	tests := map[string]string{
-		tableController: "controller-uuid",
-		tableMirror:     "mirror-uuid",
-		tableNetFlow:    "netflow-uuid",
-		tableSFlow:      "sflow-uuid",
-		tableIPFIX:      "ipfix-uuid",
-		tableAutoAttach: "auto-uuid",
-		tableFlowTable:  "flow-table-uuid",
-	}
-	for table, uuid := range tests {
-		if !containsString(refs[table], uuid) {
-			t.Fatalf("refs[%s] = %v, want %s", table, refs[table], uuid)
-		}
-	}
-}
-
 func TestOVSBridgeEnsureNewBridgeWithPortAndExternalIDsDoesNotPanic(t *testing.T) {
 	db := testOVSDBClient(t)
 	rec := &recordingExecutor{
@@ -166,6 +134,46 @@ func TestOVSTableDeleteDoesNotRequireUnreferenceMutationsToAffectRows(t *testing
 	}
 }
 
+func TestOVSBridgeDeleteDoesNotCascadeSharedConfigRows(t *testing.T) {
+	db := testOVSDBClient(t)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{
+				colUUID:       uuidValue("br-uuid"),
+				colName:       "br-test",
+				colPorts:      uuidSet("port-uuid"),
+				colController: uuidSet("controller-uuid"),
+				colMirrors:    uuidSet("mirror-uuid"),
+			}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("root-uuid")}}},
+			{Rows: []libovsdb.Row{{
+				colUUID:       uuidValue("port-uuid"),
+				colName:       "p0",
+				colInterfaces: uuidSet("iface-uuid"),
+				colQoS:        uuidValue("qos-uuid"),
+			}}},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").Delete().Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Delete() = %v", err)
+	}
+	for _, op := range rec.ops {
+		if op.Op == libovsdb.OperationDelete {
+			switch op.Table {
+			case tableController, tableMirror, tableQoS, tableNetFlow, tableSFlow, tableIPFIX, tableFlowTable, tableAutoAttach:
+				t.Fatalf("unexpected cascade delete of shared table %s: %#v", op.Table, rec.ops)
+			}
+		}
+	}
+}
+
 func columnSchemaFromJSON(t *testing.T, raw string) *libovsdb.ColumnSchema {
 	t.Helper()
 	var schema libovsdb.ColumnSchema
@@ -177,6 +185,7 @@ func columnSchemaFromJSON(t *testing.T, raw string) *libovsdb.ColumnSchema {
 
 func TestOVSNamedExternalIDEnsureWritesIdentity(t *testing.T) {
 	db := testOVSDBClient(t)
+	db.schema.schema.Tables[tableQoS].Columns[colExternalIDs] = &libovsdb.ColumnSchema{}
 	rec := &recordingExecutor{
 		results: []libovsdb.OperationResult{
 			{Rows: nil},
@@ -195,6 +204,121 @@ func TestOVSNamedExternalIDEnsureWritesIdentity(t *testing.T) {
 	externalIDs := rowStringMapValue(rec.ops[1].Row, colExternalIDs)
 	if externalIDs["name"] != "qos0" {
 		t.Fatalf("insert external_ids = %#v, want name=qos0", rec.ops[1].Row[colExternalIDs])
+	}
+}
+
+func TestOVSManagerEnsureReferencesRootManagerOptions(t *testing.T) {
+	db := testOVSDBClient(t)
+	db.schema.schema.Tables[tableOpenVSwitch].Columns[colManagerOptions] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Manager"},"min":0,"max":"unlimited"}}`)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("root-uuid")}}},
+			{UUID: uuidValue("manager-uuid")},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Manager("ptcp:6640:127.0.0.1").
+		Ensure().
+		WithExternalID("owner", "test").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	if len(rec.ops) != 4 {
+		t.Fatalf("ops = %d, want select manager/select root/insert/mutate root: %#v", len(rec.ops), rec.ops)
+	}
+	if rec.ops[2].Op != libovsdb.OperationInsert || rec.ops[2].Table != tableManager || rec.ops[2].UUIDName == "" {
+		t.Fatalf("manager insert op = %#v", rec.ops[2])
+	}
+	if rec.ops[3].Op != libovsdb.OperationMutate || rec.ops[3].Table != tableOpenVSwitch {
+		t.Fatalf("root reference op = %#v, want Open_vSwitch mutate", rec.ops[3])
+	}
+	if len(rec.ops[3].Where) != 1 || rec.ops[3].Where[0].Column != colUUID {
+		t.Fatalf("root where = %#v, want root UUID", rec.ops[3].Where)
+	}
+	if len(rec.ops[3].Mutations) != 1 || rec.ops[3].Mutations[0].Column != colManagerOptions {
+		t.Fatalf("root mutations = %#v, want manager_options", rec.ops[3].Mutations)
+	}
+}
+
+func TestOVSExtendedTableHelpersSelectExpectedIdentities(t *testing.T) {
+	tests := []struct {
+		name       string
+		ref        func(*OVSClient) *TableRef
+		wantTable  string
+		wantColumn string
+		wantValue  any
+	}{
+		{name: "controller", ref: func(o *OVSClient) *TableRef { return o.Controller("tcp:127.0.0.1:6653") }, wantTable: tableController, wantColumn: colTarget, wantValue: "tcp:127.0.0.1:6653"},
+		{name: "manager", ref: func(o *OVSClient) *TableRef { return o.Manager("ptcp:6640:127.0.0.1") }, wantTable: tableManager, wantColumn: colTarget, wantValue: "ptcp:6640:127.0.0.1"},
+		{name: "mirror", ref: func(o *OVSClient) *TableRef { return o.Mirror("m0") }, wantTable: tableMirror, wantColumn: colName, wantValue: "m0"},
+		{name: "flow table", ref: func(o *OVSClient) *TableRef { return o.FlowTable("ft0") }, wantTable: tableFlowTable, wantColumn: colName, wantValue: "ft0"},
+		{name: "auto attach", ref: func(o *OVSClient) *TableRef { return o.AutoAttach("system0") }, wantTable: tableAutoAttach, wantColumn: colSystemName, wantValue: "system0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := testOVSDBClient(t)
+			db.schema.schema.Tables[tt.wantTable].Columns[colExternalIDs] = &libovsdb.ColumnSchema{}
+			rec := &recordingExecutor{}
+			db.executor = rec
+
+			_, err := tt.ref(&OVSClient{db: db}).Get(context.Background())
+			if err != nil && !IsKind(err, ErrorNotFound) {
+				t.Fatalf("Get() = %v", err)
+			}
+			if len(rec.ops) != 1 {
+				t.Fatalf("ops = %d, want one select: %#v", len(rec.ops), rec.ops)
+			}
+			op := rec.ops[0]
+			if op.Op != libovsdb.OperationSelect || op.Table != tt.wantTable {
+				t.Fatalf("op = %#v, want select %s", op, tt.wantTable)
+			}
+			if len(op.Where) != 1 || op.Where[0].Column != tt.wantColumn || op.Where[0].Value != tt.wantValue {
+				t.Fatalf("where = %#v, want %s == %v", op.Where, tt.wantColumn, tt.wantValue)
+			}
+		})
+	}
+}
+
+func TestOVSNamedExternalIDHelpersUseIncludesCondition(t *testing.T) {
+	tests := []struct {
+		name      string
+		ref       func(*OVSClient) *TableRef
+		wantTable string
+	}{
+		{name: "qos", ref: func(o *OVSClient) *TableRef { return o.QoS("qos0") }, wantTable: tableQoS},
+		{name: "queue", ref: func(o *OVSClient) *TableRef { return o.Queue("queue0") }, wantTable: tableQueue},
+		{name: "netflow", ref: func(o *OVSClient) *TableRef { return o.NetFlow("nf0") }, wantTable: tableNetFlow},
+		{name: "sflow", ref: func(o *OVSClient) *TableRef { return o.SFlow("sf0") }, wantTable: tableSFlow},
+		{name: "ipfix", ref: func(o *OVSClient) *TableRef { return o.IPFIX("ipfix0") }, wantTable: tableIPFIX},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := testOVSDBClient(t)
+			db.schema.schema.Tables[tt.wantTable].Columns[colExternalIDs] = &libovsdb.ColumnSchema{}
+			rec := &recordingExecutor{}
+			db.executor = rec
+
+			_, err := tt.ref(&OVSClient{db: db}).Get(context.Background())
+			if err != nil && !IsKind(err, ErrorNotFound) {
+				t.Fatalf("Get() = %v", err)
+			}
+			if len(rec.ops) != 1 {
+				t.Fatalf("ops = %d, want one select: %#v", len(rec.ops), rec.ops)
+			}
+			op := rec.ops[0]
+			if op.Op != libovsdb.OperationSelect || op.Table != tt.wantTable {
+				t.Fatalf("op = %#v, want select %s", op, tt.wantTable)
+			}
+			if len(op.Where) != 1 || op.Where[0].Column != colExternalIDs || op.Where[0].Function != libovsdb.ConditionIncludes {
+				t.Fatalf("where = %#v, want external_ids includes", op.Where)
+			}
+		})
 	}
 }
 

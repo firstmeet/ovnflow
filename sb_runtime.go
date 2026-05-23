@@ -50,8 +50,8 @@ func (s *SBClient) RBACRole(name string) *TableRef {
 	return s.TableBy(tableRBACRole, colName, name)
 }
 
-func (s *SBClient) RBACPermission(name string) *TableRef {
-	return s.TableBy(tableRBACPermission, colName, name)
+func (s *SBClient) RBACPermission(uuid string) *TableRef {
+	return s.TableBy(tableRBACPermission, colUUID, uuid)
 }
 
 func (s *SBClient) Meter(name string) *TableRef {

@@ -43,6 +43,34 @@ func TestRowEventMatchesUpdateWhenOldOrNewMatches(t *testing.T) {
 	}
 }
 
+func TestRowMatchesConditionFunctions(t *testing.T) {
+	row := Row{
+		colName:        "lp0",
+		colExternalIDs: map[string]string{"owner": "ovnflow", "env": "test"},
+		colPorts:       []string{"p1", "p2"},
+	}
+	tests := []struct {
+		name      string
+		condition libovsdb.Condition
+		want      bool
+	}{
+		{name: "equal", condition: libovsdb.NewCondition(colName, libovsdb.ConditionEqual, "lp0"), want: true},
+		{name: "not equal", condition: libovsdb.NewCondition(colName, libovsdb.ConditionNotEqual, "other"), want: true},
+		{name: "map includes", condition: libovsdb.NewCondition(colExternalIDs, libovsdb.ConditionIncludes, ovsMap(map[string]string{"owner": "ovnflow"})), want: true},
+		{name: "map excludes", condition: libovsdb.NewCondition(colExternalIDs, libovsdb.ConditionExcludes, ovsMap(map[string]string{"owner": "other"})), want: true},
+		{name: "set includes", condition: libovsdb.NewCondition(colPorts, libovsdb.ConditionIncludes, "p2"), want: true},
+		{name: "set excludes", condition: libovsdb.NewCondition(colPorts, libovsdb.ConditionExcludes, "p3"), want: true},
+		{name: "includes missing", condition: libovsdb.NewCondition(colPorts, libovsdb.ConditionIncludes, "p3"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rowMatches([]libovsdb.Condition{tt.condition}, row); got != tt.want {
+				t.Fatalf("rowMatches() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDecodeModelRowUsesOVSDBTags(t *testing.T) {
 	row := decodeModelRow(&SBPortBinding{
 		UUID:        "pb-uuid",

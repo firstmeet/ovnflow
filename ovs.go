@@ -376,7 +376,7 @@ func (b *BridgeBuilder) executeEnsureOnce(ctx context.Context) error {
 	if err != nil {
 		return classifyTransactError(err, dbOpenVSwitch, tableBridge, string(b.mode), b.name)
 	}
-	return checkOperationResults(results, dbOpenVSwitch, tableBridge, string(b.mode), b.name)
+	return ensureAffected(results, mustAffectNonInsertOps(ops), dbOpenVSwitch, tableBridge, string(b.mode), b.name)
 }
 
 func (b *BridgeBuilder) insertBridgeOp(controllerNamedUUIDs []string, portNamedUUIDs ...string) libovsdb.Operation {
@@ -438,29 +438,6 @@ func opsBridgeUUID(ops []libovsdb.Operation) string {
 	return ""
 }
 
-func ovsBridgeReferencedRows(bridge OVSBridge) map[string][]string {
-	refs := map[string][]string{
-		tableController: bridge.Controllers,
-		tableMirror:     bridge.Mirrors,
-	}
-	if bridge.NetFlow != nil {
-		refs[tableNetFlow] = append(refs[tableNetFlow], *bridge.NetFlow)
-	}
-	if bridge.SFlow != nil {
-		refs[tableSFlow] = append(refs[tableSFlow], *bridge.SFlow)
-	}
-	if bridge.IPFIX != nil {
-		refs[tableIPFIX] = append(refs[tableIPFIX], *bridge.IPFIX)
-	}
-	if bridge.AutoAttach != nil {
-		refs[tableAutoAttach] = append(refs[tableAutoAttach], *bridge.AutoAttach)
-	}
-	for _, id := range bridge.FlowTables {
-		refs[tableFlowTable] = append(refs[tableFlowTable], id)
-	}
-	return refs
-}
-
 func (b *BridgeBuilder) executeDelete(ctx context.Context) error {
 	bridges, err := b.client.selectBridges(ctx, b.name)
 	if err != nil {
@@ -477,7 +454,6 @@ func (b *BridgeBuilder) executeDelete(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	bridgeRefs := ovsBridgeReferencedRows(bridges[0])
 
 	var mustAffect []int
 	ops := []libovsdb.Operation{
@@ -496,15 +472,6 @@ func (b *BridgeBuilder) executeDelete(ctx context.Context) error {
 		},
 	}
 	mustAffect = append(mustAffect, 0, 1)
-	for table, ids := range bridgeRefs {
-		for _, id := range uniqueStrings(ids) {
-			ops = append(ops, libovsdb.Operation{
-				Op:    libovsdb.OperationDelete,
-				Table: table,
-				Where: conditionUUID(id),
-			})
-		}
-	}
 	for _, port := range ports {
 		ops = append(ops, libovsdb.Operation{
 			Op:    libovsdb.OperationDelete,
@@ -545,17 +512,9 @@ func (b *BridgeBuilder) executeDeletePort(ctx context.Context) error {
 	if !containsString(bridges[0].Ports, portUUID) {
 		return wrap(ErrorNotFound, dbOpenVSwitch, tablePort, "delete", b.deletePort, "port is not attached to bridge", nil)
 	}
-	attachedPorts, err := b.client.selectPortsByUUID(ctx, bridges[0].Ports)
-	if err != nil {
-		return err
-	}
 	mirrorUUIDs, err := b.client.selectBridgeMirrorsForPort(ctx, bridges[0], portUUID)
 	if err != nil {
 		return err
-	}
-	qosUUID := ""
-	if ports[0].QoS != nil {
-		qosUUID = *ports[0].QoS
 	}
 	var mustAffect []int
 	ops := []libovsdb.Operation{
@@ -582,18 +541,6 @@ func (b *BridgeBuilder) executeDeletePort(ctx context.Context) error {
 			Mutations: []libovsdb.Mutation{
 				*libovsdb.NewMutation(colMirrors, libovsdb.MutateOperationDelete, uuidSet(mirrorUUID)),
 			},
-		})
-		ops = append(ops, libovsdb.Operation{
-			Op:    libovsdb.OperationDelete,
-			Table: tableMirror,
-			Where: conditionUUID(mirrorUUID),
-		})
-	}
-	if qosUUID != "" && !qosUsedByOtherPorts(attachedPorts, portUUID, qosUUID) {
-		ops = append(ops, libovsdb.Operation{
-			Op:    libovsdb.OperationDelete,
-			Table: tableQoS,
-			Where: conditionUUID(qosUUID),
 		})
 	}
 	for _, ifaceUUID := range ports[0].Interfaces {

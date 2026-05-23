@@ -2,10 +2,8 @@ package ovnflow
 
 import (
 	"context"
-	"errors"
 
-	ovsclient "github.com/ovn-kubernetes/libovsdb/client"
-	libmodel "github.com/ovn-kubernetes/libovsdb/model"
+	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 // SBClient exposes OVN Southbound APIs.
@@ -163,63 +161,63 @@ func (s *SBClient) ListBFD(ctx context.Context) ([]SBBFD, error) {
 }
 
 func (s *SBClient) GetChassis(ctx context.Context, name string) (*SBChassis, error) {
-	return getSB(ctx, s, tableChassis, &SBChassis{Name: name}, name)
+	return getSB[*SBChassis](ctx, s, tableChassis, &SBChassis{Name: name}, name)
 }
 
 func (s *SBClient) GetPortBinding(ctx context.Context, logicalPort string) (*SBPortBinding, error) {
-	return getSB(ctx, s, tablePortBinding, &SBPortBinding{LogicalPort: logicalPort}, logicalPort)
+	return getSB[*SBPortBinding](ctx, s, tablePortBinding, &SBPortBinding{LogicalPort: logicalPort}, logicalPort)
 }
 
 func (s *SBClient) GetDatapath(ctx context.Context, tunnelKey int) (*SBDatapathBinding, error) {
-	return getSB(ctx, s, tableDatapathBinding, &SBDatapathBinding{TunnelKey: tunnelKey}, "")
+	return getSB[*SBDatapathBinding](ctx, s, tableDatapathBinding, &SBDatapathBinding{TunnelKey: tunnelKey}, "")
 }
 
 func (s *SBClient) GetDatapathByUUID(ctx context.Context, uuid string) (*SBDatapathBinding, error) {
-	return getSB(ctx, s, tableDatapathBinding, &SBDatapathBinding{UUID: uuid}, uuid)
+	return getSB[*SBDatapathBinding](ctx, s, tableDatapathBinding, &SBDatapathBinding{UUID: uuid}, uuid)
 }
 
 func (s *SBClient) GetLogicalFlow(ctx context.Context, uuid string) (*SBLogicalFlow, error) {
-	return getSB(ctx, s, tableLogicalFlow, &SBLogicalFlow{UUID: uuid}, uuid)
+	return getSB[*SBLogicalFlow](ctx, s, tableLogicalFlow, &SBLogicalFlow{UUID: uuid}, uuid)
 }
 
 func (s *SBClient) GetMACBinding(ctx context.Context, logicalPort, ip string) (*SBMACBinding, error) {
-	return getSB(ctx, s, tableMACBinding, &SBMACBinding{LogicalPort: logicalPort, IP: ip}, logicalPort)
+	return getSB[*SBMACBinding](ctx, s, tableMACBinding, &SBMACBinding{LogicalPort: logicalPort, IP: ip}, logicalPort)
 }
 
 func (s *SBClient) GetFDB(ctx context.Context, mac string, dpKey int) (*SBFDB, error) {
-	return getSB(ctx, s, tableFDB, &SBFDB{MAC: mac, DPKey: dpKey}, mac)
+	return getSB[*SBFDB](ctx, s, tableFDB, &SBFDB{MAC: mac, DPKey: dpKey}, mac)
 }
 
 func (s *SBClient) GetMulticastGroup(ctx context.Context, datapath string, tunnelKey int) (*SBMulticastGroup, error) {
-	return getSB(ctx, s, tableMulticastGroup, &SBMulticastGroup{Datapath: datapath, TunnelKey: tunnelKey}, datapath)
+	return getSB[*SBMulticastGroup](ctx, s, tableMulticastGroup, &SBMulticastGroup{Datapath: datapath, TunnelKey: tunnelKey}, datapath)
 }
 
 func (s *SBClient) GetServiceMonitor(ctx context.Context, logicalPort, ip, protocol string, port int) (*SBServiceMonitor, error) {
-	return getSB(ctx, s, tableServiceMonitor, &SBServiceMonitor{LogicalPort: logicalPort, IP: ip, Protocol: stringPtr(protocol), Port: port}, logicalPort)
+	return getSB[*SBServiceMonitor](ctx, s, tableServiceMonitor, &SBServiceMonitor{LogicalPort: logicalPort, IP: ip, Protocol: stringPtr(protocol), Port: port}, logicalPort)
 }
 
 func (s *SBClient) GetRBACRole(ctx context.Context, name string) (*SBRBACRole, error) {
-	return getSB(ctx, s, tableRBACRole, &SBRBACRole{Name: name}, name)
+	return getSB[*SBRBACRole](ctx, s, tableRBACRole, &SBRBACRole{Name: name}, name)
 }
 
 func (s *SBClient) GetRBACPermission(ctx context.Context, uuid string) (*SBRBACPermission, error) {
-	return getSB(ctx, s, tableRBACPermission, &SBRBACPermission{UUID: uuid}, uuid)
+	return getSB[*SBRBACPermission](ctx, s, tableRBACPermission, &SBRBACPermission{UUID: uuid}, uuid)
 }
 
 func (s *SBClient) GetMeter(ctx context.Context, name string) (*SBMeter, error) {
-	return getSB(ctx, s, tableMeter, &SBMeter{Name: name}, name)
+	return getSB[*SBMeter](ctx, s, tableMeter, &SBMeter{Name: name}, name)
 }
 
 func (s *SBClient) GetMeterBand(ctx context.Context, uuid string) (*SBMeterBand, error) {
-	return getSB(ctx, s, tableMeterBand, &SBMeterBand{UUID: uuid}, uuid)
+	return getSB[*SBMeterBand](ctx, s, tableMeterBand, &SBMeterBand{UUID: uuid}, uuid)
 }
 
 func (s *SBClient) GetDNS(ctx context.Context, uuid string) (*SBDNS, error) {
-	return getSB(ctx, s, tableDNS, &SBDNS{UUID: uuid}, uuid)
+	return getSB[*SBDNS](ctx, s, tableDNS, &SBDNS{UUID: uuid}, uuid)
 }
 
 func (s *SBClient) GetBFD(ctx context.Context, logicalPort, dstIP string, srcPort, disc int) (*SBBFD, error) {
-	return getSB(ctx, s, tableBFD, &SBBFD{LogicalPort: logicalPort, DstIP: dstIP, SrcPort: srcPort, Disc: disc}, logicalPort)
+	return getSB[*SBBFD](ctx, s, tableBFD, &SBBFD{LogicalPort: logicalPort, DstIP: dstIP, SrcPort: srcPort, Disc: disc}, logicalPort)
 }
 
 func (s *SBClient) WatchPortBindings(ctx context.Context) (<-chan PortBindingEvent, <-chan error) {
@@ -291,31 +289,44 @@ func (s *SBClient) WatchBFD(ctx context.Context) (<-chan BFDEvent, <-chan error)
 
 func listSB[T any](ctx context.Context, s *SBClient, table string) ([]T, error) {
 	var out []T
-	if s == nil || s.db == nil || s.db.raw == nil {
+	if s == nil || s.db == nil {
 		return nil, wrap(ErrorUnavailable, dbOVNSouthbound, table, "list", "", "southbound client is nil", nil)
 	}
-	if err := s.db.raw.List(ctx, &out); err != nil {
-		return nil, classifySBReadError(err, table, "list", "")
+	rows, err := s.Table(table).List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		item, err := decodeSBTypedRow[T](table, row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
 	}
 	return out, nil
 }
 
-func getSB[T libmodel.Model](ctx context.Context, s *SBClient, table string, row T, object string) (T, error) {
+func getSB[T any](ctx context.Context, s *SBClient, table string, identity any, object string) (T, error) {
 	var zero T
-	if s == nil || s.db == nil || s.db.raw == nil {
+	if s == nil || s.db == nil {
 		return zero, wrap(ErrorUnavailable, dbOVNSouthbound, table, "get", object, "southbound client is nil", nil)
 	}
-	if err := s.db.raw.Get(ctx, row); err != nil {
-		return zero, classifySBReadError(err, table, "get", object)
+	where, err := sbIdentityConditions(table, identity)
+	if err != nil {
+		return zero, err
 	}
-	return row, nil
-}
-
-func classifySBReadError(err error, table, op, object string) error {
-	if errors.Is(err, ovsclient.ErrNotFound) {
-		return wrap(ErrorNotFound, dbOVNSouthbound, table, op, object, "", err)
+	rows, err := s.Table(table).WhereConditions(where...).List(ctx)
+	if err != nil {
+		return zero, err
 	}
-	return classifyTransactError(err, dbOVNSouthbound, table, op, object)
+	if len(rows) == 0 {
+		return zero, wrap(ErrorNotFound, dbOVNSouthbound, table, "get", object, "row not found", nil)
+	}
+	item, err := decodeSBTypedRow[T](table, rows[0])
+	if err != nil {
+		return zero, err
+	}
+	return item, nil
 }
 
 func watchSB[E any](ctx context.Context, s *SBClient, table string, convert func(RowEvent) E) (<-chan E, <-chan error) {
@@ -359,6 +370,128 @@ func watchSBTable(ctx context.Context, s *SBClient, table string) (<-chan RowEve
 		return events, errs
 	}
 	return s.WatchTable(ctx, table)
+}
+
+func sbIdentityConditions(table string, identity any) ([]libovsdb.Condition, error) {
+	switch table {
+	case tableChassis:
+		row := identity.(*SBChassis)
+		return []libovsdb.Condition{libovsdb.NewCondition(colName, libovsdb.ConditionEqual, row.Name)}, nil
+	case tablePortBinding:
+		row := identity.(*SBPortBinding)
+		return []libovsdb.Condition{libovsdb.NewCondition(colLogicalPort, libovsdb.ConditionEqual, row.LogicalPort)}, nil
+	case tableDatapathBinding:
+		row := identity.(*SBDatapathBinding)
+		if row.UUID != "" {
+			return conditionUUID(row.UUID), nil
+		}
+		return []libovsdb.Condition{libovsdb.NewCondition(colTunnelKey, libovsdb.ConditionEqual, row.TunnelKey)}, nil
+	case tableLogicalFlow:
+		row := identity.(*SBLogicalFlow)
+		return conditionUUID(row.UUID), nil
+	case tableMACBinding:
+		row := identity.(*SBMACBinding)
+		return []libovsdb.Condition{
+			libovsdb.NewCondition(colLogicalPort, libovsdb.ConditionEqual, row.LogicalPort),
+			libovsdb.NewCondition(colIP, libovsdb.ConditionEqual, row.IP),
+		}, nil
+	case tableFDB:
+		row := identity.(*SBFDB)
+		return []libovsdb.Condition{
+			libovsdb.NewCondition(colMAC, libovsdb.ConditionEqual, row.MAC),
+			libovsdb.NewCondition(colDPKey, libovsdb.ConditionEqual, row.DPKey),
+		}, nil
+	case tableMulticastGroup:
+		row := identity.(*SBMulticastGroup)
+		return []libovsdb.Condition{
+			libovsdb.NewCondition(colDatapath, libovsdb.ConditionEqual, uuidValue(row.Datapath)),
+			libovsdb.NewCondition(colTunnelKey, libovsdb.ConditionEqual, row.TunnelKey),
+		}, nil
+	case tableServiceMonitor:
+		row := identity.(*SBServiceMonitor)
+		return []libovsdb.Condition{
+			libovsdb.NewCondition(colLogicalPort, libovsdb.ConditionEqual, row.LogicalPort),
+			libovsdb.NewCondition(colIP, libovsdb.ConditionEqual, row.IP),
+			libovsdb.NewCondition(colProtocol, libovsdb.ConditionEqual, optionalStringValue(row.Protocol)),
+			libovsdb.NewCondition(colPort, libovsdb.ConditionEqual, row.Port),
+		}, nil
+	case tableRBACRole:
+		row := identity.(*SBRBACRole)
+		return []libovsdb.Condition{libovsdb.NewCondition(colName, libovsdb.ConditionEqual, row.Name)}, nil
+	case tableRBACPermission:
+		row := identity.(*SBRBACPermission)
+		return conditionUUID(row.UUID), nil
+	case tableMeter:
+		row := identity.(*SBMeter)
+		return []libovsdb.Condition{libovsdb.NewCondition(colName, libovsdb.ConditionEqual, row.Name)}, nil
+	case tableMeterBand:
+		row := identity.(*SBMeterBand)
+		return conditionUUID(row.UUID), nil
+	case tableDNS:
+		row := identity.(*SBDNS)
+		return conditionUUID(row.UUID), nil
+	case tableBFD:
+		row := identity.(*SBBFD)
+		return []libovsdb.Condition{
+			libovsdb.NewCondition(colLogicalPort, libovsdb.ConditionEqual, row.LogicalPort),
+			libovsdb.NewCondition(colDstIP, libovsdb.ConditionEqual, row.DstIP),
+			libovsdb.NewCondition(colSrcPort, libovsdb.ConditionEqual, row.SrcPort),
+			libovsdb.NewCondition(colDisc, libovsdb.ConditionEqual, row.Disc),
+		}, nil
+	default:
+		return nil, wrap(ErrorInvalidSchema, dbOVNSouthbound, table, "get", "", "unsupported southbound table", nil)
+	}
+}
+
+func optionalStringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func decodeSBTypedRow[T any](table string, row Row) (T, error) {
+	var zero T
+	var value any
+	switch table {
+	case tableChassis:
+		value = sbChassisFromRow(row)
+	case tablePortBinding:
+		value = sbPortBindingFromRow(row)
+	case tableDatapathBinding:
+		value = sbDatapathFromRow(row)
+	case tableLogicalFlow:
+		value = sbLogicalFlowFromRow(row)
+	case tableMACBinding:
+		value = sbMACBindingFromRow(row)
+	case tableFDB:
+		value = sbFDBFromRow(row)
+	case tableMulticastGroup:
+		value = sbMulticastGroupFromRow(row)
+	case tableServiceMonitor:
+		value = sbServiceMonitorFromRow(row)
+	case tableRBACRole:
+		value = sbRBACRoleFromRow(row)
+	case tableRBACPermission:
+		value = sbRBACPermissionFromRow(row)
+	case tableMeter:
+		value = sbMeterFromRow(row)
+	case tableMeterBand:
+		value = sbMeterBandFromRow(row)
+	case tableDNS:
+		value = sbDNSFromRow(row)
+	case tableBFD:
+		value = sbBFDFromRow(row)
+	default:
+		return zero, wrap(ErrorInvalidSchema, dbOVNSouthbound, table, "decode", "", "unsupported southbound table", nil)
+	}
+	if ptr, ok := value.(*T); ok {
+		return *ptr, nil
+	}
+	if typed, ok := value.(T); ok {
+		return typed, nil
+	}
+	return zero, wrap(ErrorConflict, dbOVNSouthbound, table, "decode", "", "southbound row type mismatch", nil)
 }
 
 func portBindingEventFromRowEvent(event RowEvent) PortBindingEvent {

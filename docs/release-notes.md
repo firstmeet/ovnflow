@@ -1,7 +1,7 @@
 # ovnflow v1.0.0
 
-`ovnflow` v1.0.0 is the first stable release candidate for the fluent OVN and
-Open vSwitch SDK.
+`ovnflow` v1.0.0 is the first stable release for the fluent OVN and Open
+vSwitch SDK.
 
 Install with:
 

@@ -193,6 +193,17 @@ func ensureAffected(results []libovsdb.OperationResult, opIndexes []int, databas
 	return nil
 }
 
+func mustAffectNonInsertOps(ops []libovsdb.Operation) []int {
+	indexes := make([]int, 0, len(ops))
+	for i, op := range ops {
+		switch op.Op {
+		case libovsdb.OperationDelete, libovsdb.OperationMutate, libovsdb.OperationUpdate:
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes
+}
+
 func cloneStringMap(in map[string]string) map[string]string {
 	if len(in) == 0 {
 		return nil

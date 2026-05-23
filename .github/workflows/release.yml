@@ -21,6 +21,52 @@ jobs:
       - run: go test -race -count=1 ./...
       - run: go test -run Example ./...
       - run: go test -bench=. -benchmem ./...
+      - run: docker compose up -d
+      - name: Wait for OVSDB databases
+        run: |
+          wait_db() {
+            endpoint="$1"
+            database="$2"
+
+            for i in $(seq 1 180); do
+              if docker compose exec -T ovs-ovn sh -c "command -v ovsdb-client >/dev/null 2>&1 && ovsdb-client list-dbs '$endpoint' 2>/dev/null | grep -qx '$database'"; then
+                echo "$database is ready at $endpoint"
+                return 0
+              fi
+
+              if [ "$i" = "1" ] || [ $((i % 15)) -eq 0 ]; then
+                echo "Waiting for $database at $endpoint ($i/180)"
+                docker compose logs --tail=30 ovs-ovn || true
+              fi
+              sleep 1
+            done
+
+            echo "::error::$database at $endpoint did not become ready"
+            docker compose logs ovs-ovn || true
+            return 1
+          }
+
+          wait_db tcp:127.0.0.1:6640 Open_vSwitch
+          wait_db tcp:127.0.0.1:6641 OVN_Northbound
+          wait_db tcp:127.0.0.1:6642 OVN_Southbound
+      - run: go test -tags=integration -count=1 -v ./...
+        env:
+          OVNFLOW_OVS_ADDR: tcp:127.0.0.1:6640
+          OVNFLOW_OVN_NB_ADDR: tcp:127.0.0.1:6641
+          OVNFLOW_OVN_SB_ADDR: tcp:127.0.0.1:6642
+          OVNFLOW_REQUIRE_INTEGRATION: "1"
+          OVNFLOW_V1_SCHEMA_CHECKS: "1"
+      - run: go test -tags=integration -count=1 -v -run 'TestIntegrationV1MutationScenariosAreEnvGated' ./...
+        env:
+          OVNFLOW_OVS_ADDR: tcp:127.0.0.1:6640
+          OVNFLOW_OVN_NB_ADDR: tcp:127.0.0.1:6641
+          OVNFLOW_OVN_SB_ADDR: tcp:127.0.0.1:6642
+          OVNFLOW_REQUIRE_INTEGRATION: "1"
+          OVNFLOW_V1_MUTATION_CHECKS: "1"
+      - if: always()
+        run: docker compose logs
+      - if: always()
+        run: docker compose down -v
 
   release:
     runs-on: ubuntu-22.04

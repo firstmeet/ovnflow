@@ -10,7 +10,7 @@ import (
 	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
-func TestNBV02RuntimeSchemaCanCoverRequestedTables(t *testing.T) {
+func TestNBNorthboundRuntimeSchemaCanCoverRequestedTables(t *testing.T) {
 	required := requiredSchema(dbOVNNorthbound)
 	wantTables := []string{
 		tableLogicalRouter,
@@ -37,7 +37,7 @@ func TestNBV02RuntimeSchemaCanCoverRequestedTables(t *testing.T) {
 	}
 }
 
-func TestNBV02BuildersEmitHandwrittenOperations(t *testing.T) {
+func TestNBNorthboundBuildersEmitHandwrittenOperations(t *testing.T) {
 	tests := []struct {
 		name      string
 		run       func(*NBClient) error
@@ -195,7 +195,67 @@ func TestNBV02BuildersEmitHandwrittenOperations(t *testing.T) {
 	}
 }
 
-func TestNBV02EnsureMutatesExistingRows(t *testing.T) {
+func TestNATBuilderDoesNotWriteUnsetOptionalStringColumns(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).NATByLogicalIP("snat", "10.0.0.0/24").
+		Create().
+		WithExternalIP("203.0.113.10").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Create() = %v", err)
+	}
+	if len(rec.ops) != 1 {
+		t.Fatalf("ops = %d, want insert: %#v", len(rec.ops), rec.ops)
+	}
+	if _, ok := rec.ops[0].Row[colExternalPortRange]; ok {
+		t.Fatalf("row contains unset external_port_range: %#v", rec.ops[0].Row)
+	}
+	if _, ok := rec.ops[0].Row[colMatch]; ok {
+		t.Fatalf("row contains unset match: %#v", rec.ops[0].Row)
+	}
+}
+
+func TestNATBuilderAllowsExplicitEmptyOptionalStringColumns(t *testing.T) {
+	db := testNBDBClient(t)
+	db.schema.schema.Tables[tableNAT].Columns[colExternalPortRange] = columnSchemaFromJSON(t, `{"type":"string"}`)
+	db.schema.schema.Tables[tableNAT].Columns[colMatch] = columnSchemaFromJSON(t, `{"type":"string"}`)
+	rec := &nbRecordingExecutor{}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).NATByLogicalIP("snat", "10.0.0.0/24").
+		Ensure().
+		WithExternalIP("203.0.113.10").
+		WithExternalPortRange("").
+		WithMatch("").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	if len(rec.ops) < 2 {
+		t.Fatalf("ops = %d, want select/insert-or-update: %#v", len(rec.ops), rec.ops)
+	}
+	row := libovsdb.Row(nil)
+	for i := len(rec.ops) - 1; i >= 0; i-- {
+		if len(rec.ops[i].Row) > 0 {
+			row = rec.ops[i].Row
+			break
+		}
+	}
+	if row == nil {
+		t.Fatalf("ops do not contain a row operation: %#v", rec.ops)
+	}
+	if got, ok := row[colExternalPortRange]; !ok || got != "" {
+		t.Fatalf("external_port_range = %#v, present %v; want explicit empty string", got, ok)
+	}
+	if got, ok := row[colMatch]; !ok || got != "" {
+		t.Fatalf("match = %#v, present %v; want explicit empty string", got, ok)
+	}
+}
+
+func TestNBNorthboundEnsureMutatesExistingRows(t *testing.T) {
 	db := testNBDBClient(t)
 	rec := &nbRecordingExecutor{
 		results: []libovsdb.OperationResult{

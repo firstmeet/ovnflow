@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ovn-kubernetes/libovsdb/cache"
-	libmodel "github.com/ovn-kubernetes/libovsdb/model"
 	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
@@ -132,9 +130,7 @@ func (m *watchManager) subscribe(ctx context.Context, table string, where []libo
 	m.byTable[table][sub.id] = sub
 	m.mu.Unlock()
 
-	if m.db.monitorModel(table) == nil {
-		m.startPoller(table)
-	}
+	m.startPoller(table)
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -147,19 +143,6 @@ func (m *watchManager) subscribe(ctx context.Context, table string, where []libo
 
 func (m *watchManager) start() {
 	m.once.Do(func() {
-		if m.db != nil && m.db.raw != nil && m.db.raw.Cache() != nil {
-			m.db.raw.Cache().AddEventHandler(&cache.EventHandlerFuncs{
-				AddFunc: func(table string, row libmodel.Model) {
-					m.enqueue(table, RowEvent{Type: EventAdd, New: decodeModelRow(row)})
-				},
-				UpdateFunc: func(table string, old libmodel.Model, newModel libmodel.Model) {
-					m.enqueue(table, RowEvent{Type: EventUpdate, Old: decodeModelRow(old), New: decodeModelRow(newModel)})
-				},
-				DeleteFunc: func(table string, row libmodel.Model) {
-					m.enqueue(table, RowEvent{Type: EventDelete, Old: decodeModelRow(row)})
-				},
-			})
-		}
 		go m.run()
 	})
 }
@@ -236,6 +219,7 @@ func (m *watchManager) pollRows(table string, stop <-chan struct{}) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	seen := map[string]Row{}
+	seeded := false
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		rows, err := newTableRef(m.db, table, "", "").selectRows(ctx, nil, nil)
@@ -250,18 +234,22 @@ func (m *watchManager) pollRows(table string, stop <-chan struct{}) {
 				next[id] = row
 				old, hadOld := seen[id]
 				switch {
+				case !seeded:
 				case !hadOld:
 					m.enqueue(table, RowEvent{Type: EventAdd, New: row})
 				case rowFingerprint(old) != rowFingerprint(row):
 					m.enqueue(table, RowEvent{Type: EventUpdate, Old: old, New: row})
 				}
 			}
-			for id, old := range seen {
-				if _, ok := next[id]; !ok {
-					m.enqueue(table, RowEvent{Type: EventDelete, Old: old})
+			if seeded {
+				for id, old := range seen {
+					if _, ok := next[id]; !ok {
+						m.enqueue(table, RowEvent{Type: EventDelete, Old: old})
+					}
 				}
 			}
 			seen = next
+			seeded = true
 		} else {
 			m.publishError(table, err)
 		}
@@ -382,61 +370,6 @@ func (s *rowWatchSubscription) closeLocked() {
 	close(s.done)
 }
 
-func (d *dbClient) monitorModel(table string) libmodel.Model {
-	switch d.database {
-	case dbOVNNorthbound:
-		switch table {
-		case tableLogicalSwitch:
-			return &LogicalSwitch{}
-		case tableLogicalSwitchPort:
-			return &LogicalSwitchPort{}
-		}
-	case dbOVNSouthbound:
-		switch table {
-		case tableChassis:
-			return &SBChassis{}
-		case tablePortBinding:
-			return &SBPortBinding{}
-		case tableDatapathBinding:
-			return &SBDatapathBinding{}
-		case tableLogicalFlow:
-			return &SBLogicalFlow{}
-		case tableMACBinding:
-			return &SBMACBinding{}
-		case tableFDB:
-			return &SBFDB{}
-		case tableMulticastGroup:
-			return &SBMulticastGroup{}
-		case tableServiceMonitor:
-			return &SBServiceMonitor{}
-		case tableRBACRole:
-			return &SBRBACRole{}
-		case tableRBACPermission:
-			return &SBRBACPermission{}
-		case tableMeter:
-			return &SBMeter{}
-		case tableMeterBand:
-			return &SBMeterBand{}
-		case tableDNS:
-			return &SBDNS{}
-		case tableBFD:
-			return &SBBFD{}
-		}
-	case dbOpenVSwitch:
-		switch table {
-		case tableOpenVSwitch:
-			return &OpenVSwitch{}
-		case tableBridge:
-			return &OVSBridge{}
-		case tablePort:
-			return &OVSPort{}
-		case tableInterface:
-			return &OVSInterface{}
-		}
-	}
-	return nil
-}
-
 func eventMatches(where []libovsdb.Condition, event RowEvent) bool {
 	if len(where) == 0 {
 		return true
@@ -456,11 +389,26 @@ func rowMatches(where []libovsdb.Condition, row Row) bool {
 		if !ok {
 			return false
 		}
-		if !conditionValueEqual(got, condition.Value) {
+		if !conditionMatches(condition.Function, got, condition.Value) {
 			return false
 		}
 	}
 	return true
+}
+
+func conditionMatches(fn libovsdb.ConditionFunction, got, want any) bool {
+	switch fn {
+	case libovsdb.ConditionEqual:
+		return conditionValueEqual(got, want)
+	case libovsdb.ConditionNotEqual:
+		return !conditionValueEqual(got, want)
+	case libovsdb.ConditionIncludes:
+		return conditionValueIncludes(got, want)
+	case libovsdb.ConditionExcludes:
+		return !conditionValueIncludes(got, want)
+	default:
+		return false
+	}
 }
 
 func conditionValueEqual(got, want any) bool {
@@ -484,6 +432,41 @@ func conditionValueEqual(got, want any) bool {
 	default:
 		return reflect.DeepEqual(got, want)
 	}
+}
+
+func conditionValueIncludes(got, want any) bool {
+	wantMap := anyStringMap(want)
+	if len(wantMap) > 0 {
+		gotMap := anyStringMap(got)
+		for key, value := range wantMap {
+			if gotMap[key] != value {
+				return false
+			}
+		}
+		return true
+	}
+
+	wantValues := anyStringSlice(want)
+	if len(wantValues) == 0 {
+		if s := anyString(want); s != "" {
+			wantValues = []string{s}
+		}
+	}
+	gotValues := anyStringSlice(got)
+	if len(gotValues) == 0 {
+		if s := anyString(got); s != "" {
+			gotValues = []string{s}
+		}
+	}
+	if len(wantValues) == 0 {
+		return false
+	}
+	for _, wantValue := range wantValues {
+		if !containsString(gotValues, wantValue) {
+			return false
+		}
+	}
+	return true
 }
 
 func rowIdentity(row Row) string {

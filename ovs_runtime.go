@@ -269,6 +269,9 @@ func anyOptionalString(value any) *string {
 }
 
 func (b *TableBuilder) executeOVSDelete(ctx context.Context) error {
+	if b.ref != nil && b.ref.table == tableManager {
+		return b.executeOVSManagerDelete(ctx)
+	}
 	if err := b.ref.validateIdentity(string(b.mode)); err != nil {
 		return err
 	}
@@ -304,6 +307,96 @@ func (b *TableBuilder) executeOVSDelete(ctx context.Context) error {
 		return err
 	}
 	return ensureAffected(results, mustAffect, dbOpenVSwitch, b.ref.table, string(b.mode), b.ref.identityValue)
+}
+
+func (b *TableBuilder) executeOVSManagerCreate(ctx context.Context, ensure bool) error {
+	if ensure && len(b.ref.identityConditions()) > 0 {
+		rows, err := b.ref.selectRows(ctx, b.ref.identityConditions(), []string{colUUID})
+		if err != nil {
+			return err
+		}
+		if len(rows) > 0 {
+			return b.executeUpdate(ctx)
+		}
+	}
+
+	rootUUID, err := (&OVSClient{db: b.ref.db}).openVSwitchUUID(ctx)
+	if err != nil {
+		return err
+	}
+	managerUUID := namedUUID("manager")
+	row := cloneRow(b.row)
+	for _, mutation := range b.mutations {
+		mergeMutationIntoInsertRow(row, mutation)
+	}
+	ops := []libovsdb.Operation{
+		{
+			Op:       libovsdb.OperationInsert,
+			Table:    tableManager,
+			UUIDName: managerUUID,
+			Row:      row,
+		},
+		{
+			Op:    libovsdb.OperationMutate,
+			Table: tableOpenVSwitch,
+			Where: conditionUUID(rootUUID),
+			Mutations: []libovsdb.Mutation{
+				*libovsdb.NewMutation(colManagerOptions, libovsdb.MutateOperationInsert, uuidSet(managerUUID)),
+			},
+		},
+	}
+	results, err := b.ref.db.transact(ctx, b.ref.table, string(b.mode), b.ref.identityValue, ops...)
+	if ensure && IsKind(err, ErrorAlreadyExists) {
+		return b.executeUpdate(ctx)
+	}
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, []int{1}, dbOpenVSwitch, b.ref.table, string(b.mode), b.ref.identityValue)
+}
+
+func (b *TableBuilder) executeOVSManagerDelete(ctx context.Context) error {
+	if err := b.ref.validateIdentity(string(b.mode)); err != nil {
+		return err
+	}
+	rows, err := b.ref.selectRows(ctx, b.ref.identityConditions(), []string{colUUID})
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return wrap(ErrorNotFound, dbOpenVSwitch, tableManager, string(b.mode), b.ref.identityValue, "row not found", nil)
+	}
+	rootUUID, err := (&OVSClient{db: b.ref.db}).openVSwitchUUID(ctx)
+	if err != nil {
+		return err
+	}
+	var ops []libovsdb.Operation
+	var mustAffect []int
+	for _, row := range rows {
+		id := anyString(row[colUUID])
+		if id == "" {
+			return wrap(ErrorConflict, dbOpenVSwitch, tableManager, string(b.mode), b.ref.identityValue, "row UUID missing", nil)
+		}
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationMutate,
+			Table: tableOpenVSwitch,
+			Where: conditionUUID(rootUUID),
+			Mutations: []libovsdb.Mutation{
+				*libovsdb.NewMutation(colManagerOptions, libovsdb.MutateOperationDelete, uuidSet(id)),
+			},
+		})
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationDelete,
+			Table: tableManager,
+			Where: conditionUUID(id),
+		})
+		mustAffect = append(mustAffect, len(ops)-1)
+	}
+	results, err := b.ref.db.transact(ctx, tableManager, string(b.mode), b.ref.identityValue, ops...)
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, mustAffect, dbOpenVSwitch, tableManager, string(b.mode), b.ref.identityValue)
 }
 
 func (d *dbClient) ovsUnreferenceOps(ctx context.Context, targetTable, targetUUID string) ([]libovsdb.Operation, error) {

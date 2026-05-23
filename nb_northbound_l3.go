@@ -474,6 +474,7 @@ func (b *NATBuilder) WithExternalMAC(mac string) *NATBuilder {
 
 func (b *NATBuilder) WithExternalPortRange(portRange string) *NATBuilder {
 	b.externalPortRange = portRange
+	b.externalPortRangeSet = true
 	return b
 }
 
@@ -494,6 +495,7 @@ func (b *NATBuilder) WithExemptedExternalIPsUUID(uuid string) *NATBuilder {
 
 func (b *NATBuilder) WithMatch(match string) *NATBuilder {
 	b.match = match
+	b.matchSet = true
 	return b
 }
 
@@ -520,13 +522,17 @@ func (b *NATBuilder) Execute(ctx context.Context) error {
 		return err
 	}
 	row := libovsdb.Row{
-		colType:              b.kind,
-		colLogicalIP:         b.logicalIP,
-		colExternalPortRange: b.externalPortRange,
-		colMatch:             b.match,
+		colType:      b.kind,
+		colLogicalIP: b.logicalIP,
 	}
 	if b.externalIP != "" {
 		row[colExternalIP] = b.externalIP
+	}
+	if b.externalPortRangeSet {
+		row[colExternalPortRange] = b.externalPortRange
+	}
+	if b.matchSet {
+		row[colMatch] = b.match
 	}
 	nbSetOptionalString(row, colLogicalPort, b.logicalPort)
 	nbSetOptionalString(row, colExternalMAC, b.externalMAC)

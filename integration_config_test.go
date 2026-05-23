@@ -37,6 +37,7 @@ func TestLoadIntegrationConfigFromEnvOverrides(t *testing.T) {
 	t.Setenv(EnvTestResourcePrefix, " case- ")
 	t.Setenv(EnvTestBridge, " br-case ")
 	t.Setenv(EnvAllowBRInt, "yes")
+	t.Setenv(EnvRequireIntegration, "1")
 
 	cfg := LoadIntegrationConfigFromEnv()
 	if cfg.OVSAddr != "tcp:172.27.192.120:6640" {
@@ -57,8 +58,24 @@ func TestLoadIntegrationConfigFromEnvOverrides(t *testing.T) {
 	if !cfg.AllowBRInt {
 		t.Fatal("AllowBRInt = false, want true")
 	}
+	if !cfg.Require {
+		t.Fatal("Require = false, want true")
+	}
 	if got := cfg.MissingEndpoints(); len(got) != 0 {
 		t.Fatalf("MissingEndpoints() = %v, want none", got)
+	}
+	if !cfg.ShouldRequireEndpoints() {
+		t.Fatal("ShouldRequireEndpoints() = false, want true")
+	}
+}
+
+func TestIntegrationConfigRequiresEndpointsInCI(t *testing.T) {
+	t.Setenv(EnvRequireIntegration, "")
+	t.Setenv("CI", "true")
+
+	cfg := LoadIntegrationConfigFromEnv()
+	if !cfg.ShouldRequireEndpoints() {
+		t.Fatal("ShouldRequireEndpoints() = false, want true in CI")
 	}
 }
 
