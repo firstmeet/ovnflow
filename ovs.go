@@ -454,6 +454,14 @@ func (b *BridgeBuilder) executeDelete(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	allBridges, err := b.client.selectAllBridges(ctx)
+	if err != nil {
+		return err
+	}
+	allPorts, err := b.client.selectAllPorts(ctx)
+	if err != nil {
+		return err
+	}
 
 	var mustAffect []int
 	ops := []libovsdb.Operation{
@@ -473,12 +481,18 @@ func (b *BridgeBuilder) executeDelete(ctx context.Context) error {
 	}
 	mustAffect = append(mustAffect, 0, 1)
 	for _, port := range ports {
+		if portUsedByOtherBridges(allBridges, bridges[0].UUID, port.UUID) {
+			continue
+		}
 		ops = append(ops, libovsdb.Operation{
 			Op:    libovsdb.OperationDelete,
 			Table: tablePort,
 			Where: conditionUUID(port.UUID),
 		})
 		for _, ifaceUUID := range port.Interfaces {
+			if interfaceUsedByOtherPorts(allPorts, port.UUID, ifaceUUID) {
+				continue
+			}
 			ops = append(ops, libovsdb.Operation{
 				Op:    libovsdb.OperationDelete,
 				Table: tableInterface,
@@ -512,6 +526,10 @@ func (b *BridgeBuilder) executeDeletePort(ctx context.Context) error {
 	if !containsString(bridges[0].Ports, portUUID) {
 		return wrap(ErrorNotFound, dbOpenVSwitch, tablePort, "delete", b.deletePort, "port is not attached to bridge", nil)
 	}
+	allPorts, err := b.client.selectAllPorts(ctx)
+	if err != nil {
+		return err
+	}
 	mirrorUUIDs, err := b.client.selectBridgeMirrorsForPort(ctx, bridges[0], portUUID)
 	if err != nil {
 		return err
@@ -544,6 +562,9 @@ func (b *BridgeBuilder) executeDeletePort(ctx context.Context) error {
 		})
 	}
 	for _, ifaceUUID := range ports[0].Interfaces {
+		if interfaceUsedByOtherPorts(allPorts, portUUID, ifaceUUID) {
+			continue
+		}
 		ops = append(ops, libovsdb.Operation{
 			Op:    libovsdb.OperationDelete,
 			Table: tableInterface,
@@ -572,8 +593,30 @@ func (o *OVSClient) selectBridges(ctx context.Context, name string) ([]OVSBridge
 	if err := checkOperationResults(results, dbOpenVSwitch, tableBridge, "select", name); err != nil {
 		return nil, err
 	}
+	return decodeOVSBridges(results), nil
+}
+
+func (o *OVSClient) selectAllBridges(ctx context.Context) ([]OVSBridge, error) {
+	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+		Op:    libovsdb.OperationSelect,
+		Table: tableBridge,
+		Where: []libovsdb.Condition{},
+		Columns: o.db.schema.existingColumns(tableBridge,
+			colUUID, colName, colPorts, colController, colMirrors, colNetFlow, colSFlow, colIPFIX, colFlowTables, colAutoAttach, colExternalIDs, colOtherConfig,
+		),
+	})
+	if err != nil {
+		return nil, classifyTransactError(err, dbOpenVSwitch, tableBridge, "select", "")
+	}
+	if err := checkOperationResults(results, dbOpenVSwitch, tableBridge, "select", ""); err != nil {
+		return nil, err
+	}
+	return decodeOVSBridges(results), nil
+}
+
+func decodeOVSBridges(results []libovsdb.OperationResult) []OVSBridge {
 	if len(results) == 0 {
-		return nil, nil
+		return nil
 	}
 	rows := make([]OVSBridge, 0, len(results[0].Rows))
 	for _, row := range results[0].Rows {
@@ -592,7 +635,7 @@ func (o *OVSClient) selectBridges(ctx context.Context, name string) ([]OVSBridge
 			OtherConfig: rowStringMapValue(row, colOtherConfig),
 		})
 	}
-	return rows, nil
+	return rows
 }
 
 func (o *OVSClient) selectBridgeMirrorsForPort(ctx context.Context, bridge OVSBridge, portUUID string) ([]string, error) {
@@ -638,6 +681,30 @@ func qosUsedByOtherPorts(ports []OVSPort, deletedPortUUID, qosUUID string) bool 
 	return false
 }
 
+func portUsedByOtherBridges(bridges []OVSBridge, deletedBridgeUUID, portUUID string) bool {
+	for _, bridge := range bridges {
+		if bridge.UUID == deletedBridgeUUID {
+			continue
+		}
+		if containsString(bridge.Ports, portUUID) {
+			return true
+		}
+	}
+	return false
+}
+
+func interfaceUsedByOtherPorts(ports []OVSPort, deletedPortUUID, ifaceUUID string) bool {
+	for _, port := range ports {
+		if port.UUID == deletedPortUUID {
+			continue
+		}
+		if containsString(port.Interfaces, ifaceUUID) {
+			return true
+		}
+	}
+	return false
+}
+
 func (o *OVSClient) selectPorts(ctx context.Context, name string) ([]OVSPort, error) {
 	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
 		Op:      libovsdb.OperationSelect,
@@ -649,6 +716,22 @@ func (o *OVSClient) selectPorts(ctx context.Context, name string) ([]OVSPort, er
 		return nil, classifyTransactError(err, dbOpenVSwitch, tablePort, "select", name)
 	}
 	if err := checkOperationResults(results, dbOpenVSwitch, tablePort, "select", name); err != nil {
+		return nil, err
+	}
+	return decodeOVSPorts(results)
+}
+
+func (o *OVSClient) selectAllPorts(ctx context.Context) ([]OVSPort, error) {
+	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+		Op:      libovsdb.OperationSelect,
+		Table:   tablePort,
+		Where:   []libovsdb.Condition{},
+		Columns: o.db.schema.existingColumns(tablePort, colUUID, colName, colInterfaces, colQoS, colExternalIDs, colOtherConfig),
+	})
+	if err != nil {
+		return nil, classifyTransactError(err, dbOpenVSwitch, tablePort, "select", "")
+	}
+	if err := checkOperationResults(results, dbOpenVSwitch, tablePort, "select", ""); err != nil {
 		return nil, err
 	}
 	return decodeOVSPorts(results)

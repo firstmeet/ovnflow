@@ -187,6 +187,82 @@ func TestOVSBridgeDeleteDoesNotCascadeSharedConfigRows(t *testing.T) {
 	}
 }
 
+func TestOVSBridgeDeleteKeepsPortReferencedByAnotherBridge(t *testing.T) {
+	db := testOVSDBClient(t)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{
+				colUUID:  uuidValue("br-uuid"),
+				colName:  "br-test",
+				colPorts: uuidSet("shared-port-uuid"),
+			}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("root-uuid")}}},
+			{Rows: []libovsdb.Row{{
+				colUUID:       uuidValue("shared-port-uuid"),
+				colName:       "p0",
+				colInterfaces: uuidSet("iface-uuid"),
+			}}},
+			{Rows: []libovsdb.Row{
+				{colUUID: uuidValue("br-uuid"), colName: "br-test", colPorts: uuidSet("shared-port-uuid")},
+				{colUUID: uuidValue("br-other-uuid"), colName: "br-other", colPorts: uuidSet("shared-port-uuid")},
+			}},
+			{Rows: []libovsdb.Row{{
+				colUUID:       uuidValue("shared-port-uuid"),
+				colName:       "p0",
+				colInterfaces: uuidSet("iface-uuid"),
+			}}},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").Delete().Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Delete() = %v", err)
+	}
+	for _, op := range rec.ops {
+		if op.Op == libovsdb.OperationDelete && (op.Table == tablePort || op.Table == tableInterface) {
+			t.Fatalf("unexpected delete of shared port/interface: %#v; ops=%#v", op, rec.ops)
+		}
+	}
+}
+
+func TestOVSDeletePortKeepsInterfaceReferencedByAnotherPort(t *testing.T) {
+	db := testOVSDBClient(t)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{
+				colUUID:  uuidValue("br-uuid"),
+				colName:  "br-test",
+				colPorts: uuidSet("port-uuid"),
+			}}},
+			{Rows: []libovsdb.Row{{
+				colUUID:       uuidValue("port-uuid"),
+				colName:       "p0",
+				colInterfaces: uuidSet("shared-iface-uuid"),
+			}}},
+			{Rows: []libovsdb.Row{
+				{colUUID: uuidValue("port-uuid"), colName: "p0", colInterfaces: uuidSet("shared-iface-uuid")},
+				{colUUID: uuidValue("other-port-uuid"), colName: "p1", colInterfaces: uuidSet("shared-iface-uuid")},
+			}},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").DeletePort("p0").Execute(context.Background())
+	if err != nil {
+		t.Fatalf("DeletePort() = %v", err)
+	}
+	for _, op := range rec.ops {
+		if op.Op == libovsdb.OperationDelete && op.Table == tableInterface {
+			t.Fatalf("unexpected delete of shared interface: %#v; ops=%#v", op, rec.ops)
+		}
+	}
+}
+
 func columnSchemaFromJSON(t *testing.T, raw string) *libovsdb.ColumnSchema {
 	t.Helper()
 	var schema libovsdb.ColumnSchema
