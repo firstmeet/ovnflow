@@ -46,6 +46,25 @@ err = client.LocalOVS().
 if err != nil {
     return err
 }
+
+err = client.LocalOVS().
+    Bridge("br-ovnflow-it").
+    Ensure().
+    WithMirror("mirror-web", func(m *ovnflow.TableBuilder) {
+        m.WithMirrorSelectAll().
+            WithExternalID("owner", "web")
+    }).
+    WithNetFlow("nf-web", func(nf *ovnflow.TableBuilder) {
+        nf.WithSamplingTarget("127.0.0.1:2055").
+            WithExternalID("owner", "web")
+    }).
+    WithIPFIX("ipfix-web", func(ipfix *ovnflow.TableBuilder) {
+        ipfix.WithSamplingTarget("127.0.0.1:4739")
+    }).
+    Execute(ctx)
+if err != nil {
+    return err
+}
 ```
 
 Normal tests are local and dependency-free:

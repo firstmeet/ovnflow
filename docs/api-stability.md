@@ -6,7 +6,9 @@
   and `OVSClient`.
 - Typed OVN Northbound builders under `client.OVN().NB()`.
 - Typed OVN Southbound list/get/watch helpers under `client.OVN().SB()`.
-- Typed and generic Open_vSwitch helpers under `client.LocalOVS()`.
+- Typed and generic Open_vSwitch helpers under `client.LocalOVS()`, including
+  Bridge-level advanced config helpers for Mirror, Flow_Table, NetFlow, sFlow,
+  IPFIX, and AutoAttach.
 - Runtime `TableRef` and `TableBuilder` methods for schema-aware CRUD,
   map/set mutation, list/get, and watch.
 - Error kinds and helpers: `Error`, `ErrorKind`, `IsKind`, and `KindOf`.

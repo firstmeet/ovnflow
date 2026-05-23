@@ -18,10 +18,16 @@ go get github.com/firstmeet/ovnflow@v1.0.0
 - Fluent Open_vSwitch configuration APIs for bridges, ports, interfaces,
   controllers, managers, mirrors, QoS, queues, flow tables, NetFlow, sFlow,
   IPFIX, SSL, and AutoAttach.
+- Bridge-level Open_vSwitch helpers attach Mirror, Flow_Table, NetFlow, sFlow,
+  IPFIX, and AutoAttach rows in the same transaction, so non-root OVS tables do
+  not get garbage-collected before being referenced.
 - Runtime schema checks with typed errors for missing required tables or
   columns and graceful degradation for optional columns.
 - Map/set updates use OVSDB mutations by default to preserve keys and values
   owned by other controllers.
+- OVS Bridge advanced config references use UUID-safe reads, mutate set/map
+  references, and update scalar optional references such as `netflow`, `sflow`,
+  `ipfix`, and `auto_attach`.
 - Integration tests support Windows-to-WSL endpoints and Linux Docker Compose.
 
 ## Validation
