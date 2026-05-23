@@ -8,8 +8,8 @@ jobs:
   unit-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - run: go test -count=1 ./...
@@ -18,8 +18,8 @@ jobs:
   unit-linux:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - run: go test -count=1 ./...
@@ -30,8 +30,8 @@ jobs:
     runs-on: ubuntu-22.04
     needs: unit-linux
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - run: docker compose up -d
@@ -78,8 +78,8 @@ jobs:
     runs-on: ubuntu-22.04
     needs: integration-linux
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - run: docker compose up -d
