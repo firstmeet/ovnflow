@@ -339,6 +339,29 @@ func TestTableWatchCancelRemovesSubscriptionAndStopsPoller(t *testing.T) {
 	}
 }
 
+func TestTableWatchRejectsMissingConditionColumnBeforeSubscribing(t *testing.T) {
+	db := &dbClient{
+		database: dbOVNNorthbound,
+		schema: newSchemaRegistry(dbOVNNorthbound, databaseSchemaWithColumns(dbOVNNorthbound, map[string][]string{
+			tableLogicalSwitch: {colName},
+		})),
+		executor: &nbRecordingExecutor{},
+	}
+	events, errs := db.Table(tableLogicalSwitch).
+		Where("missing_column", "value").
+		Watch(context.Background())
+
+	if err := <-errs; !IsKind(err, ErrorInvalidSchema) {
+		t.Fatalf("watch error = %v, want ErrorInvalidSchema", err)
+	}
+	if _, ok := <-events; ok {
+		t.Fatal("watch event channel is open after schema validation failure")
+	}
+	if db.watches != nil {
+		t.Fatal("watch manager was initialized despite schema validation failure")
+	}
+}
+
 func TestTableWatchConcurrentSubscribeCancelLeavesNoSubscriptions(t *testing.T) {
 	db := &dbClient{
 		database: dbOVNNorthbound,

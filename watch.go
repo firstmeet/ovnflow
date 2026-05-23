@@ -33,6 +33,11 @@ func (d *dbClient) watchRows(ctx context.Context, table string, where []libovsdb
 		close(events)
 		return events, errs
 	}
+	if err := d.schema.RequireConditionColumns(table, where...); err != nil {
+		errs <- err
+		close(events)
+		return events, errs
+	}
 	watches := d.watchManager()
 
 	sub := watches.subscribe(ctx, table, where, queue, errs)
