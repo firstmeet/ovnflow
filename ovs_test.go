@@ -72,7 +72,7 @@ func TestOVSBridgeEnsureNewBridgeWithPortAndExternalIDsDoesNotPanic(t *testing.T
 }
 
 func TestOVSDeleteUnreferencesRowsByUUID(t *testing.T) {
-	op := ovsUnreferenceUUIDOp(tableBridge, colController, "br-uuid", "controller-uuid")
+	op := ovsUnreferenceUUIDSetOp(tableBridge, colController, "br-uuid", "controller-uuid")
 	if op.Op != libovsdb.OperationMutate || op.Table != tableBridge {
 		t.Fatalf("op = %#v, want mutate Bridge", op)
 	}
@@ -134,6 +134,29 @@ func TestOVSTableDeleteDoesNotRequireUnreferenceMutationsToAffectRows(t *testing
 	}
 }
 
+func TestOVSTableDeleteReportsScalarStrongReferenceConflict(t *testing.T) {
+	db := testOVSDBClient(t)
+	db.schema.schema.Tables[tableBridge].Columns[colNetFlow] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"NetFlow"}}}`)
+	db.schema.schema.Tables[tableNetFlow].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("netflow-uuid")}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("br-uuid")}}},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).NetFlow("nf0").Delete().Execute(context.Background())
+	if !IsKind(err, ErrorConflict) {
+		t.Fatalf("Delete() = %v, want ErrorConflict for scalar strong reference", err)
+	}
+	for _, op := range rec.ops {
+		if op.Op == libovsdb.OperationMutate && op.Table == tableBridge && len(op.Mutations) > 0 && op.Mutations[0].Column == colNetFlow {
+			t.Fatalf("unexpected scalar UUID mutate: %#v; ops=%#v", op, rec.ops)
+		}
+	}
+}
+
 func TestOVSMapUUIDReferenceCleanupSupportsJSONUUIDValues(t *testing.T) {
 	keys := ovsMapDeleteKeysForUUID([]any{
 		"map",
@@ -141,9 +164,25 @@ func TestOVSMapUUIDReferenceCleanupSupportsJSONUUIDValues(t *testing.T) {
 			[]any{"selected", []any{"uuid", "port-uuid"}},
 			[]any{"other", []any{"uuid", "other-uuid"}},
 		},
-	}, "port-uuid")
+	}, "port-uuid", false, true)
 	if len(keys) != 1 || keys[0] != "selected" {
 		t.Fatalf("delete keys = %#v, want selected", keys)
+	}
+}
+
+func TestOVSMapUUIDReferenceCleanupSupportsKeyReferences(t *testing.T) {
+	keys := ovsMapDeleteKeysForUUID([]any{
+		"map",
+		[]any{
+			[]any{[]any{"uuid", "queue-uuid"}, []any{"uuid", "port-uuid"}},
+			[]any{[]any{"uuid", "other-uuid"}, []any{"uuid", "port-uuid"}},
+		},
+	}, "queue-uuid", true, false)
+	if len(keys) != 1 {
+		t.Fatalf("delete keys = %#v, want one key", keys)
+	}
+	if key, ok := keys[0].(libovsdb.UUID); !ok || key.GoUUID != "queue-uuid" {
+		t.Fatalf("delete key = %#v, want queue UUID", keys[0])
 	}
 }
 

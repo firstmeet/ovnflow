@@ -28,5 +28,8 @@ go get github.com/firstmeet/ovnflow@v1.0.0
 
 - `go test ./...`
 - `go vet ./...`
-- `go test -tags=integration ./...`
-- GitHub Actions unit and integration workflows
+- `go test -run Example ./...`
+- `go test -bench=. -benchmem ./...`
+- `OVNFLOW_REQUIRE_INTEGRATION=1 go test -tags=integration ./...`
+- `OVNFLOW_REQUIRE_INTEGRATION=1 OVNFLOW_V1_MUTATION_CHECKS=1 go test -tags=integration -run TestIntegrationV1MutationScenariosAreEnvGated ./...`
+- GitHub Actions unit, race, integration, mutation, and release workflows

@@ -120,6 +120,29 @@ func TestSchemaRegistryReportsRuntimeCapabilities(t *testing.T) {
 	}
 }
 
+func TestSchemaRegistryClassifiesUUIDReferenceColumns(t *testing.T) {
+	schema := databaseSchemaWithColumns(dbOpenVSwitch, map[string][]string{
+		tableBridge: {colController, colNetFlow, colQueues},
+	})
+	schema.Tables[tableBridge].Columns[colController] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Controller"},"min":0,"max":"unlimited"}}`)
+	schema.Tables[tableBridge].Columns[colNetFlow] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"NetFlow"}}}`)
+	schema.Tables[tableBridge].Columns[colQueues] = columnSchemaFromJSON(t, `{"type":{"key":"integer","value":{"type":"uuid","refTable":"Queue"},"min":0,"max":"unlimited"}}`)
+
+	registry := newSchemaRegistry(dbOpenVSwitch, schema)
+	controllerRefs := registry.ReferenceColumnInfos(tableBridge, tableController)
+	if len(controllerRefs) != 1 || controllerRefs[0].Name != colController || controllerRefs[0].Kind != referenceColumnSetUUID {
+		t.Fatalf("controller refs = %#v, want set ref on %s", controllerRefs, colController)
+	}
+	netflowRefs := registry.ReferenceColumnInfos(tableBridge, tableNetFlow)
+	if len(netflowRefs) != 1 || netflowRefs[0].Name != colNetFlow || netflowRefs[0].Kind != referenceColumnScalarUUID {
+		t.Fatalf("netflow refs = %#v, want scalar ref on %s", netflowRefs, colNetFlow)
+	}
+	queueRefs := registry.ReferenceColumnInfos(tableBridge, tableQueue)
+	if len(queueRefs) != 1 || queueRefs[0].Name != colQueues || queueRefs[0].Kind != referenceColumnMapUUID || !queueRefs[0].ValueRef {
+		t.Fatalf("queue refs = %#v, want map value ref on %s", queueRefs, colQueues)
+	}
+}
+
 func TestSchemaRegistryRequireHelpers(t *testing.T) {
 	registry := newSchemaRegistry(dbOpenVSwitch, databaseSchemaWithColumns(dbOpenVSwitch, map[string][]string{
 		tableBridge: {colName},

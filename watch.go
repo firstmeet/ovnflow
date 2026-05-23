@@ -462,20 +462,47 @@ func conditionValueEqual(got, want any) bool {
 	case string:
 		return got == typed || anyString(got) == typed
 	case libovsdb.OvsMap:
-		gotMap := anyStringMap(got)
-		wantMap := anyStringMap(typed)
-		if len(wantMap) == 0 {
-			return len(gotMap) == 0
+		return stringMapsEqual(anyStringMap(got), anyStringMap(typed))
+	case map[string]string:
+		return stringMapsEqual(anyStringMap(got), typed)
+	case libovsdb.OvsSet:
+		gotValues := anyStringSlice(got)
+		wantValues := anyStringSlice(typed)
+		if len(gotValues) == 0 || len(wantValues) == 0 {
+			return reflect.DeepEqual(got, want)
 		}
-		for k, v := range wantMap {
-			if gotMap[k] != v {
-				return false
-			}
-		}
-		return true
+		return stringSlicesEqual(gotValues, wantValues)
+	case []string:
+		return stringSlicesEqual(anyStringSlice(got), typed)
 	default:
 		return reflect.DeepEqual(got, want)
 	}
+}
+
+func stringMapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if b[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	a = uniqueStrings(a)
+	b = uniqueStrings(b)
+	if len(a) != len(b) {
+		return false
+	}
+	for _, value := range a {
+		if !containsString(b, value) {
+			return false
+		}
+	}
+	return true
 }
 
 func conditionValueIncludes(got, want any) bool {

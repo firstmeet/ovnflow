@@ -71,6 +71,9 @@ $env:OVNFLOW_V1_SCHEMA_CHECKS="1"
 go test -tags=integration ./...
 ```
 
+CI and release validation set `OVNFLOW_REQUIRE_INTEGRATION=1`, which turns
+missing or unreachable endpoints into test failures instead of skips.
+
 Runnable examples live under `examples/`:
 
 ```powershell
@@ -82,6 +85,7 @@ go run ./examples/southbound_watch
 See [Windows + WSL integration tests](docs/windows-wsl-integration.md) for WSL
 listener setup, safety settings, and Docker/CI notes.
 
-See [v0.1 scope](docs/v0.1-scope.md), [v0.2 scope](docs/v0.2-scope.md), and
-[v1.0 hardening](docs/v1.0-hardening.md) for API coverage, acceptance gates,
-and release criteria.
+See [v1.0 hardening](docs/v1.0-hardening.md) and
+[API stability](docs/api-stability.md) for the current release gates and stable
+surface. The [v0.1 scope](docs/v0.1-scope.md) and
+[v0.2 scope](docs/v0.2-scope.md) documents are historical compatibility notes.

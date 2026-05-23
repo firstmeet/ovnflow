@@ -153,36 +153,50 @@ func (n *NBClient) unreferenceOps(ctx context.Context, targetTable, targetUUID s
 		if table == targetTable {
 			continue
 		}
-		for _, column := range n.db.schema.ReferenceColumns(table, targetTable) {
-			columnSchema := n.db.schema.column(table, column)
-			if columnSchema != nil && columnSchema.Type == libovsdb.TypeMap {
-				rows, err := newTableRef(n.db, table, "", "").selectRows(ctx, nil, []string{colUUID, column})
+		for _, ref := range n.db.schema.ReferenceColumnInfos(table, targetTable) {
+			switch ref.Kind {
+			case referenceColumnMapUUID:
+				rows, err := newTableRef(n.db, table, "", "").selectRows(ctx, nil, []string{colUUID, ref.Name})
 				if err != nil {
 					return nil, err
 				}
 				for _, row := range rows {
 					referrerUUID := anyString(row[colUUID])
-					deleteKeys := ovsMapDeleteKeysForUUID(row[column], targetUUID)
+					deleteKeys := ovsMapDeleteKeysForUUID(row[ref.Name], targetUUID, ref.KeyRef, ref.ValueRef)
 					if referrerUUID == "" || len(deleteKeys) == 0 {
 						continue
 					}
-					ops = append(ops, ovsUnreferenceMapOp(table, column, referrerUUID, deleteKeys...))
+					ops = append(ops, ovsUnreferenceMapOp(table, ref.Name, referrerUUID, deleteKeys...))
 				}
-				continue
-			}
-			rows, err := newTableRef(n.db, table, "", "").selectRows(ctx,
-				[]libovsdb.Condition{libovsdb.NewCondition(column, libovsdb.ConditionIncludes, uuidValue(targetUUID))},
-				[]string{colUUID},
-			)
-			if err != nil {
-				return nil, err
-			}
-			for _, row := range rows {
-				referrerUUID := anyString(row[colUUID])
-				if referrerUUID == "" {
+			case referenceColumnSetUUID:
+				rows, err := newTableRef(n.db, table, "", "").selectRows(ctx,
+					[]libovsdb.Condition{libovsdb.NewCondition(ref.Name, libovsdb.ConditionIncludes, uuidValue(targetUUID))},
+					[]string{colUUID},
+				)
+				if err != nil {
+					return nil, err
+				}
+				for _, row := range rows {
+					referrerUUID := anyString(row[colUUID])
+					if referrerUUID == "" {
+						continue
+					}
+					ops = append(ops, ovsUnreferenceUUIDSetOp(table, ref.Name, referrerUUID, targetUUID))
+				}
+			case referenceColumnScalarUUID:
+				if ref.Reference == libovsdb.Weak {
 					continue
 				}
-				ops = append(ops, ovsUnreferenceUUIDOp(table, column, referrerUUID, targetUUID))
+				rows, err := newTableRef(n.db, table, "", "").selectRows(ctx,
+					[]libovsdb.Condition{libovsdb.NewCondition(ref.Name, libovsdb.ConditionEqual, uuidValue(targetUUID))},
+					[]string{colUUID},
+				)
+				if err != nil {
+					return nil, err
+				}
+				if len(rows) > 0 {
+					return nil, wrap(ErrorConflict, dbOVNNorthbound, targetTable, "delete", targetUUID, "row is still referenced by "+table+"."+ref.Name, nil)
+				}
 			}
 		}
 	}

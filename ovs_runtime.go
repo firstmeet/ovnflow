@@ -431,43 +431,57 @@ func (d *dbClient) ovsUnreferenceOps(ctx context.Context, targetTable, targetUUI
 		if tableName == targetTable {
 			continue
 		}
-		for _, column := range d.schema.ReferenceColumns(tableName, targetTable) {
-			columnSchema := d.schema.column(tableName, column)
-			if columnSchema != nil && columnSchema.Type == libovsdb.TypeMap {
-				rows, err := newTableRef(d, tableName, "", "").selectRows(ctx, nil, []string{colUUID, column})
+		for _, ref := range d.schema.ReferenceColumnInfos(tableName, targetTable) {
+			switch ref.Kind {
+			case referenceColumnMapUUID:
+				rows, err := newTableRef(d, tableName, "", "").selectRows(ctx, nil, []string{colUUID, ref.Name})
 				if err != nil {
 					return nil, err
 				}
 				for _, row := range rows {
 					referrerUUID := anyString(row[colUUID])
-					deleteKeys := ovsMapDeleteKeysForUUID(row[column], targetUUID)
+					deleteKeys := ovsMapDeleteKeysForUUID(row[ref.Name], targetUUID, ref.KeyRef, ref.ValueRef)
 					if referrerUUID == "" || len(deleteKeys) == 0 {
 						continue
 					}
-					ops = append(ops, ovsUnreferenceMapOp(tableName, column, referrerUUID, deleteKeys...))
+					ops = append(ops, ovsUnreferenceMapOp(tableName, ref.Name, referrerUUID, deleteKeys...))
 				}
-				continue
-			}
-			rows, err := newTableRef(d, tableName, "", "").selectRows(ctx,
-				[]libovsdb.Condition{libovsdb.NewCondition(column, libovsdb.ConditionIncludes, uuidValue(targetUUID))},
-				[]string{colUUID},
-			)
-			if err != nil {
-				return nil, err
-			}
-			for _, row := range rows {
-				referrerUUID := anyString(row[colUUID])
-				if referrerUUID == "" {
+			case referenceColumnSetUUID:
+				rows, err := newTableRef(d, tableName, "", "").selectRows(ctx,
+					[]libovsdb.Condition{libovsdb.NewCondition(ref.Name, libovsdb.ConditionIncludes, uuidValue(targetUUID))},
+					[]string{colUUID},
+				)
+				if err != nil {
+					return nil, err
+				}
+				for _, row := range rows {
+					referrerUUID := anyString(row[colUUID])
+					if referrerUUID == "" {
+						continue
+					}
+					ops = append(ops, ovsUnreferenceUUIDSetOp(tableName, ref.Name, referrerUUID, targetUUID))
+				}
+			case referenceColumnScalarUUID:
+				if ref.Reference == libovsdb.Weak {
 					continue
 				}
-				ops = append(ops, ovsUnreferenceUUIDOp(tableName, column, referrerUUID, targetUUID))
+				rows, err := newTableRef(d, tableName, "", "").selectRows(ctx,
+					[]libovsdb.Condition{libovsdb.NewCondition(ref.Name, libovsdb.ConditionEqual, uuidValue(targetUUID))},
+					[]string{colUUID},
+				)
+				if err != nil {
+					return nil, err
+				}
+				if len(rows) > 0 {
+					return nil, wrap(ErrorConflict, dbOpenVSwitch, targetTable, "delete", targetUUID, "row is still referenced by "+tableName+"."+ref.Name, nil)
+				}
 			}
 		}
 	}
 	return ops, nil
 }
 
-func ovsUnreferenceUUIDOp(tableName, column, referrerUUID, targetUUID string) libovsdb.Operation {
+func ovsUnreferenceUUIDSetOp(tableName, column, referrerUUID, targetUUID string) libovsdb.Operation {
 	return libovsdb.Operation{
 		Op:    libovsdb.OperationMutate,
 		Table: tableName,
@@ -489,13 +503,50 @@ func ovsUnreferenceMapOp(tableName, column, referrerUUID string, keys ...any) li
 	}
 }
 
-func ovsMapDeleteKeysForUUID(value any, targetUUID string) []any {
+func ovsMapDeleteKeysForUUID(value any, targetUUID string, keyRef, valueRef bool) []any {
+	if !keyRef && !valueRef {
+		valueRef = true
+	}
 	var keys []any
 	switch typed := value.(type) {
 	case libovsdb.OvsMap:
 		for key, value := range typed.GoMap {
-			if s, ok := anyUUIDString(value); ok && s == targetUUID {
+			if keyRef {
+				if s, ok := anyUUIDString(key); ok && s == targetUUID {
+					keys = append(keys, ovsMapMutationKey(key))
+					continue
+				}
+			}
+			if valueRef {
+				if s, ok := anyUUIDString(value); ok && s == targetUUID {
+					keys = append(keys, ovsMapMutationKey(key))
+				}
+			}
+		}
+	case map[any]any:
+		for key, value := range typed {
+			if keyRef {
+				if s, ok := anyUUIDString(key); ok && s == targetUUID {
+					keys = append(keys, ovsMapMutationKey(key))
+					continue
+				}
+			}
+			if valueRef {
+				if s, ok := anyUUIDString(value); ok && s == targetUUID {
+					keys = append(keys, ovsMapMutationKey(key))
+				}
+			}
+		}
+	case map[string]any:
+		for key, value := range typed {
+			if keyRef && key == targetUUID {
 				keys = append(keys, key)
+				continue
+			}
+			if valueRef {
+				if s, ok := anyUUIDString(value); ok && s == targetUUID {
+					keys = append(keys, key)
+				}
 			}
 		}
 	case []any:
@@ -511,8 +562,26 @@ func ovsMapDeleteKeysForUUID(value any, targetUUID string) []any {
 			if !ok || len(pair) != 2 {
 				continue
 			}
-			if s, ok := anyUUIDString(pair[1]); ok && s == targetUUID {
-				keys = append(keys, ovsMapMutationKey(pair[0]))
+			if keyRef {
+				if s, ok := anyUUIDString(pair[0]); ok && s == targetUUID {
+					keys = append(keys, ovsMapMutationKey(pair[0]))
+					continue
+				}
+			}
+			if valueRef {
+				if s, ok := anyUUIDString(pair[1]); ok && s == targetUUID {
+					keys = append(keys, ovsMapMutationKey(pair[0]))
+				}
+			}
+		}
+	case map[string]string:
+		for key, value := range typed {
+			if keyRef && key == targetUUID {
+				keys = append(keys, key)
+				continue
+			}
+			if valueRef && value == targetUUID {
+				keys = append(keys, key)
 			}
 		}
 	}

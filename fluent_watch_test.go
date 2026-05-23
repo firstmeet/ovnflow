@@ -58,8 +58,13 @@ func TestRowMatchesConditionFunctions(t *testing.T) {
 		{name: "not equal", condition: libovsdb.NewCondition(colName, libovsdb.ConditionNotEqual, "other"), want: true},
 		{name: "map includes", condition: libovsdb.NewCondition(colExternalIDs, libovsdb.ConditionIncludes, ovsMap(map[string]string{"owner": "ovnflow"})), want: true},
 		{name: "map excludes", condition: libovsdb.NewCondition(colExternalIDs, libovsdb.ConditionExcludes, ovsMap(map[string]string{"owner": "other"})), want: true},
+		{name: "map equal rejects subset", condition: libovsdb.NewCondition(colExternalIDs, libovsdb.ConditionEqual, ovsMap(map[string]string{"owner": "ovnflow"})), want: false},
+		{name: "map equal exact", condition: libovsdb.NewCondition(colExternalIDs, libovsdb.ConditionEqual, ovsMap(map[string]string{"owner": "ovnflow", "env": "test"})), want: true},
 		{name: "set includes", condition: libovsdb.NewCondition(colPorts, libovsdb.ConditionIncludes, "p2"), want: true},
 		{name: "set excludes", condition: libovsdb.NewCondition(colPorts, libovsdb.ConditionExcludes, "p3"), want: true},
+		{name: "set equal rejects subset", condition: libovsdb.NewCondition(colPorts, libovsdb.ConditionEqual, ovsSet("p1")), want: false},
+		{name: "set equal exact", condition: libovsdb.NewCondition(colPorts, libovsdb.ConditionEqual, ovsSet("p1", "p2")), want: true},
+		{name: "non string set equal does not match unrelated values", condition: libovsdb.NewCondition(colPorts, libovsdb.ConditionEqual, ovsSet(1, 2)), want: false},
 		{name: "includes missing", condition: libovsdb.NewCondition(colPorts, libovsdb.ConditionIncludes, "p3"), want: false},
 	}
 	for _, tt := range tests {

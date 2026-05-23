@@ -2,7 +2,7 @@
 
 All notable changes to `ovnflow` are tracked here.
 
-## v1.0.0 - pending
+## v1.0.0 - pending release approval
 
 ### Added
 
@@ -26,6 +26,9 @@ All notable changes to `ovnflow` are tracked here.
   for that subscription.
 - NB delete paths now clean UUID set and map references by selecting actual
   referrer rows before mutating them.
+- Delete cleanup now distinguishes scalar UUID references from set/map UUID
+  references and reports `ErrorConflict` for scalar strong references instead
+  of issuing invalid mutate operations.
 - OVS bridge and port delete paths now keep shared Port and Interface rows
   instead of deleting objects still referenced by other rows.
 - CI now includes `go vet` and Linux race testing.

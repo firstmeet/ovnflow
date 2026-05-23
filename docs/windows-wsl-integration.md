@@ -41,7 +41,9 @@ Test-NetConnection 172.27.192.120 -Port 6642
 ```
 
 If any endpoint is missing or unreachable, integration tests skip and print the
-WSL commands above.
+WSL commands above. Set `OVNFLOW_REQUIRE_INTEGRATION=1` for CI, release gates,
+or manual must-pass validation; in that mode missing or unreachable endpoints
+fail the test process instead of skipping.
 
 ## Test resources
 
@@ -89,6 +91,7 @@ docker compose up -d
 OVNFLOW_OVS_ADDR=tcp:127.0.0.1:6640 \
 OVNFLOW_OVN_NB_ADDR=tcp:127.0.0.1:6641 \
 OVNFLOW_OVN_SB_ADDR=tcp:127.0.0.1:6642 \
+OVNFLOW_REQUIRE_INTEGRATION=1 \
 go test -tags=integration ./...
 docker compose down -v
 ```

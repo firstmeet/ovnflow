@@ -15,6 +15,22 @@ type SchemaRegistry struct {
 	schema   libovsdb.DatabaseSchema
 }
 
+type referenceColumnKind string
+
+const (
+	referenceColumnScalarUUID referenceColumnKind = "uuid"
+	referenceColumnSetUUID    referenceColumnKind = "set"
+	referenceColumnMapUUID    referenceColumnKind = "map"
+)
+
+type referenceColumnInfo struct {
+	Name      string
+	Kind      referenceColumnKind
+	KeyRef    bool
+	ValueRef  bool
+	Reference libovsdb.RefType
+}
+
 func newSchemaRegistry(database string, schema libovsdb.DatabaseSchema) *SchemaRegistry {
 	return &SchemaRegistry{database: database, schema: schema}
 }
@@ -95,17 +111,28 @@ func (s *SchemaRegistry) RequireConditionColumns(table string, conditions ...lib
 }
 
 func (s *SchemaRegistry) ReferenceColumns(table, refTable string) []string {
+	infos := s.ReferenceColumnInfos(table, refTable)
+	columns := make([]string, 0, len(infos))
+	for _, info := range infos {
+		columns = append(columns, info.Name)
+	}
+	return columns
+}
+
+func (s *SchemaRegistry) ReferenceColumnInfos(table, refTable string) []referenceColumnInfo {
 	tableSchema := s.table(table)
 	if tableSchema == nil || refTable == "" {
 		return nil
 	}
-	var columns []string
+	var columns []referenceColumnInfo
 	for name, column := range tableSchema.Columns {
-		if columnReferencesTable(column, refTable) {
-			columns = append(columns, name)
+		if info, ok := referenceColumnInfoFor(name, column, refTable); ok {
+			columns = append(columns, info)
 		}
 	}
-	sort.Strings(columns)
+	sort.Slice(columns, func(i, j int) bool {
+		return columns[i].Name < columns[j].Name
+	})
 	return columns
 }
 
@@ -135,13 +162,38 @@ func (s *SchemaRegistry) column(table, column string) *libovsdb.ColumnSchema {
 }
 
 func columnReferencesTable(column *libovsdb.ColumnSchema, refTable string) bool {
+	_, ok := referenceColumnInfoFor("", column, refTable)
+	return ok
+}
+
+func referenceColumnInfoFor(name string, column *libovsdb.ColumnSchema, refTable string) (referenceColumnInfo, bool) {
 	if column == nil || column.TypeObj == nil || column.TypeObj.Key == nil {
-		return false
+		return referenceColumnInfo{}, false
 	}
-	if baseReferencesTable(column.TypeObj.Key, refTable) {
-		return true
+	keyRef := baseReferencesTable(column.TypeObj.Key, refTable)
+	valueRef := column.TypeObj.Value != nil && baseReferencesTable(column.TypeObj.Value, refTable)
+	if !keyRef && !valueRef {
+		return referenceColumnInfo{}, false
 	}
-	return column.TypeObj.Value != nil && baseReferencesTable(column.TypeObj.Value, refTable)
+	info := referenceColumnInfo{Name: name, KeyRef: keyRef, ValueRef: valueRef}
+	switch column.Type {
+	case libovsdb.TypeMap:
+		info.Kind = referenceColumnMapUUID
+		if valueRef {
+			info.Reference = baseReferenceType(column.TypeObj.Value)
+		} else {
+			info.Reference = baseReferenceType(column.TypeObj.Key)
+		}
+	case libovsdb.TypeSet:
+		info.Kind = referenceColumnSetUUID
+		info.Reference = baseReferenceType(column.TypeObj.Key)
+	case libovsdb.TypeUUID:
+		info.Kind = referenceColumnScalarUUID
+		info.Reference = baseReferenceType(column.TypeObj.Key)
+	default:
+		return referenceColumnInfo{}, false
+	}
+	return info, true
 }
 
 func baseReferencesTable(base *libovsdb.BaseType, refTable string) bool {
@@ -150,6 +202,17 @@ func baseReferencesTable(base *libovsdb.BaseType, refTable string) bool {
 	}
 	table, err := base.RefTable()
 	return err == nil && table == refTable
+}
+
+func baseReferenceType(base *libovsdb.BaseType) libovsdb.RefType {
+	if base == nil {
+		return libovsdb.Strong
+	}
+	refType, err := base.RefType()
+	if err != nil || refType == "" {
+		return libovsdb.Strong
+	}
+	return refType
 }
 
 func requiredSchema(database string) map[string][]string {

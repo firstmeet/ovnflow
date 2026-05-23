@@ -637,6 +637,29 @@ func TestNBDeleteUnreferencesMapValuedUUIDRefsByKey(t *testing.T) {
 	}
 }
 
+func TestNBDeleteReportsScalarStrongReferenceConflict(t *testing.T) {
+	db := testNBDBClient(t)
+	const scalarRefColumn = "scalar_ref"
+	db.schema.schema.Tables[tableLogicalRouter].Columns[scalarRefColumn] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Logical_Router_Port"}}}`)
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("lrp-uuid")}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("lr-uuid")}}},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).TableBy(tableLogicalRouterPort, colName, "lrp0").Delete().Execute(context.Background())
+	if !IsKind(err, ErrorConflict) {
+		t.Fatalf("Delete() = %v, want ErrorConflict for scalar strong reference", err)
+	}
+	for _, op := range rec.ops {
+		if op.Op == libovsdb.OperationMutate && op.Table == tableLogicalRouter && len(op.Mutations) > 0 && op.Mutations[0].Column == scalarRefColumn {
+			t.Fatalf("unexpected scalar UUID mutate: %#v; ops=%#v", op, rec.ops)
+		}
+	}
+}
+
 func TestTableRefEnsureHandlesConcurrentInsertRace(t *testing.T) {
 	db := testNBDBClient(t)
 	rec := &nbRecordingExecutor{
