@@ -90,15 +90,17 @@ type rowWatchDispatch struct {
 }
 
 type rowWatchSubscription struct {
-	mu     sync.Mutex
-	id     uint64
-	m      *watchManager
-	table  string
-	where  []libovsdb.Condition
-	events chan RowEvent
-	errs   chan<- error
-	done   chan struct{}
-	closed atomic.Bool
+	mu          sync.Mutex
+	id          uint64
+	m           *watchManager
+	table       string
+	where       []libovsdb.Condition
+	events      chan RowEvent
+	errs        chan<- error
+	done        chan struct{}
+	closed      atomic.Bool
+	initialDone bool
+	pending     []RowEvent
 }
 
 func newWatchManager(db *dbClient) *watchManager {
@@ -275,38 +277,79 @@ func (m *watchManager) pollRows(table string, stop <-chan struct{}) {
 func (s *rowWatchSubscription) sendInitial(ctx context.Context) {
 	rows, err := newTableRef(s.m.db, s.table, "", "").selectRows(ctx, s.where, nil)
 	if err != nil {
+		s.finishInitial(nil)
 		s.offerError(err)
 		return
 	}
+	initial := make([]RowEvent, 0, len(rows))
 	for _, row := range rows {
-		if !s.offer(RowEvent{Type: EventInitial, New: row}) {
-			return
-		}
+		initial = append(initial, RowEvent{Type: EventInitial, New: row})
 	}
-	select {
-	case <-ctx.Done():
-		s.offerError(classifyContext(ctx.Err(), s.m.db.database, s.table, "watch", ""))
-	case <-s.done:
-	}
+	s.finishInitial(initial)
 }
 
 func (s *rowWatchSubscription) offer(event RowEvent) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.offerLocked(event)
+}
+
+func (s *rowWatchSubscription) offerLocked(event RowEvent) bool {
 	if s.closed.Load() || !eventMatches(s.where, event) {
 		return false
 	}
+	if !s.initialDone {
+		limit := cap(s.events)
+		if limit <= 0 {
+			limit = defaultWatchQueueBuffer
+		}
+		if len(s.pending) >= limit {
+			s.reportOverflowLocked()
+			return false
+		}
+		s.pending = append(s.pending, event)
+		return true
+	}
+	return s.sendLocked(event)
+}
+
+func (s *rowWatchSubscription) sendLocked(event RowEvent) bool {
 	select {
 	case s.events <- event:
 		return true
 	default:
-		select {
-		case s.errs <- wrap(ErrorPartial, s.m.db.database, s.table, "watch", "", "watch event queue overflow", nil):
-		default:
-		}
-		s.closeLocked()
+		s.reportOverflowLocked()
 		return false
 	}
+}
+
+func (s *rowWatchSubscription) finishInitial(initial []RowEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed.Load() {
+		return
+	}
+	for _, event := range initial {
+		if !s.sendLocked(event) {
+			return
+		}
+	}
+	s.initialDone = true
+	pending := s.pending
+	s.pending = nil
+	for _, event := range pending {
+		if !s.sendLocked(event) {
+			return
+		}
+	}
+}
+
+func (s *rowWatchSubscription) reportOverflowLocked() {
+	select {
+	case s.errs <- wrap(ErrorPartial, s.m.db.database, s.table, "watch", "", "watch event queue overflow", nil):
+	default:
+	}
+	s.closeLocked()
 }
 
 func (s *rowWatchSubscription) offerError(err error) {

@@ -22,6 +22,10 @@ All notable changes to `ovnflow` are tracked here.
   the create race.
 - Watch subscription cleanup exits when a subscription closes before its parent
   context is canceled.
+- Watch subscriptions deliver the initial snapshot before buffered live events
+  for that subscription.
+- NB delete paths now clean UUID set and map references by selecting actual
+  referrer rows before mutating them.
 - CI now includes `go vet` and Linux race testing.
 
 ### Compatibility

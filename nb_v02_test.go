@@ -270,6 +270,71 @@ func TestTableRefDeleteSelectsThenDeletesByUUID(t *testing.T) {
 	}
 }
 
+func TestNBDeleteUnreferencesOnlyMatchingUUIDReferrers(t *testing.T) {
+	db := testNBDBClient(t)
+	db.schema.schema.Tables[tableLogicalRouter].Columns[colPorts] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Logical_Router_Port"},"min":0,"max":"unlimited"}}`)
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("lrp-uuid")}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("lr-uuid")}}},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).LogicalRouterPort("lrp0").Delete().Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Delete() = %v", err)
+	}
+	if len(rec.ops) != 4 {
+		t.Fatalf("ops = %d, want select target/select refs/mutate ref/delete target: %#v", len(rec.ops), rec.ops)
+	}
+	if rec.ops[2].Op != libovsdb.OperationMutate || rec.ops[2].Table != tableLogicalRouter {
+		t.Fatalf("ref cleanup op = %#v, want Logical_Router mutate", rec.ops[2])
+	}
+	if len(rec.ops[2].Where) != 1 || rec.ops[2].Where[0].Column != colUUID {
+		t.Fatalf("ref cleanup where = %#v, want UUID-specific referrer", rec.ops[2].Where)
+	}
+	if rec.ops[3].Op != libovsdb.OperationDelete || rec.ops[3].Where[0].Column != colUUID {
+		t.Fatalf("target delete op = %#v, want UUID delete", rec.ops[3])
+	}
+}
+
+func TestNBDeleteUnreferencesMapValuedUUIDRefsByKey(t *testing.T) {
+	db := testNBDBClient(t)
+	db.schema.schema.Tables[tableLogicalRouter].Columns["ref_map"] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":{"type":"uuid","refTable":"Logical_Router_Port"},"min":0,"max":"unlimited"}}`)
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("lrp-uuid")}}},
+			{Rows: []libovsdb.Row{
+				{colUUID: uuidValue("lr-uuid"), "ref_map": ovsMap(map[string]string{"match": "lrp-uuid", "other": "other-uuid"})},
+				{colUUID: uuidValue("lr-other-uuid"), "ref_map": ovsMap(map[string]string{"other": "other-uuid"})},
+			}},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).LogicalRouterPort("lrp0").Delete().Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Delete() = %v", err)
+	}
+	if len(rec.ops) != 4 {
+		t.Fatalf("ops = %d, want select target/select map refs/mutate matching ref/delete target: %#v", len(rec.ops), rec.ops)
+	}
+	if rec.ops[2].Op != libovsdb.OperationMutate || rec.ops[2].Table != tableLogicalRouter {
+		t.Fatalf("map cleanup op = %#v, want Logical_Router mutate", rec.ops[2])
+	}
+	if len(rec.ops[2].Mutations) != 1 || rec.ops[2].Mutations[0].Column != "ref_map" {
+		t.Fatalf("map cleanup mutations = %#v, want ref_map delete", rec.ops[2].Mutations)
+	}
+	if len(rec.ops[2].Where) != 1 || rec.ops[2].Where[0].Column != colUUID {
+		t.Fatalf("map cleanup where = %#v, want UUID-specific referrer", rec.ops[2].Where)
+	}
+}
+
 func TestTableRefEnsureHandlesConcurrentInsertRace(t *testing.T) {
 	db := testNBDBClient(t)
 	rec := &nbRecordingExecutor{

@@ -81,7 +81,11 @@ func (n *NBClient) executeByConditions(ctx context.Context, table, object string
 			if uuid == "" {
 				return wrap(ErrorConflict, dbOVNNorthbound, table, string(mode), object, "row UUID missing", nil)
 			}
-			ops = append(ops, n.unreferenceOps(table, uuid)...)
+			refOps, err := n.unreferenceOps(ctx, table, uuid)
+			if err != nil {
+				return err
+			}
+			ops = append(ops, refOps...)
 			ops = append(ops, libovsdb.Operation{
 				Op:    libovsdb.OperationDelete,
 				Table: table,
@@ -99,9 +103,9 @@ func (n *NBClient) executeByConditions(ctx context.Context, table, object string
 	}
 }
 
-func (n *NBClient) unreferenceOps(targetTable, targetUUID string) []libovsdb.Operation {
+func (n *NBClient) unreferenceOps(ctx context.Context, targetTable, targetUUID string) ([]libovsdb.Operation, error) {
 	if targetUUID == "" || n == nil || n.db == nil || n.db.schema == nil {
-		return nil
+		return nil, nil
 	}
 	var ops []libovsdb.Operation
 	for table := range n.db.schema.schema.Tables {
@@ -109,17 +113,39 @@ func (n *NBClient) unreferenceOps(targetTable, targetUUID string) []libovsdb.Ope
 			continue
 		}
 		for _, column := range n.db.schema.ReferenceColumns(table, targetTable) {
-			ops = append(ops, libovsdb.Operation{
-				Op:    libovsdb.OperationMutate,
-				Table: table,
-				Where: []libovsdb.Condition{},
-				Mutations: []libovsdb.Mutation{
-					*libovsdb.NewMutation(column, libovsdb.MutateOperationDelete, uuidSet(targetUUID)),
-				},
-			})
+			columnSchema := n.db.schema.column(table, column)
+			if columnSchema != nil && columnSchema.Type == libovsdb.TypeMap {
+				rows, err := newTableRef(n.db, table, "", "").selectRows(ctx, nil, []string{colUUID, column})
+				if err != nil {
+					return nil, err
+				}
+				for _, row := range rows {
+					referrerUUID := anyString(row[colUUID])
+					deleteKeys := ovsMapDeleteKeysForUUID(row[column], targetUUID)
+					if referrerUUID == "" || len(deleteKeys) == 0 {
+						continue
+					}
+					ops = append(ops, ovsUnreferenceMapOp(table, column, referrerUUID, deleteKeys...))
+				}
+				continue
+			}
+			rows, err := newTableRef(n.db, table, "", "").selectRows(ctx,
+				[]libovsdb.Condition{libovsdb.NewCondition(column, libovsdb.ConditionIncludes, uuidValue(targetUUID))},
+				[]string{colUUID},
+			)
+			if err != nil {
+				return nil, err
+			}
+			for _, row := range rows {
+				referrerUUID := anyString(row[colUUID])
+				if referrerUUID == "" {
+					continue
+				}
+				ops = append(ops, ovsUnreferenceUUIDOp(table, column, referrerUUID, targetUUID))
+			}
 		}
 	}
-	return ops
+	return ops, nil
 }
 
 func (n *NBClient) executeInsert(ctx context.Context, table, object, op string, row libovsdb.Row) error {

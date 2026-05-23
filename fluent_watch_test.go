@@ -67,15 +67,16 @@ func TestWatchSubscriptionFanoutCancelAndOverflow(t *testing.T) {
 	errsB := make(chan error, 1)
 	eventsA := make(chan RowEvent, 1)
 	eventsB := make(chan RowEvent, 1)
-	subA := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: eventsA, errs: errsA, done: make(chan struct{})}
+	subA := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: eventsA, errs: errsA, done: make(chan struct{}), initialDone: true}
 	subB := &rowWatchSubscription{
-		id:     2,
-		m:      manager,
-		table:  tablePortBinding,
-		where:  []libovsdb.Condition{libovsdb.NewCondition(colLogicalPort, libovsdb.ConditionEqual, "lp0")},
-		events: eventsB,
-		errs:   errsB,
-		done:   make(chan struct{}),
+		id:          2,
+		m:           manager,
+		table:       tablePortBinding,
+		where:       []libovsdb.Condition{libovsdb.NewCondition(colLogicalPort, libovsdb.ConditionEqual, "lp0")},
+		events:      eventsB,
+		errs:        errsB,
+		done:        make(chan struct{}),
+		initialDone: true,
 	}
 	manager.byTable[tablePortBinding] = map[uint64]*rowWatchSubscription{subA.id: subA, subB.id: subB}
 
@@ -112,7 +113,7 @@ func TestWatchSubscriptionOverflowThenPublishDoesNotPanic(t *testing.T) {
 	manager := newWatchManager(&dbClient{database: dbOVNSouthbound})
 	errs := make(chan error, 1)
 	events := make(chan RowEvent, 1)
-	sub := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: events, errs: errs, done: make(chan struct{})}
+	sub := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: events, errs: errs, done: make(chan struct{}), initialDone: true}
 	manager.byTable[tablePortBinding] = map[uint64]*rowWatchSubscription{sub.id: sub}
 
 	event := RowEvent{Type: EventAdd, New: Row{colLogicalPort: "lp0"}}
@@ -132,6 +133,36 @@ func TestWatchSubscriptionOverflowThenPublishDoesNotPanic(t *testing.T) {
 		}
 	default:
 		t.Fatal("original queued event was unexpectedly removed")
+	}
+}
+
+func TestWatchSubscriptionQueuesLiveEventsUntilInitialDelivered(t *testing.T) {
+	manager := newWatchManager(&dbClient{database: dbOVNSouthbound})
+	errs := make(chan error, 1)
+	events := make(chan RowEvent, 4)
+	sub := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: events, errs: errs, done: make(chan struct{})}
+	manager.byTable[tablePortBinding] = map[uint64]*rowWatchSubscription{sub.id: sub}
+
+	live := RowEvent{Type: EventUpdate, New: Row{colLogicalPort: "lp0", colExternalIDs: map[string]string{"phase": "live"}}}
+	if !sub.offer(live) {
+		t.Fatal("live offer before initial failed")
+	}
+	select {
+	case got := <-events:
+		t.Fatalf("live event was delivered before initial barrier completed: %#v", got)
+	default:
+	}
+
+	initial := RowEvent{Type: EventInitial, New: Row{colLogicalPort: "lp0", colExternalIDs: map[string]string{"phase": "initial"}}}
+	sub.finishInitial([]RowEvent{initial})
+
+	first := <-events
+	second := <-events
+	if first.Type != EventInitial {
+		t.Fatalf("first event = %s, want initial", first.Type)
+	}
+	if second.Type != EventUpdate {
+		t.Fatalf("second event = %s, want update", second.Type)
 	}
 }
 
@@ -173,7 +204,7 @@ func TestWatchSubscriptionDoesNotReportLateErrorAfterCancel(t *testing.T) {
 	manager := newWatchManager(&dbClient{database: dbOVNSouthbound})
 	errs := make(chan error, 1)
 	events := make(chan RowEvent, 1)
-	sub := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: events, errs: errs, done: make(chan struct{})}
+	sub := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: events, errs: errs, done: make(chan struct{}), initialDone: true}
 	manager.byTable[tablePortBinding] = map[uint64]*rowWatchSubscription{sub.id: sub}
 
 	sub.cancel()
