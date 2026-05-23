@@ -25,7 +25,7 @@ func TestOVSBridgeControllerUsesSingularControllerColumn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("controllerOps() = %v", err)
 	}
-	op := builder.insertBridgeOp(controllerUUIDs)
+	op := builder.insertBridgeOp(controllerUUIDs, nil, nil)
 
 	if len(controllerOps) != 1 {
 		t.Fatalf("controller ops = %d, want 1", len(controllerOps))
@@ -146,7 +146,7 @@ func TestOVSBridgeControllerEnsureReusesExistingAndInsertsMissing(t *testing.T) 
 	if got := rowStringValue(controllerOps[0].Row, colTarget); got != "tcp:127.0.0.1:6654" {
 		t.Fatalf("insert controller target = %q, want missing target", got)
 	}
-	op := builder.insertBridgeOp(controllerUUIDs)
+	op := builder.insertBridgeOp(controllerUUIDs, nil, nil)
 	if got := rowUUIDSliceValue(op.Row, colController); !equalStringSlices(got, controllerUUIDs) {
 		t.Fatalf("bridge controller UUID set = %#v, want %#v", got, controllerUUIDs)
 	}
@@ -175,6 +175,311 @@ func TestOVSBridgeControllerEnsureDeduplicatesTargets(t *testing.T) {
 	}
 	if len(controllerUUIDs) != 1 || len(controllerOps) != 1 {
 		t.Fatalf("controller UUIDs/ops = %#v/%#v, want one UUID and one insert", controllerUUIDs, controllerOps)
+	}
+}
+
+func TestOVSBridgeEnsureCreatesAdvancedConfigRowsAndReferences(t *testing.T) {
+	db := testOVSDBClient(t)
+	db.schema.schema.Tables[tableBridge].Columns[colMirrors] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Mirror"},"min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colFlowTables] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"integer","minInteger":0,"maxInteger":254},"value":{"type":"uuid","refTable":"Flow_Table"},"min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colNetFlow] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"NetFlow"},"min":0}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colSFlow] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"sFlow"},"min":0}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colIPFIX] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"IPFIX"},"min":0}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colAutoAttach] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"AutoAttach"},"min":0}}`)
+	db.schema.schema.Tables[tableMirror].Columns[colSelectAll] = columnSchemaFromJSON(t, `{"type":"boolean"}`)
+	db.schema.schema.Tables[tableMirror].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableFlowTable].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableNetFlow].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableSFlow].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableIPFIX].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("root-uuid")}}},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").Ensure().
+		WithMirror("mirror0", func(mirror *TableBuilder) {
+			mirror.WithMirrorSelectAll().WithExternalID("owner", "test")
+		}).
+		WithFlowTable(0, "ft0", func(flowTable *TableBuilder) {
+			flowTable.WithExternalID("owner", "test")
+		}).
+		WithNetFlow("nf0", func(netflow *TableBuilder) {
+			netflow.WithSamplingTarget("127.0.0.1:2055").WithExternalID("owner", "test")
+		}).
+		WithSFlow("sf0", func(sflow *TableBuilder) {
+			sflow.WithSamplingTarget("127.0.0.1:6343").WithExternalID("owner", "test")
+		}).
+		WithIPFIX("ipfix0", func(ipfix *TableBuilder) {
+			ipfix.WithSamplingTarget("127.0.0.1:4739").WithExternalID("owner", "test")
+		}).
+		WithAutoAttach("aa0", func(autoAttach *TableBuilder) {
+			autoAttach.WithColumn(colSystemDescription, "integration").WithColumn(colMappings, ovsIntMap(map[int]int{100: 200}))
+		}).
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	bridgeInsert := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableBridge)
+	if bridgeInsert == nil {
+		t.Fatalf("missing Bridge insert: %#v", rec.ops)
+	}
+	if len(rowUUIDSliceValue(bridgeInsert.Row, colMirrors)) != 1 {
+		t.Fatalf("bridge mirrors = %#v, want one named UUID", bridgeInsert.Row[colMirrors])
+	}
+	if got := rowIntUUIDMapValue(bridgeInsert.Row, colFlowTables); len(got) != 1 || got[0] == "" {
+		t.Fatalf("bridge flow_tables = %#v, want key 0 named UUID", bridgeInsert.Row[colFlowTables])
+	}
+	if got := rowUUIDSliceValue(bridgeInsert.Row, colNetFlow); len(got) != 1 {
+		t.Fatalf("bridge netflow = %#v, want one named UUID", bridgeInsert.Row[colNetFlow])
+	}
+	if got := rowUUIDSliceValue(bridgeInsert.Row, colSFlow); len(got) != 1 {
+		t.Fatalf("bridge sflow = %#v, want one named UUID", bridgeInsert.Row[colSFlow])
+	}
+	if got := rowUUIDSliceValue(bridgeInsert.Row, colIPFIX); len(got) != 1 {
+		t.Fatalf("bridge ipfix = %#v, want one named UUID", bridgeInsert.Row[colIPFIX])
+	}
+	if got := rowUUIDSliceValue(bridgeInsert.Row, colAutoAttach); len(got) != 1 {
+		t.Fatalf("bridge auto_attach = %#v, want one named UUID", bridgeInsert.Row[colAutoAttach])
+	}
+	if findRecordedOp(rec.ops, libovsdb.OperationInsert, tableMirror) == nil ||
+		findRecordedOp(rec.ops, libovsdb.OperationInsert, tableFlowTable) == nil ||
+		findRecordedOp(rec.ops, libovsdb.OperationInsert, tableNetFlow) == nil ||
+		findRecordedOp(rec.ops, libovsdb.OperationInsert, tableSFlow) == nil ||
+		findRecordedOp(rec.ops, libovsdb.OperationInsert, tableIPFIX) == nil ||
+		findRecordedOp(rec.ops, libovsdb.OperationInsert, tableAutoAttach) == nil {
+		t.Fatalf("missing advanced config inserts: %#v", rec.ops)
+	}
+	bridgeIndex := recordedOpIndex(rec.ops, libovsdb.OperationInsert, tableBridge)
+	for _, table := range []string{tableMirror, tableFlowTable, tableNetFlow, tableSFlow, tableIPFIX, tableAutoAttach} {
+		configIndex := recordedOpIndex(rec.ops, libovsdb.OperationInsert, table)
+		if configIndex < 0 || bridgeIndex < 0 || configIndex > bridgeIndex {
+			t.Fatalf("%s insert index = %d, Bridge insert index = %d, want config insert before Bridge insert: %#v", table, configIndex, bridgeIndex, rec.ops)
+		}
+	}
+}
+
+func TestOVSBridgeEnsureSkipsUnsupportedAdvancedConfigReferences(t *testing.T) {
+	db := testOVSDBClient(t)
+	delete(db.schema.schema.Tables, tableMirror)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("root-uuid")}}},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").Ensure().
+		WithMirror("mirror0", func(mirror *TableBuilder) {
+			mirror.WithMirrorSelectAll()
+		}).
+		WithNetFlow("nf0", func(netflow *TableBuilder) {
+			netflow.WithSamplingTarget("127.0.0.1:2055")
+		}).
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	if findRecordedOp(rec.ops, libovsdb.OperationInsert, tableMirror) != nil ||
+		findRecordedOp(rec.ops, libovsdb.OperationInsert, tableNetFlow) != nil {
+		t.Fatalf("unsupported advanced config rows should not be inserted: %#v", rec.ops)
+	}
+	bridgeInsert := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableBridge)
+	if bridgeInsert == nil {
+		t.Fatalf("missing Bridge insert: %#v", rec.ops)
+	}
+	if _, ok := bridgeInsert.Row[colMirrors]; ok {
+		t.Fatalf("bridge insert unexpectedly contains mirrors: %#v", bridgeInsert.Row)
+	}
+	if _, ok := bridgeInsert.Row[colNetFlow]; ok {
+		t.Fatalf("bridge insert unexpectedly contains netflow: %#v", bridgeInsert.Row)
+	}
+}
+
+func TestOVSBridgeEnsureReportsInvalidSchemaForUnsupportedAdvancedConfigColumns(t *testing.T) {
+	db := testOVSDBClient(t)
+	db.schema.schema.Tables[tableBridge].Columns[colMirrors] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Mirror"},"min":0,"max":"unlimited"}}`)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").Ensure().
+		WithMirror("mirror0", func(mirror *TableBuilder) {
+			mirror.WithColumn("unsupported_column", true)
+		}).
+		Execute(context.Background())
+	if !IsKind(err, ErrorInvalidSchema) {
+		t.Fatalf("Ensure() = %v, want ErrorInvalidSchema", err)
+	}
+	if findRecordedOp(rec.ops, libovsdb.OperationInsert, tableBridge) != nil ||
+		findRecordedOp(rec.ops, libovsdb.OperationInsert, tableMirror) != nil {
+		t.Fatalf("invalid schema should fail before writes: %#v", rec.ops)
+	}
+}
+
+func TestOVSBridgeEnsureUpdatesScalarAdvancedConfigReferencesOnExistingBridge(t *testing.T) {
+	db := testOVSDBClient(t)
+	db.schema.schema.Tables[tableBridge].Columns[colMirrors] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Mirror"},"min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colFlowTables] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"integer","minInteger":0,"maxInteger":254},"value":{"type":"uuid","refTable":"Flow_Table"},"min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colNetFlow] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"NetFlow"},"min":0}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colSFlow] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"sFlow"},"min":0}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colIPFIX] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"IPFIX"},"min":0}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colAutoAttach] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"AutoAttach"},"min":0}}`)
+	db.schema.schema.Tables[tableMirror].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableFlowTable].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableNetFlow].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableSFlow].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableIPFIX].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("bridge-uuid"), colName: "br-test"}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("mirror-uuid")}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("flow-table-uuid")}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("netflow-uuid")}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("sflow-uuid")}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("ipfix-uuid")}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("auto-attach-uuid")}}},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").Ensure().
+		WithMirror("mirror0", func(mirror *TableBuilder) {
+			mirror.WithExternalID("owner", "test")
+		}).
+		WithFlowTable(0, "ft0", func(flowTable *TableBuilder) {
+			flowTable.WithExternalID("owner", "test")
+		}).
+		WithNetFlow("nf0", func(netflow *TableBuilder) {
+			netflow.WithExternalID("owner", "test")
+		}).
+		WithSFlow("sf0", func(sflow *TableBuilder) {
+			sflow.WithExternalID("owner", "test")
+		}).
+		WithIPFIX("ipfix0", func(ipfix *TableBuilder) {
+			ipfix.WithExternalID("owner", "test")
+		}).
+		WithAutoAttach("aa0", nil).
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	for _, column := range []string{colNetFlow, colSFlow, colIPFIX, colAutoAttach} {
+		op := findBridgeReferenceOp(rec.ops, column)
+		if op == nil {
+			t.Fatalf("missing Bridge reference op for %s: %#v", column, rec.ops)
+		}
+		if op.Op != libovsdb.OperationUpdate {
+			t.Fatalf("Bridge %s reference op = %s, want update: %#v", column, op.Op, op)
+		}
+		if rowUUIDSliceValue(op.Row, column) == nil {
+			t.Fatalf("Bridge %s update row missing UUID: %#v", column, op.Row)
+		}
+	}
+	for _, column := range []string{colMirrors, colFlowTables} {
+		op := findBridgeReferenceOp(rec.ops, column)
+		if op == nil {
+			t.Fatalf("missing Bridge reference op for %s: %#v", column, rec.ops)
+		}
+		if op.Op != libovsdb.OperationMutate {
+			t.Fatalf("Bridge %s reference op = %s, want mutate: %#v", column, op.Op, op)
+		}
+	}
+}
+
+func TestOVSBridgeEnsureCreatesReferencedRowsBeforeBridgeInsert(t *testing.T) {
+	db := testOVSDBClient(t)
+	db.schema.schema.Tables[tableBridge].Columns[colController] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Controller"},"min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colMirrors] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Mirror"},"min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colFlowTables] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"integer","minInteger":0,"maxInteger":254},"value":{"type":"uuid","refTable":"Flow_Table"},"min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colNetFlow] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"NetFlow"},"min":0}}`)
+	db.schema.schema.Tables[tableMirror].Columns[colSelectAll] = columnSchemaFromJSON(t, `{"type":"boolean"}`)
+	db.schema.schema.Tables[tableMirror].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableFlowTable].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableNetFlow].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("root-uuid")}}},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").Ensure().
+		WithControllerTarget("tcp:127.0.0.1:6653").
+		WithMirror("mirror0", func(mirror *TableBuilder) {
+			mirror.WithMirrorSelectAll()
+		}).
+		WithFlowTable(0, "ft0", nil).
+		WithNetFlow("nf0", func(netflow *TableBuilder) {
+			netflow.WithSamplingTarget("127.0.0.1:2055")
+		}).
+		AddPort("p0").
+		WithInterfaceType("internal").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	bridgeIndex := recordedOpIndex(rec.ops, libovsdb.OperationInsert, tableBridge)
+	if bridgeIndex < 0 {
+		t.Fatalf("missing Bridge insert: %#v", rec.ops)
+	}
+	for _, table := range []string{tableInterface, tablePort, tableController, tableMirror, tableFlowTable, tableNetFlow} {
+		index := recordedOpIndex(rec.ops, libovsdb.OperationInsert, table)
+		if index < 0 {
+			t.Fatalf("missing %s insert: %#v", table, rec.ops)
+		}
+		if index > bridgeIndex {
+			t.Fatalf("%s insert index = %d, Bridge insert index = %d, want referenced row before Bridge insert: %#v", table, index, bridgeIndex, rec.ops)
+		}
 	}
 }
 
@@ -681,4 +986,34 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func recordedOpIndex(ops []libovsdb.Operation, op, table string) int {
+	for i := range ops {
+		if ops[i].Op == op && ops[i].Table == table {
+			return i
+		}
+	}
+	return -1
+}
+
+func findBridgeReferenceOp(ops []libovsdb.Operation, column string) *libovsdb.Operation {
+	for i := range ops {
+		if ops[i].Table != tableBridge {
+			continue
+		}
+		if ops[i].Op == libovsdb.OperationUpdate {
+			if _, ok := ops[i].Row[column]; ok {
+				return &ops[i]
+			}
+		}
+		if ops[i].Op == libovsdb.OperationMutate {
+			for _, mutation := range ops[i].Mutations {
+				if mutation.Column == column {
+					return &ops[i]
+				}
+			}
+		}
+	}
+	return nil
 }

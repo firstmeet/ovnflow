@@ -204,6 +204,71 @@ func (b *BridgeBuilder) WithDatapathType(kind string) *BridgeBuilder {
 	return b
 }
 
+func (b *BridgeBuilder) WithMirror(name string, configure func(*TableBuilder)) *BridgeBuilder {
+	ref := b.client.Mirror(name)
+	builder := ref.Ensure()
+	if configure != nil {
+		configure(builder)
+	}
+	b.advancedConfigs = append(b.advancedConfigs, ovsBridgeConfigSpec{
+		table:     tableMirror,
+		column:    colMirrors,
+		ref:       ref,
+		row:       cloneRow(builder.row),
+		mutations: append([]libovsdb.Mutation{}, builder.mutations...),
+	})
+	return b
+}
+
+func (b *BridgeBuilder) WithFlowTable(tableID int, name string, configure func(*TableBuilder)) *BridgeBuilder {
+	ref := b.client.FlowTable(name)
+	builder := ref.Ensure()
+	if configure != nil {
+		configure(builder)
+	}
+	b.advancedConfigs = append(b.advancedConfigs, ovsBridgeConfigSpec{
+		table:     tableFlowTable,
+		column:    colFlowTables,
+		bridgeKey: tableID,
+		ref:       ref,
+		row:       cloneRow(builder.row),
+		mutations: append([]libovsdb.Mutation{}, builder.mutations...),
+	})
+	return b
+}
+
+func (b *BridgeBuilder) WithNetFlow(name string, configure func(*TableBuilder)) *BridgeBuilder {
+	return b.withOptionalBridgeConfig(tableNetFlow, colNetFlow, b.client.NetFlow(name), configure)
+}
+
+func (b *BridgeBuilder) WithSFlow(name string, configure func(*TableBuilder)) *BridgeBuilder {
+	return b.withOptionalBridgeConfig(tableSFlow, colSFlow, b.client.SFlow(name), configure)
+}
+
+func (b *BridgeBuilder) WithIPFIX(name string, configure func(*TableBuilder)) *BridgeBuilder {
+	return b.withOptionalBridgeConfig(tableIPFIX, colIPFIX, b.client.IPFIX(name), configure)
+}
+
+func (b *BridgeBuilder) WithAutoAttach(systemName string, configure func(*TableBuilder)) *BridgeBuilder {
+	return b.withOptionalBridgeConfig(tableAutoAttach, colAutoAttach, b.client.AutoAttach(systemName), configure)
+}
+
+func (b *BridgeBuilder) withOptionalBridgeConfig(table, column string, ref *TableRef, configure func(*TableBuilder)) *BridgeBuilder {
+	builder := ref.Ensure()
+	if configure != nil {
+		configure(builder)
+	}
+	b.advancedConfigs = append(b.advancedConfigs, ovsBridgeConfigSpec{
+		table:       table,
+		column:      column,
+		ref:         ref,
+		row:         cloneRow(builder.row),
+		mutations:   append([]libovsdb.Mutation{}, builder.mutations...),
+		optionalRef: true,
+	})
+	return b
+}
+
 func (p *OVSPortBuilder) WithOption(key, value string) *OVSPortBuilder {
 	if p.spec.options == nil {
 		p.spec.options = map[string]string{}

@@ -57,6 +57,20 @@ type v1NorthboundResources struct {
 	suffix             string
 }
 
+type v1OVSResources struct {
+	bridgeName    string
+	managerTarget string
+	qosName       string
+	queueName     string
+	mirrorName    string
+	flowTableName string
+	netFlowName   string
+	sFlowName     string
+	ipfixName     string
+	autoAttach    string
+	suffix        string
+}
+
 var v1NorthboundSchemaPlan = []integrationSchemaCheck{
 	{table: "Logical_Router", columns: []string{"name", "ports", "static_routes", "nat", "options", "external_ids"}},
 	{table: "Logical_Router_Port", columns: []string{"name", "mac", "networks", "options", "external_ids"}},
@@ -267,22 +281,74 @@ func TestIntegrationV1MutationScenariosAreEnvGated(t *testing.T) {
 	})
 
 	t.Run("ovs extended table lifecycle", func(t *testing.T) {
-		managerTarget := "ptcp:" + suffix + ":127.0.0.1"
-		qosName := cfg.ResourcePrefix + "qos-" + suffix
-		queueName := cfg.ResourcePrefix + "queue-" + suffix
-		cleanupV1OVS(ctx, t, sdk, rawOVS, managerTarget, qosName, queueName)
+		prefix := cfg.ResourcePrefix + "ovs-" + suffix + "-"
+		resources := v1OVSResources{
+			bridgeName:    prefix + "bridge",
+			managerTarget: "ptcp:" + suffix + ":127.0.0.1",
+			qosName:       prefix + "qos",
+			queueName:     prefix + "queue",
+			mirrorName:    prefix + "mirror",
+			flowTableName: prefix + "flow-table",
+			netFlowName:   prefix + "netflow",
+			sFlowName:     prefix + "sflow",
+			ipfixName:     prefix + "ipfix",
+			autoAttach:    prefix + "auto-attach",
+			suffix:        suffix,
+		}
+		cleanupV1OVS(ctx, t, sdk, rawOVS, resources)
 		t.Cleanup(func() {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			cleanupV1OVS(cleanupCtx, t, sdk, rawOVS, managerTarget, qosName, queueName)
+			cleanupV1OVS(cleanupCtx, t, sdk, rawOVS, resources)
 		})
 
-		must(t, sdk.LocalOVS().Manager(managerTarget).Ensure().WithTarget(managerTarget).WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure manager")
-		must(t, sdk.LocalOVS().QoS(qosName).Ensure().WithQoSType("linux-htb").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure qos")
-		must(t, sdk.LocalOVS().Queue(queueName).Ensure().WithQueueOtherConfig("max-rate", "1000000").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure queue")
+		must(t, sdk.LocalOVS().Manager(resources.managerTarget).Ensure().WithTarget(resources.managerTarget).WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure manager")
+		must(t, sdk.LocalOVS().QoS(resources.qosName).Ensure().WithQoSType("linux-htb").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure qos")
+		must(t, sdk.LocalOVS().Queue(resources.queueName).Ensure().WithQueueOtherConfig("max-rate", "1000000").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure queue")
+		must(t, ensureV1OVSBridgeConfigs(ctx, sdk, resources), "ensure bridge advanced configs")
 
-		assertV1OVSReadback(t, rawOVS, managerTarget, qosName, queueName)
+		assertV1OVSReadback(t, rawOVS, resources)
+		must(t, ensureV1OVSBridgeConfigs(ctx, sdk, resources), "repeat ensure bridge advanced configs")
+		assertV1OVSReadback(t, rawOVS, resources)
+		cleanupV1OVS(ctx, t, sdk, rawOVS, resources)
+		assertV1OVSCleanup(t, rawOVS, resources)
 	})
+}
+
+func ensureV1OVSBridgeConfigs(ctx context.Context, sdk *Client, resources v1OVSResources) error {
+	return sdk.LocalOVS().Bridge(resources.bridgeName).Ensure().
+		WithExternalID(testMarkerKey, testMarkerValue).
+		WithMirror(resources.mirrorName, func(mirror *TableBuilder) {
+			mirror.WithMirrorSelectAll().WithExternalID(testMarkerKey, testMarkerValue)
+		}).
+		WithFlowTable(0, resources.flowTableName, func(flowTable *TableBuilder) {
+			flowTable.WithExternalID(testMarkerKey, testMarkerValue)
+		}).
+		WithNetFlow(resources.netFlowName, func(netflow *TableBuilder) {
+			netflow.WithSamplingTarget("127.0.0.1:2055").
+				WithColumn("engine_type", 1).
+				WithColumn("engine_id", 7).
+				WithColumn("active_timeout", 30).
+				WithExternalID(testMarkerKey, testMarkerValue)
+		}).
+		WithSFlow(resources.sFlowName, func(sflow *TableBuilder) {
+			sflow.WithSamplingTarget("127.0.0.1:6343").
+				WithColumn("agent", "lo").
+				WithColumn("header", 128).
+				WithColumn("sampling", 64).
+				WithColumn("polling", 10).
+				WithExternalID(testMarkerKey, testMarkerValue)
+		}).
+		WithIPFIX(resources.ipfixName, func(ipfix *TableBuilder) {
+			ipfix.WithSamplingTarget("127.0.0.1:4739").
+				WithColumn("sampling", 256).
+				WithExternalID(testMarkerKey, testMarkerValue)
+		}).
+		WithAutoAttach(resources.autoAttach, func(autoAttach *TableBuilder) {
+			autoAttach.WithColumn("system_description", "ovnflow integration auto attach").
+				WithColumn("mappings", ovsIntMap(map[int]int{100: 200}))
+		}).
+		Execute(ctx)
 }
 
 func requireEnvOptIn(t *testing.T, name, purpose string) {
@@ -369,18 +435,58 @@ func cleanupV1Northbound(ctx context.Context, t *testing.T, sdk *Client, raw *ov
 	}
 }
 
-func cleanupV1OVS(ctx context.Context, t *testing.T, sdk *Client, raw *ovsdbjson.Client, managerTarget, qosName, queueName string) {
+func cleanupV1OVS(ctx context.Context, t *testing.T, sdk *Client, raw *ovsdbjson.Client, resources v1OVSResources) {
 	t.Helper()
-	_ = sdk.LocalOVS().Manager(managerTarget).Delete().Execute(ctx)
-	_ = sdk.LocalOVS().QoS(qosName).Delete().Execute(ctx)
-	_ = sdk.LocalOVS().Queue(queueName).Delete().Execute(ctx)
+	_ = sdk.LocalOVS().Bridge(resources.bridgeName).Delete().Execute(ctx)
+	_ = sdk.LocalOVS().Manager(resources.managerTarget).Delete().Execute(ctx)
+	_ = sdk.LocalOVS().QoS(resources.qosName).Delete().Execute(ctx)
+	_ = sdk.LocalOVS().Queue(resources.queueName).Delete().Execute(ctx)
+	_ = sdk.LocalOVS().Mirror(resources.mirrorName).Delete().Execute(ctx)
+	_ = sdk.LocalOVS().FlowTable(resources.flowTableName).Delete().Execute(ctx)
+	_ = sdk.LocalOVS().NetFlow(resources.netFlowName).Delete().Execute(ctx)
+	_ = sdk.LocalOVS().SFlow(resources.sFlowName).Delete().Execute(ctx)
+	_ = sdk.LocalOVS().IPFIX(resources.ipfixName).Delete().Execute(ctx)
+	_ = sdk.LocalOVS().AutoAttach(resources.autoAttach).Delete().Execute(ctx)
 	_, err := raw.Transact(ctx, ovsDatabase,
-		map[string]any{"op": "delete", "table": "Manager", "where": []any{ovsdbjson.Condition("target", "==", managerTarget)}},
-		map[string]any{"op": "delete", "table": "QoS", "where": []any{ovsdbjson.Condition("external_ids", "includes", ovsdbjson.Map(map[string]string{"name": qosName}))}},
-		map[string]any{"op": "delete", "table": "Queue", "where": []any{ovsdbjson.Condition("external_ids", "includes", ovsdbjson.Map(map[string]string{"name": queueName}))}},
+		map[string]any{"op": "delete", "table": "Bridge", "where": nameWhere(resources.bridgeName)},
+		map[string]any{"op": "delete", "table": "Manager", "where": []any{ovsdbjson.Condition("target", "==", resources.managerTarget)}},
+		map[string]any{"op": "delete", "table": "QoS", "where": []any{ovsdbjson.Condition("external_ids", "includes", ovsdbjson.Map(map[string]string{"name": resources.qosName}))}},
+		map[string]any{"op": "delete", "table": "Queue", "where": []any{ovsdbjson.Condition("external_ids", "includes", ovsdbjson.Map(map[string]string{"name": resources.queueName}))}},
+		map[string]any{"op": "delete", "table": "Mirror", "where": nameWhere(resources.mirrorName)},
+		map[string]any{"op": "delete", "table": "Flow_Table", "where": nameWhere(resources.flowTableName)},
+		map[string]any{"op": "delete", "table": "NetFlow", "where": externalIDWhere("name", resources.netFlowName)},
+		map[string]any{"op": "delete", "table": "sFlow", "where": externalIDWhere("name", resources.sFlowName)},
+		map[string]any{"op": "delete", "table": "IPFIX", "where": externalIDWhere("name", resources.ipfixName)},
+		map[string]any{"op": "delete", "table": "AutoAttach", "where": []any{ovsdbjson.Condition("system_name", "==", resources.autoAttach)}},
 	)
 	if err != nil {
 		t.Logf("fallback cleanup v1.0 OVS: %v", err)
+	}
+}
+
+func assertV1OVSCleanup(t *testing.T, raw *ovsdbjson.Client, resources v1OVSResources) {
+	t.Helper()
+	checks := []struct {
+		table   string
+		where   []any
+		columns []string
+	}{
+		{table: "Bridge", where: nameWhere(resources.bridgeName), columns: []string{"name"}},
+		{table: "Manager", where: []any{ovsdbjson.Condition("target", "==", resources.managerTarget)}, columns: []string{"target"}},
+		{table: "QoS", where: externalIDWhere("name", resources.qosName), columns: []string{"external_ids"}},
+		{table: "Queue", where: externalIDWhere("name", resources.queueName), columns: []string{"external_ids"}},
+		{table: "Mirror", where: nameWhere(resources.mirrorName), columns: []string{"name"}},
+		{table: "Flow_Table", where: nameWhere(resources.flowTableName), columns: []string{"name"}},
+		{table: "NetFlow", where: externalIDWhere("name", resources.netFlowName), columns: []string{"external_ids"}},
+		{table: "sFlow", where: externalIDWhere("name", resources.sFlowName), columns: []string{"external_ids"}},
+		{table: "IPFIX", where: externalIDWhere("name", resources.ipfixName), columns: []string{"external_ids"}},
+		{table: "AutoAttach", where: []any{ovsdbjson.Condition("system_name", "==", resources.autoAttach)}, columns: []string{"system_name"}},
+	}
+	for _, check := range checks {
+		rows := selectRows(t, raw, ovsDatabase, check.table, check.where, check.columns)
+		if len(rows) != 0 {
+			t.Fatalf("%s rows after cleanup = %d, want 0", check.table, len(rows))
+		}
 	}
 }
 
@@ -513,22 +619,84 @@ func assertV1NorthboundReadback(t *testing.T, raw *ovsdbjson.Client, resources v
 	requireStringMapValue(t, bfd, "external_ids", testMarkerKey, testMarkerValue)
 }
 
-func assertV1OVSReadback(t *testing.T, raw *ovsdbjson.Client, managerTarget, qosName, queueName string) {
+func assertV1OVSReadback(t *testing.T, raw *ovsdbjson.Client, resources v1OVSResources) {
 	t.Helper()
 
-	manager := requireOneRow(t, raw, ovsDatabase, "Manager", []any{ovsdbjson.Condition("target", "==", managerTarget)}, []string{"target", "external_ids"})
-	requireString(t, manager, "target", managerTarget)
+	manager := requireOneRow(t, raw, ovsDatabase, "Manager", []any{ovsdbjson.Condition("target", "==", resources.managerTarget)}, []string{"target", "external_ids"})
+	requireString(t, manager, "target", resources.managerTarget)
 	requireStringMapValue(t, manager, "external_ids", testMarkerKey, testMarkerValue)
 
-	qos := requireOneRow(t, raw, ovsDatabase, "QoS", externalIDWhere("name", qosName), []string{"type", "external_ids"})
+	qos := requireOneRow(t, raw, ovsDatabase, "QoS", externalIDWhere("name", resources.qosName), []string{"type", "external_ids"})
 	requireString(t, qos, "type", "linux-htb")
-	requireStringMapValue(t, qos, "external_ids", "name", qosName)
+	requireStringMapValue(t, qos, "external_ids", "name", resources.qosName)
 	requireStringMapValue(t, qos, "external_ids", testMarkerKey, testMarkerValue)
 
-	queue := requireOneRow(t, raw, ovsDatabase, "Queue", externalIDWhere("name", queueName), []string{"other_config", "external_ids"})
+	queue := requireOneRow(t, raw, ovsDatabase, "Queue", externalIDWhere("name", resources.queueName), []string{"other_config", "external_ids"})
 	requireStringMapValue(t, queue, "other_config", "max-rate", "1000000")
-	requireStringMapValue(t, queue, "external_ids", "name", queueName)
+	requireStringMapValue(t, queue, "external_ids", "name", resources.queueName)
 	requireStringMapValue(t, queue, "external_ids", testMarkerKey, testMarkerValue)
+
+	bridge := requireOneRow(t, raw, ovsDatabase, "Bridge", nameWhere(resources.bridgeName), []string{"mirrors", "flow_tables", "netflow", "sflow", "ipfix", "auto_attach", "external_ids"})
+	requireStringMapValue(t, bridge, "external_ids", testMarkerKey, testMarkerValue)
+
+	mirror := requireOneRow(t, raw, ovsDatabase, "Mirror", nameWhere(resources.mirrorName), []string{"_uuid", "name", "select_all", "external_ids"})
+	mirrorUUID := rowUUIDMust(t, mirror, "_uuid")
+	requireString(t, mirror, "name", resources.mirrorName)
+	requireBool(t, mirror, "select_all", true)
+	requireStringMapValue(t, mirror, "external_ids", testMarkerKey, testMarkerValue)
+	if !rowUUIDSetContains(t, bridge, "mirrors", mirrorUUID) {
+		t.Fatalf("Bridge mirrors does not reference created Mirror")
+	}
+
+	flowTable := requireOneRow(t, raw, ovsDatabase, "Flow_Table", nameWhere(resources.flowTableName), []string{"_uuid", "name", "external_ids"})
+	flowTableUUID := rowUUIDMust(t, flowTable, "_uuid")
+	requireString(t, flowTable, "name", resources.flowTableName)
+	requireStringMapValue(t, flowTable, "external_ids", testMarkerKey, testMarkerValue)
+	requireUUIDIntMapValue(t, bridge, "flow_tables", 0, flowTableUUID)
+
+	netflow := requireOneRow(t, raw, ovsDatabase, "NetFlow", externalIDWhere("name", resources.netFlowName), []string{"_uuid", "targets", "engine_type", "engine_id", "active_timeout", "external_ids"})
+	netflowUUID := rowUUIDMust(t, netflow, "_uuid")
+	requireStringSetContains(t, netflow, "targets", "127.0.0.1:2055")
+	requireInt(t, netflow, "engine_type", 1)
+	requireInt(t, netflow, "engine_id", 7)
+	requireInt(t, netflow, "active_timeout", 30)
+	requireStringMapValue(t, netflow, "external_ids", "name", resources.netFlowName)
+	requireStringMapValue(t, netflow, "external_ids", testMarkerKey, testMarkerValue)
+	if got := rowUUIDOptional(t, bridge, "netflow"); got != netflowUUID {
+		t.Fatalf("Bridge netflow = %q, want %q", got, netflowUUID)
+	}
+
+	sflow := requireOneRow(t, raw, ovsDatabase, "sFlow", externalIDWhere("name", resources.sFlowName), []string{"_uuid", "agent", "targets", "header", "sampling", "polling", "external_ids"})
+	sflowUUID := rowUUIDMust(t, sflow, "_uuid")
+	requireString(t, sflow, "agent", "lo")
+	requireStringSetContains(t, sflow, "targets", "127.0.0.1:6343")
+	requireInt(t, sflow, "header", 128)
+	requireInt(t, sflow, "sampling", 64)
+	requireInt(t, sflow, "polling", 10)
+	requireStringMapValue(t, sflow, "external_ids", "name", resources.sFlowName)
+	requireStringMapValue(t, sflow, "external_ids", testMarkerKey, testMarkerValue)
+	if got := rowUUIDOptional(t, bridge, "sflow"); got != sflowUUID {
+		t.Fatalf("Bridge sflow = %q, want %q", got, sflowUUID)
+	}
+
+	ipfix := requireOneRow(t, raw, ovsDatabase, "IPFIX", externalIDWhere("name", resources.ipfixName), []string{"_uuid", "targets", "sampling", "external_ids"})
+	ipfixUUID := rowUUIDMust(t, ipfix, "_uuid")
+	requireStringSetContains(t, ipfix, "targets", "127.0.0.1:4739")
+	requireInt(t, ipfix, "sampling", 256)
+	requireStringMapValue(t, ipfix, "external_ids", "name", resources.ipfixName)
+	requireStringMapValue(t, ipfix, "external_ids", testMarkerKey, testMarkerValue)
+	if got := rowUUIDOptional(t, bridge, "ipfix"); got != ipfixUUID {
+		t.Fatalf("Bridge ipfix = %q, want %q", got, ipfixUUID)
+	}
+
+	autoAttach := requireOneRow(t, raw, ovsDatabase, "AutoAttach", []any{ovsdbjson.Condition("system_name", "==", resources.autoAttach)}, []string{"_uuid", "system_name", "system_description", "mappings"})
+	autoAttachUUID := rowUUIDMust(t, autoAttach, "_uuid")
+	requireString(t, autoAttach, "system_name", resources.autoAttach)
+	requireString(t, autoAttach, "system_description", "ovnflow integration auto attach")
+	requireIntegerMapValue(t, autoAttach, "mappings", 100, 200)
+	if got := rowUUIDOptional(t, bridge, "auto_attach"); got != autoAttachUUID {
+		t.Fatalf("Bridge auto_attach = %q, want %q", got, autoAttachUUID)
+	}
 }
 
 func requireOneRow(t *testing.T, client *ovsdbjson.Client, database, table string, where []any, columns []string) map[string]json.RawMessage {
@@ -558,6 +726,13 @@ func requireStringMapValue(t *testing.T, row map[string]json.RawMessage, column,
 	}
 }
 
+func requireBool(t *testing.T, row map[string]json.RawMessage, column string, want bool) {
+	t.Helper()
+	if got := rowBool(t, row, column); got != want {
+		t.Fatalf("%s = %t, want %t", column, got, want)
+	}
+}
+
 func requireInt(t *testing.T, row map[string]json.RawMessage, column string, want int) {
 	t.Helper()
 	if got := rowInt(t, row, column); got != want {
@@ -572,6 +747,20 @@ func requireIntMapValue(t *testing.T, row map[string]json.RawMessage, column, ke
 	}
 }
 
+func requireIntegerMapValue(t *testing.T, row map[string]json.RawMessage, column string, key, want int) {
+	t.Helper()
+	if got := rowIntegerMap(t, row, column)[key]; got != want {
+		t.Fatalf("%s[%d] = %d, want %d", column, key, got, want)
+	}
+}
+
+func requireUUIDIntMapValue(t *testing.T, row map[string]json.RawMessage, column string, key int, want string) {
+	t.Helper()
+	if got := rowIntUUIDMap(t, row, column)[key]; got != want {
+		t.Fatalf("%s[%d] = %q, want %q", column, key, got, want)
+	}
+}
+
 func requireStringSetContains(t *testing.T, row map[string]json.RawMessage, column, want string) {
 	t.Helper()
 	for _, got := range rowStringSetValuesFromColumn(t, row, column) {
@@ -580,4 +769,113 @@ func requireStringSetContains(t *testing.T, row map[string]json.RawMessage, colu
 		}
 	}
 	t.Fatalf("%s does not contain %q", column, want)
+}
+
+func rowBool(t *testing.T, row map[string]json.RawMessage, column string) bool {
+	t.Helper()
+	raw, ok := row[column]
+	if !ok {
+		t.Fatalf("row is missing column %q", column)
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("decode %s bool: %v", column, err)
+	}
+	return value
+}
+
+func rowIntegerMap(t *testing.T, row map[string]json.RawMessage, column string) map[int]int {
+	t.Helper()
+	raw, ok := row[column]
+	if !ok {
+		return map[int]int{}
+	}
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("decode %s map: %v", column, err)
+	}
+	result := map[int]int{}
+	outer, ok := value.([]any)
+	if !ok || len(outer) != 2 || outer[0] != "map" {
+		t.Fatalf("column %s is not an OVSDB map: %s", column, string(raw))
+	}
+	pairs, ok := outer[1].([]any)
+	if !ok {
+		t.Fatalf("column %s has invalid OVSDB map pairs: %s", column, string(raw))
+	}
+	for _, pairValue := range pairs {
+		pair, ok := pairValue.([]any)
+		if !ok || len(pair) != 2 {
+			t.Fatalf("column %s has invalid OVSDB map pair: %v", column, pairValue)
+		}
+		key, keyOK := jsonNumberAsInt(pair[0])
+		val, valOK := jsonNumberAsInt(pair[1])
+		if !keyOK || !valOK {
+			t.Fatalf("column %s map pair is not int:int: %v", column, pair)
+		}
+		result[key] = val
+	}
+	return result
+}
+
+func rowIntUUIDMap(t *testing.T, row map[string]json.RawMessage, column string) map[int]string {
+	t.Helper()
+	raw, ok := row[column]
+	if !ok {
+		return map[int]string{}
+	}
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("decode %s map: %v", column, err)
+	}
+	result := map[int]string{}
+	outer, ok := value.([]any)
+	if !ok || len(outer) != 2 || outer[0] != "map" {
+		t.Fatalf("column %s is not an OVSDB map: %s", column, string(raw))
+	}
+	pairs, ok := outer[1].([]any)
+	if !ok {
+		t.Fatalf("column %s has invalid OVSDB map pairs: %s", column, string(raw))
+	}
+	for _, pairValue := range pairs {
+		pair, ok := pairValue.([]any)
+		if !ok || len(pair) != 2 {
+			t.Fatalf("column %s has invalid OVSDB map pair: %v", column, pairValue)
+		}
+		key, keyOK := jsonNumberAsInt(pair[0])
+		val, valOK := jsonUUIDAsString(pair[1])
+		if !keyOK || !valOK {
+			t.Fatalf("column %s map pair is not int:uuid: %v", column, pair)
+		}
+		result[key] = val
+	}
+	return result
+}
+
+func jsonNumberAsInt(value any) (int, bool) {
+	switch typed := value.(type) {
+	case float64:
+		if typed != float64(int(typed)) {
+			return 0, false
+		}
+		return int(typed), true
+	case int:
+		return typed, true
+	default:
+		return 0, false
+	}
+}
+
+func jsonUUIDAsString(value any) (string, bool) {
+	typed, ok := value.([]any)
+	if !ok || len(typed) != 2 {
+		return "", false
+	}
+	if marker, ok := typed[0].(string); !ok || (marker != "uuid" && marker != "named-uuid") {
+		return "", false
+	}
+	id, ok := typed[1].(string)
+	return id, ok && id != ""
 }

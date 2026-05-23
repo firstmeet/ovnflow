@@ -93,6 +93,22 @@ func ovsMap(values map[string]string) libovsdb.OvsMap {
 	return m
 }
 
+func ovsIntMap(values map[int]int) libovsdb.OvsMap {
+	goMap := make(map[any]any, len(values))
+	for key, value := range values {
+		goMap[key] = value
+	}
+	return libovsdb.OvsMap{GoMap: goMap}
+}
+
+func ovsIntUUIDMap(values map[int]string) libovsdb.OvsMap {
+	goMap := make(map[any]any, len(values))
+	for key, value := range values {
+		goMap[key] = uuidValue(value)
+	}
+	return libovsdb.OvsMap{GoMap: goMap}
+}
+
 func setRowMap(row libovsdb.Row, column string, values map[string]string) {
 	if len(values) == 0 {
 		return
