@@ -60,6 +60,49 @@ func TestOVSBridgeReferencedRowsIncludesUUIDRefs(t *testing.T) {
 	}
 }
 
+func TestOVSBridgeEnsureNewBridgeWithPortAndExternalIDsDoesNotPanic(t *testing.T) {
+	db := testOVSDBClient(t)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("root-uuid")}}},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").Ensure().
+		WithExternalID("owner", "test").
+		AddPort("p0").
+		WithInterfaceType("internal").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	if len(rec.ops) != 7 {
+		t.Fatalf("ops = %d, want select bridge/select port/select root/insert iface/insert port/insert bridge/mutate root as recorded batches: %#v", len(rec.ops), rec.ops)
+	}
+	foundBridgeInsert := false
+	for _, op := range rec.ops {
+		if op.Op == libovsdb.OperationInsert && op.Table == tableBridge {
+			foundBridgeInsert = true
+			if got := rowStringMapValue(op.Row, colExternalIDs)["owner"]; got != "test" {
+				t.Fatalf("bridge insert external_ids.owner = %q, want test: %#v", got, op.Row)
+			}
+		}
+		if op.Op == libovsdb.OperationMutate && op.Table == tableBridge {
+			t.Fatalf("unexpected Bridge mutate for newly inserted bridge: %#v", op)
+		}
+	}
+	if !foundBridgeInsert {
+		t.Fatal("missing Bridge insert operation")
+	}
+}
+
 func TestOVSDeleteUnreferencesRowsByUUID(t *testing.T) {
 	op := ovsUnreferenceUUIDOp(tableBridge, colController, "br-uuid", "controller-uuid")
 	if op.Op != libovsdb.OperationMutate || op.Table != tableBridge {

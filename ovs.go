@@ -322,7 +322,7 @@ func (b *BridgeBuilder) executeEnsureOnce(ctx context.Context) error {
 
 	if bridgeNeedsCreate && b.port == nil {
 		ops = append(ops, b.insertBridgeOp(controllerUUIDs))
-	} else if len(b.externalIDs) > 0 {
+	} else if !bridgeNeedsCreate && len(bridges) > 0 && len(b.externalIDs) > 0 {
 		ops = append(ops, libovsdb.Operation{
 			Op:    libovsdb.OperationMutate,
 			Table: tableBridge,

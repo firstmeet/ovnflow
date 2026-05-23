@@ -2,7 +2,9 @@ package ovnflow
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"sync"
 	"testing"
 
 	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
@@ -268,6 +270,37 @@ func TestTableRefDeleteSelectsThenDeletesByUUID(t *testing.T) {
 	}
 }
 
+func TestTableRefEnsureHandlesConcurrentInsertRace(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{
+		errs: []error{
+			nil,
+			wrap(ErrorAlreadyExists, dbOVNNorthbound, tableLogicalRouter, "ensure", "lr0", "duplicate name", errors.New("duplicate")),
+			nil,
+		},
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).TableBy(tableLogicalRouter, colName, "lr0").
+		Ensure().
+		WithExternalID("owner", "test").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v, want nil after duplicate fallback update", err)
+	}
+	if len(rec.ops) != 3 {
+		t.Fatalf("ops = %d, want select/insert/update: %#v", len(rec.ops), rec.ops)
+	}
+	if got, want := []string{rec.ops[0].Op, rec.ops[1].Op, rec.ops[2].Op}, []string{libovsdb.OperationSelect, libovsdb.OperationInsert, libovsdb.OperationMutate}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ops = %#v, want %#v", got, want)
+	}
+}
+
 func TestNBV01LogicalSwitchAPIStillReturnsBuilder(t *testing.T) {
 	builder := (&NBClient{}).LogicalSwitch("ls0").Create().
 		WithSubnet("192.0.2.0/24").
@@ -286,12 +319,21 @@ func testNBDBClient(t *testing.T) *dbClient {
 }
 
 type nbRecordingExecutor struct {
+	mu      sync.Mutex
 	ops     []libovsdb.Operation
 	results []libovsdb.OperationResult
+	errs    []error
 }
 
 func (r *nbRecordingExecutor) Transact(_ context.Context, ops ...libovsdb.Operation) ([]libovsdb.OperationResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.ops = append(r.ops, ops...)
+	var err error
+	if len(r.errs) > 0 {
+		err = r.errs[0]
+		r.errs = r.errs[1:]
+	}
 	if r.results != nil {
 		if len(r.results) < len(ops) {
 			out := append([]libovsdb.OperationResult{}, r.results...)
@@ -299,13 +341,13 @@ func (r *nbRecordingExecutor) Transact(_ context.Context, ops ...libovsdb.Operat
 			for len(out) < len(ops) {
 				out = append(out, libovsdb.OperationResult{Count: 1})
 			}
-			return out, nil
+			return out, err
 		}
 		out := append([]libovsdb.OperationResult{}, r.results[:len(ops)]...)
 		r.results = r.results[len(ops):]
-		return out, nil
+		return out, err
 	}
-	return []libovsdb.OperationResult{{Count: 1}}, nil
+	return []libovsdb.OperationResult{{Count: 1}}, err
 }
 
 func (r *nbRecordingExecutor) List(context.Context, any) error {

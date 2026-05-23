@@ -67,6 +67,34 @@ func TestRequiredSchemaDocumentsV01Surface(t *testing.T) {
 	}
 }
 
+func TestRequiredSchemaDocumentsV10SouthboundSurface(t *testing.T) {
+	required := requiredSchema(dbOVNSouthbound)
+	wantTables := []string{
+		tableChassis,
+		tablePortBinding,
+		tableDatapathBinding,
+		tableLogicalFlow,
+		tableMACBinding,
+		tableFDB,
+		tableMulticastGroup,
+		tableServiceMonitor,
+		tableRBACRole,
+		tableRBACPermission,
+		tableMeter,
+		tableMeterBand,
+		tableDNS,
+		tableBFD,
+	}
+	for _, table := range wantTables {
+		if _, ok := required[table]; !ok {
+			t.Fatalf("requiredSchema(%s) missing %s", dbOVNSouthbound, table)
+		}
+	}
+	if containsString(required[tablePortBinding], "virtual_parent") {
+		t.Fatalf("requiredSchema(%s) should not require version-specific Port_Binding.virtual_parent", dbOVNSouthbound)
+	}
+}
+
 func TestSchemaRegistryReportsRuntimeCapabilities(t *testing.T) {
 	required := map[string][]string{
 		tableLogicalSwitch: {colPorts, colName, colExternalIDs},

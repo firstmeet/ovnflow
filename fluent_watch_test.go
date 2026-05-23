@@ -1,7 +1,10 @@
 package ovnflow
 
 import (
+	"context"
+	"sync"
 	"testing"
+	"time"
 
 	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
@@ -129,5 +132,56 @@ func TestWatchSubscriptionOverflowThenPublishDoesNotPanic(t *testing.T) {
 		}
 	default:
 		t.Fatal("original queued event was unexpectedly removed")
+	}
+}
+
+func TestWatchManagerInitializesOnceUnderConcurrentWatch(t *testing.T) {
+	db := &dbClient{
+		database: dbOVNNorthbound,
+		schema: newSchemaRegistry(dbOVNNorthbound, databaseSchemaWithColumns(dbOVNNorthbound, map[string][]string{
+			tableLogicalSwitch: {colName},
+		})),
+		executor: &nbRecordingExecutor{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			events, _ := db.Table(tableLogicalSwitch).Watch(ctx)
+			select {
+			case <-events:
+			case <-time.After(10 * time.Millisecond):
+			}
+		}()
+	}
+	wg.Wait()
+
+	first := db.watchManager()
+	if first == nil {
+		t.Fatal("watch manager is nil")
+	}
+	if got := db.watchManager(); got != first {
+		t.Fatal("watch manager was reinitialized")
+	}
+}
+
+func TestWatchSubscriptionDoesNotReportLateErrorAfterCancel(t *testing.T) {
+	manager := newWatchManager(&dbClient{database: dbOVNSouthbound})
+	errs := make(chan error, 1)
+	events := make(chan RowEvent, 1)
+	sub := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: events, errs: errs, done: make(chan struct{})}
+	manager.byTable[tablePortBinding] = map[uint64]*rowWatchSubscription{sub.id: sub}
+
+	sub.cancel()
+	manager.publishError(tablePortBinding, wrap(ErrorPartial, dbOVNSouthbound, tablePortBinding, "watch", "", "late", nil))
+
+	select {
+	case err := <-errs:
+		t.Fatalf("received late error after cancel: %v", err)
+	default:
 	}
 }

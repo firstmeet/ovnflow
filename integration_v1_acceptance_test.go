@@ -9,25 +9,33 @@ import (
 	"time"
 
 	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
-	"github.com/ovnflow/ovnflow/internal/ovsdbjson"
+	"github.com/firstmeet/ovnflow/internal/ovsdbjson"
 )
 
 const (
-	// EnvV02SchemaChecks enables read-only schema checks for the v0.2 NB, SB,
+	// EnvV1SchemaChecks enables read-only schema checks for the v1.0 NB, SB,
 	// and OVS surfaces.
+	EnvV1SchemaChecks = "OVNFLOW_V1_SCHEMA_CHECKS"
+
+	// EnvV1MutationChecks enables broad v1.0 lifecycle tests that mutate
+	// OVN/OVS rows beyond the always-on integration scenarios.
+	EnvV1MutationChecks = "OVNFLOW_V1_MUTATION_CHECKS"
+
+	// EnvV02SchemaChecks is kept as a compatibility alias for existing CI and
+	// local scripts.
 	EnvV02SchemaChecks = "OVNFLOW_V02_SCHEMA_CHECKS"
 
-	// EnvV02MutationChecks reserves the opt-in gate for broad v0.2 lifecycle
-	// tests that mutate OVN/OVS rows beyond the v0.1 integration scenarios.
+	// EnvV02MutationChecks is kept as a compatibility alias for existing CI and
+	// local scripts.
 	EnvV02MutationChecks = "OVNFLOW_V02_MUTATION_CHECKS"
 )
 
-type v02SchemaCheck struct {
+type integrationSchemaCheck struct {
 	table   string
 	columns []string
 }
 
-var v02NorthboundSchemaPlan = []v02SchemaCheck{
+var v1NorthboundSchemaPlan = []integrationSchemaCheck{
 	{table: "Logical_Router", columns: []string{"name", "ports", "static_routes", "nat", "options", "external_ids"}},
 	{table: "Logical_Router_Port", columns: []string{"name", "mac", "networks", "options", "external_ids"}},
 	{table: "ACL", columns: []string{"priority", "direction", "match", "action", "external_ids"}},
@@ -46,7 +54,7 @@ var v02NorthboundSchemaPlan = []v02SchemaCheck{
 	{table: "BFD", columns: []string{"logical_port", "dst_ip", "status", "external_ids"}},
 }
 
-var v02SouthboundSchemaPlan = []v02SchemaCheck{
+var v1SouthboundSchemaPlan = []integrationSchemaCheck{
 	{table: "Chassis", columns: []string{"name", "hostname", "external_ids"}},
 	{table: "Port_Binding", columns: []string{"logical_port", "chassis", "datapath", "mac", "external_ids"}},
 	{table: "Datapath_Binding", columns: []string{"tunnel_key", "external_ids"}},
@@ -63,7 +71,7 @@ var v02SouthboundSchemaPlan = []v02SchemaCheck{
 	{table: "BFD", columns: []string{"logical_port", "dst_ip", "status", "external_ids"}},
 }
 
-var v02OpenVSwitchSchemaPlan = []v02SchemaCheck{
+var v1OpenVSwitchSchemaPlan = []integrationSchemaCheck{
 	{table: "Open_vSwitch", columns: []string{"bridges", "manager_options", "ssl", "external_ids"}},
 	{table: "Bridge", columns: []string{"name", "ports", "controller", "mirrors", "external_ids"}},
 	{table: "Port", columns: []string{"name", "interfaces", "external_ids"}},
@@ -81,19 +89,19 @@ var v02OpenVSwitchSchemaPlan = []v02SchemaCheck{
 	{table: "AutoAttach", columns: []string{"system_name", "system_description", "mappings"}},
 }
 
-func TestIntegrationV02SchemaReadiness(t *testing.T) {
-	requireEnvOptIn(t, EnvV02SchemaChecks, "read-only v0.2 schema checks")
+func TestIntegrationV1SchemaReadiness(t *testing.T) {
+	requireAnyEnvOptIn(t, "read-only v1.0 schema checks", EnvV1SchemaChecks, EnvV02SchemaChecks)
 
 	cfg := requireIntegrationConfig(t)
 	checks := []struct {
 		name     string
 		address  string
 		database string
-		required []v02SchemaCheck
+		required []integrationSchemaCheck
 	}{
-		{name: "Northbound", address: cfg.OVNNBAddr, database: nbDatabase, required: v02NorthboundSchemaPlan},
-		{name: "Southbound", address: cfg.OVNSBAddr, database: sbDatabase, required: v02SouthboundSchemaPlan},
-		{name: "Open_vSwitch", address: cfg.OVSAddr, database: ovsDatabase, required: v02OpenVSwitchSchemaPlan},
+		{name: "Northbound", address: cfg.OVNNBAddr, database: nbDatabase, required: v1NorthboundSchemaPlan},
+		{name: "Southbound", address: cfg.OVNSBAddr, database: sbDatabase, required: v1SouthboundSchemaPlan},
+		{name: "Open_vSwitch", address: cfg.OVSAddr, database: ovsDatabase, required: v1OpenVSwitchSchemaPlan},
 	}
 
 	for _, check := range checks {
@@ -108,8 +116,8 @@ func TestIntegrationV02SchemaReadiness(t *testing.T) {
 	}
 }
 
-func TestIntegrationV02MutationScenariosAreEnvGated(t *testing.T) {
-	requireEnvOptIn(t, EnvV02MutationChecks, "v0.2 mutation acceptance")
+func TestIntegrationV1MutationScenariosAreEnvGated(t *testing.T) {
+	requireAnyEnvOptIn(t, "v1.0 mutation acceptance", EnvV1MutationChecks, EnvV02MutationChecks)
 
 	cfg := requireIntegrationConfig(t)
 	sdk := connectSDKOrSkip(t, cfg)
@@ -124,7 +132,7 @@ func TestIntegrationV02MutationScenariosAreEnvGated(t *testing.T) {
 	ctx := testContext(t)
 
 	t.Run("northbound L3 policy service lifecycle", func(t *testing.T) {
-		prefix := cfg.ResourcePrefix + "v02-" + suffix + "-"
+		prefix := cfg.ResourcePrefix + "v1-" + suffix + "-"
 		lrName := prefix + "lr"
 		lrpName := prefix + "lrp"
 		aclMatch := "outport == \"" + prefix + "vm\""
@@ -135,11 +143,11 @@ func TestIntegrationV02MutationScenariosAreEnvGated(t *testing.T) {
 		qosMatch := "ip4.src == 10.210.0.10"
 		addressSetName := prefix + "as"
 
-		cleanupV02Northbound(ctx, t, sdk, rawNB, lrName, lrpName, aclMatch, natLogicalIP, lbName, dhcpCIDR, dnsName, qosMatch, addressSetName)
+		cleanupV1Northbound(ctx, t, sdk, rawNB, lrName, lrpName, aclMatch, natLogicalIP, lbName, dhcpCIDR, dnsName, qosMatch, addressSetName)
 		t.Cleanup(func() {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			cleanupV02Northbound(cleanupCtx, t, sdk, rawNB, lrName, lrpName, aclMatch, natLogicalIP, lbName, dhcpCIDR, dnsName, qosMatch, addressSetName)
+			cleanupV1Northbound(cleanupCtx, t, sdk, rawNB, lrName, lrpName, aclMatch, natLogicalIP, lbName, dhcpCIDR, dnsName, qosMatch, addressSetName)
 		})
 
 		must(t, sdk.OVN().NB().LogicalRouter(lrName).Ensure().WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure logical router")
@@ -189,11 +197,11 @@ func TestIntegrationV02MutationScenariosAreEnvGated(t *testing.T) {
 		managerTarget := "ptcp:" + suffix + ":127.0.0.1"
 		qosName := cfg.ResourcePrefix + "qos-" + suffix
 		queueName := cfg.ResourcePrefix + "queue-" + suffix
-		cleanupV02OVS(ctx, t, sdk, rawOVS, managerTarget, qosName, queueName)
+		cleanupV1OVS(ctx, t, sdk, rawOVS, managerTarget, qosName, queueName)
 		t.Cleanup(func() {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			cleanupV02OVS(cleanupCtx, t, sdk, rawOVS, managerTarget, qosName, queueName)
+			cleanupV1OVS(cleanupCtx, t, sdk, rawOVS, managerTarget, qosName, queueName)
 		})
 
 		must(t, sdk.LocalOVS().Manager(managerTarget).Ensure().WithTarget(managerTarget).WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure manager")
@@ -213,6 +221,16 @@ func requireEnvOptIn(t *testing.T, name, purpose string) {
 	}
 }
 
+func requireAnyEnvOptIn(t *testing.T, purpose string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		if parseEnvBool(os.Getenv(name)) {
+			return
+		}
+	}
+	t.Skipf("%s disabled; set one of %v to 1", purpose, names)
+}
+
 func getIntegrationSchema(t *testing.T, client *ovsdbjson.Client, database string) libovsdb.DatabaseSchema {
 	t.Helper()
 	var schema libovsdb.DatabaseSchema
@@ -222,7 +240,7 @@ func getIntegrationSchema(t *testing.T, client *ovsdbjson.Client, database strin
 	return schema
 }
 
-func assertSchemaReadiness(t *testing.T, schema libovsdb.DatabaseSchema, required []v02SchemaCheck) {
+func assertSchemaReadiness(t *testing.T, schema libovsdb.DatabaseSchema, required []integrationSchemaCheck) {
 	t.Helper()
 	for _, required := range required {
 		t.Run(required.table, func(t *testing.T) {
@@ -239,7 +257,7 @@ func assertSchemaReadiness(t *testing.T, schema libovsdb.DatabaseSchema, require
 	}
 }
 
-func cleanupV02Northbound(ctx context.Context, t *testing.T, sdk *Client, raw *ovsdbjson.Client, lrName, lrpName, aclMatch, natLogicalIP, lbName, dhcpCIDR, dnsName, qosMatch, addressSetName string) {
+func cleanupV1Northbound(ctx context.Context, t *testing.T, sdk *Client, raw *ovsdbjson.Client, lrName, lrpName, aclMatch, natLogicalIP, lbName, dhcpCIDR, dnsName, qosMatch, addressSetName string) {
 	t.Helper()
 	_ = sdk.OVN().NB().LogicalRouter(lrName).Delete().Execute(ctx)
 	_ = sdk.OVN().NB().LogicalRouterPort(lrpName).Delete().Execute(ctx)
@@ -257,11 +275,11 @@ func cleanupV02Northbound(ctx context.Context, t *testing.T, sdk *Client, raw *o
 		map[string]any{"op": "delete", "table": "Address_Set", "where": nameWhere(addressSetName)},
 	)
 	if err != nil {
-		t.Logf("fallback cleanup v0.2 northbound: %v", err)
+		t.Logf("fallback cleanup v1.0 northbound: %v", err)
 	}
 }
 
-func cleanupV02OVS(ctx context.Context, t *testing.T, sdk *Client, raw *ovsdbjson.Client, managerTarget, qosName, queueName string) {
+func cleanupV1OVS(ctx context.Context, t *testing.T, sdk *Client, raw *ovsdbjson.Client, managerTarget, qosName, queueName string) {
 	t.Helper()
 	_ = sdk.LocalOVS().Manager(managerTarget).Delete().Execute(ctx)
 	_ = sdk.LocalOVS().QoS(qosName).Delete().Execute(ctx)
@@ -272,7 +290,7 @@ func cleanupV02OVS(ctx context.Context, t *testing.T, sdk *Client, raw *ovsdbjso
 		map[string]any{"op": "delete", "table": "Queue", "where": []any{ovsdbjson.Condition("external_ids", "includes", ovsdbjson.Map(map[string]string{"name": queueName}))}},
 	)
 	if err != nil {
-		t.Logf("fallback cleanup v0.2 OVS: %v", err)
+		t.Logf("fallback cleanup v1.0 OVS: %v", err)
 	}
 }
 

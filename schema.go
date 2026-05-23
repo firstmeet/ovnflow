@@ -177,9 +177,20 @@ func requiredSchema(database string) map[string][]string {
 		}
 	case dbOVNSouthbound:
 		return map[string][]string{
-			tableChassis:         {colName, "hostname", colExternalIDs},
-			tablePortBinding:     {colLogicalPort, colChassis, colDatapath, "mac", colExternalIDs},
-			tableDatapathBinding: {colTunnelKey, colExternalIDs},
+			tableChassis:         {colName},
+			tablePortBinding:     {colLogicalPort, colDatapath},
+			tableDatapathBinding: {colTunnelKey},
+			tableLogicalFlow:     {"pipeline", "table_id", colMatch, "actions"},
+			tableMACBinding:      {colLogicalPort, colIP, colMAC, colDatapath},
+			tableFDB:             {colMAC, colDPKey, colPortKey},
+			tableMulticastGroup:  {colDatapath, colTunnelKey, colPorts},
+			tableServiceMonitor:  {colIP, colProtocol, colPort, colLogicalPort},
+			tableRBACRole:        {colName, "permissions"},
+			tableRBACPermission:  {"table", "authorization", "insert_delete", "update"},
+			tableMeter:           {colName, colUnit, colBands},
+			tableMeterBand:       {colAction, colRate, colBurstSize},
+			tableDNS:             {colRecords, "datapaths"},
+			tableBFD:             {colLogicalPort, colDstIP},
 		}
 	case dbOpenVSwitch:
 		return map[string][]string{

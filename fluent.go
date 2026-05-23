@@ -445,6 +445,9 @@ func (b *TableBuilder) executeCreate(ctx context.Context, ensure bool) error {
 		Row:      row,
 	}
 	_, err := b.ref.db.transact(ctx, b.ref.table, string(b.mode), b.ref.identityValue, op)
+	if ensure && IsKind(err, ErrorAlreadyExists) {
+		return b.executeUpdate(ctx)
+	}
 	return err
 }
 

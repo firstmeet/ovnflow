@@ -40,6 +40,8 @@ type dbClient struct {
 	raw      ovsclient.Client
 	executor executor
 	schema   *SchemaRegistry
+
+	watchesMu sync.Mutex
 	watches  *watchManager
 }
 

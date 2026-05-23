@@ -35,11 +35,9 @@ func (d *dbClient) watchRows(ctx context.Context, table string, where []libovsdb
 		close(events)
 		return events, errs
 	}
-	if d.watches == nil {
-		d.watches = newWatchManager(d)
-	}
+	watches := d.watchManager()
 
-	sub := d.watches.subscribe(ctx, table, where, queue, errs)
+	sub := watches.subscribe(ctx, table, where, queue, errs)
 	go func() {
 		defer close(events)
 		defer sub.cancel()
@@ -63,6 +61,15 @@ func (d *dbClient) watchRows(ctx context.Context, table string, where []libovsdb
 	}()
 	go sub.sendInitial(ctx)
 	return events, errs
+}
+
+func (d *dbClient) watchManager() *watchManager {
+	d.watchesMu.Lock()
+	defer d.watchesMu.Unlock()
+	if d.watches == nil {
+		d.watches = newWatchManager(d)
+	}
+	return d.watches
 }
 
 type watchManager struct {
@@ -127,8 +134,11 @@ func (m *watchManager) subscribe(ctx context.Context, table string, where []libo
 		m.startPoller(table)
 	}
 	go func() {
-		<-ctx.Done()
-		sub.cancel()
+		select {
+		case <-ctx.Done():
+			sub.cancel()
+		case <-sub.done:
+		}
 	}()
 	return sub
 }
@@ -300,7 +310,12 @@ func (s *rowWatchSubscription) offer(event RowEvent) bool {
 }
 
 func (s *rowWatchSubscription) offerError(err error) {
-	if err == nil || s.closed.Load() {
+	if err == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed.Load() {
 		return
 	}
 	select {

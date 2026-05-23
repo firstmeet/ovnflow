@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ovnflow/ovnflow/internal/ovsdbjson"
+	"github.com/firstmeet/ovnflow/internal/ovsdbjson"
 )
 
 const (

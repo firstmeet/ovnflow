@@ -4,6 +4,10 @@
 [`libovsdb`](https://github.com/ovn-kubernetes/libovsdb) for production OVSDB
 connections, schema monitoring, typed models, watches, and transactions.
 
+```powershell
+go get github.com/firstmeet/ovnflow
+```
+
 The current SDK surface covers:
 
 | Area | Coverage |
@@ -59,11 +63,11 @@ $env:OVNFLOW_OVN_SB_ADDR="tcp:172.27.192.120:6642"
 go test -tags=integration ./...
 ```
 
-Optional v0.2 readiness checks are also integration-tagged. They are read-only
+Optional v1.0 readiness checks are also integration-tagged. They are read-only
 and validate the NB, SB, and OVS runtime schemas:
 
 ```powershell
-$env:OVNFLOW_V02_SCHEMA_CHECKS="1"
+$env:OVNFLOW_V1_SCHEMA_CHECKS="1"
 go test -tags=integration ./...
 ```
 
@@ -78,6 +82,6 @@ go run ./examples/southbound_watch
 See [Windows + WSL integration tests](docs/windows-wsl-integration.md) for WSL
 listener setup, safety settings, and Docker/CI notes.
 
-See [v0.1 scope](docs/v0.1-scope.md) for current API coverage and
-[v0.2 scope](docs/v0.2-scope.md) for the v0.2 API surface, acceptance matrix,
-and integration-test gates.
+See [v0.1 scope](docs/v0.1-scope.md), [v0.2 scope](docs/v0.2-scope.md), and
+[v1.0 hardening](docs/v1.0-hardening.md) for API coverage, acceptance gates,
+and release criteria.
