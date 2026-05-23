@@ -120,6 +120,20 @@ func TestSchemaRegistryReportsRuntimeCapabilities(t *testing.T) {
 	}
 }
 
+func TestSchemaRegistryTablesReturnsSortedNames(t *testing.T) {
+	registry := newSchemaRegistry(dbOVNNorthbound, databaseSchemaWithColumns(dbOVNNorthbound, map[string][]string{
+		"Z_Table": {},
+		"A_Table": {},
+		"M_Table": {},
+	}))
+
+	got := registry.Tables()
+	want := []string{"A_Table", "M_Table", "Z_Table"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Tables() = %#v, want %#v", got, want)
+	}
+}
+
 func TestSchemaRegistryClassifiesUUIDReferenceColumns(t *testing.T) {
 	schema := databaseSchemaWithColumns(dbOpenVSwitch, map[string][]string{
 		tableBridge: {colController, colNetFlow, colQueues},

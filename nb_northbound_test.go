@@ -693,6 +693,73 @@ func TestNBDeleteUnreferencesSameTableSetReferrers(t *testing.T) {
 	}
 }
 
+func TestNBDeleteReferenceCleanupUsesDeterministicTableOrder(t *testing.T) {
+	schema := databaseSchemaWithColumns(dbOVNNorthbound, map[string][]string{
+		tableLogicalRouterPort: {colName},
+		"Z_Referrer":           {"z_refs"},
+		"A_Referrer":           {"a_refs"},
+	})
+	schema.Tables["Z_Referrer"].Columns["z_refs"] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Logical_Router_Port"},"min":0,"max":"unlimited"}}`)
+	schema.Tables["A_Referrer"].Columns["a_refs"] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Logical_Router_Port"},"min":0,"max":"unlimited"}}`)
+	db := &dbClient{
+		database: dbOVNNorthbound,
+		schema:   newSchemaRegistry(dbOVNNorthbound, schema),
+	}
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("lrp-uuid")}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("a-uuid")}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("z-uuid")}}},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).TableBy(tableLogicalRouterPort, colName, "lrp0").Delete().Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Delete() = %v", err)
+	}
+	if len(rec.ops) != 6 {
+		t.Fatalf("ops = %d, want select target/select A/select Z/mutate A/mutate Z/delete target: %#v", len(rec.ops), rec.ops)
+	}
+	want := []struct {
+		op     string
+		table  string
+		column string
+	}{
+		{libovsdb.OperationSelect, tableLogicalRouterPort, ""},
+		{libovsdb.OperationSelect, "A_Referrer", "a_refs"},
+		{libovsdb.OperationSelect, "Z_Referrer", "z_refs"},
+		{libovsdb.OperationMutate, "A_Referrer", "a_refs"},
+		{libovsdb.OperationMutate, "Z_Referrer", "z_refs"},
+		{libovsdb.OperationDelete, tableLogicalRouterPort, ""},
+	}
+	for i, wantOp := range want {
+		got := rec.ops[i]
+		if got.Op != wantOp.op || got.Table != wantOp.table {
+			t.Fatalf("op[%d] = %s %s, want %s %s; ops=%#v", i, got.Op, got.Table, wantOp.op, wantOp.table, rec.ops)
+		}
+		if wantOp.column == "" {
+			continue
+		}
+		switch got.Op {
+		case libovsdb.OperationSelect:
+			if len(got.Columns) != 1 || got.Columns[0] != colUUID {
+				t.Fatalf("select op[%d] columns = %#v, want only _uuid", i, got.Columns)
+			}
+			if len(got.Where) != 1 || got.Where[0].Column != wantOp.column {
+				t.Fatalf("select op[%d] where = %#v, want %s includes target UUID", i, got.Where, wantOp.column)
+			}
+		case libovsdb.OperationMutate:
+			if len(got.Mutations) != 1 || got.Mutations[0].Column != wantOp.column {
+				t.Fatalf("mutate op[%d] mutations = %#v, want %s", i, got.Mutations, wantOp.column)
+			}
+		}
+	}
+}
+
 func TestNBDeleteReportsSameTableScalarStrongReferenceConflict(t *testing.T) {
 	db := testNBDBClient(t)
 	const sameTableScalar = "same_table_scalar"

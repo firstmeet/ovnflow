@@ -77,6 +77,18 @@ func (s *SchemaRegistry) Columns(table string) []string {
 	return columns
 }
 
+func (s *SchemaRegistry) Tables() []string {
+	if s == nil {
+		return nil
+	}
+	tables := make([]string, 0, len(s.schema.Tables))
+	for table := range s.schema.Tables {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	return tables
+}
+
 // RequireTable returns ErrorInvalidSchema when table is unavailable.
 func (s *SchemaRegistry) RequireTable(table string) error {
 	if s.HasTable(table) {

@@ -637,7 +637,7 @@ func (d *dbClient) referenceCleanupOps(ctx context.Context, targetTable, targetU
 		return nil, nil
 	}
 	var ops []libovsdb.Operation
-	for tableName := range d.schema.schema.Tables {
+	for _, tableName := range d.schema.Tables() {
 		for _, ref := range d.schema.ReferenceColumnInfos(tableName, targetTable) {
 			switch ref.Kind {
 			case referenceColumnMapUUID:
