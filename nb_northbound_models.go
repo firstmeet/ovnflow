@@ -41,6 +41,29 @@ type LogicalRouterPortBuilder struct {
 	ipv6RAConfigs  map[string]string
 	options        map[string]string
 	externalIDs    map[string]string
+	gatewaySpecs   []gatewayChassisSpec
+	haGroupSpec    *haChassisGroupSpec
+	routerName     string
+}
+
+type gatewayChassisSpec struct {
+	name        string
+	chassisName string
+	priority    *int
+	options     map[string]string
+	externalIDs map[string]string
+}
+
+type haChassisGroupSpec struct {
+	name        string
+	haChassis   []haChassisSpec
+	externalIDs map[string]string
+}
+
+type haChassisSpec struct {
+	chassisName string
+	priority    *int
+	externalIDs map[string]string
 }
 
 // ACLRef identifies an ACL row by direction, priority, match, and optional name.
@@ -100,6 +123,7 @@ type NATBuilder struct {
 	priority             *int
 	options              map[string]string
 	externalIDs          map[string]string
+	routerName           string
 }
 
 // LoadBalancerRef identifies one Load_Balancer row by name.
@@ -121,6 +145,7 @@ type LoadBalancerBuilder struct {
 	healthChecks    []string
 	options         map[string]string
 	externalIDs     map[string]string
+	routerName      string
 }
 
 // DHCPOptionsRef identifies one DHCP_Options row by cidr.
@@ -177,6 +202,7 @@ type QoSBuilder struct {
 	action      map[string]int
 	bandwidth   map[string]int
 	externalIDs map[string]string
+	switchName  string
 }
 
 // MeterRef identifies one Meter row by name.
@@ -193,7 +219,16 @@ type MeterBuilder struct {
 	mode        nbMode
 	unit        string
 	bands       []string
+	bandSpecs   []meterBandSpec
 	fair        *bool
+	externalIDs map[string]string
+}
+
+type meterBandSpec struct {
+	name        string
+	action      string
+	rate        int
+	burstSize   *int
 	externalIDs map[string]string
 }
 
@@ -229,6 +264,15 @@ type PortGroupBuilder struct {
 	mode        nbMode
 	ports       []string
 	acls        []string
+	aclSpecs    []inlineACLSpec
+	externalIDs map[string]string
+}
+
+type inlineACLSpec struct {
+	direction   string
+	priority    int
+	match       string
+	action      string
 	externalIDs map[string]string
 }
 

@@ -4,12 +4,13 @@ package ovnflow
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
 
-	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
 	"github.com/firstmeet/ovnflow/internal/ovsdbjson"
+	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 const (
@@ -33,6 +34,27 @@ const (
 type integrationSchemaCheck struct {
 	table   string
 	columns []string
+}
+
+type v1NorthboundResources struct {
+	lrName             string
+	lsName             string
+	lrpName            string
+	aclMatch           string
+	natLogicalIP       string
+	lbName             string
+	dhcpCIDR           string
+	dnsName            string
+	qosMatch           string
+	meterName          string
+	meterBandName      string
+	portGroupName      string
+	addressSetName     string
+	gatewayChassisName string
+	haChassisName      string
+	haGroupName        string
+	bfdDstIP           string
+	suffix             string
 }
 
 var v1NorthboundSchemaPlan = []integrationSchemaCheck{
@@ -133,40 +155,91 @@ func TestIntegrationV1MutationScenariosAreEnvGated(t *testing.T) {
 
 	t.Run("northbound L3 policy service lifecycle", func(t *testing.T) {
 		prefix := cfg.ResourcePrefix + "v1-" + suffix + "-"
-		lrName := prefix + "lr"
-		lrpName := prefix + "lrp"
-		aclMatch := "outport == \"" + prefix + "vm\""
-		natLogicalIP := "10.210.0.0/24"
-		lbName := prefix + "lb"
-		dhcpCIDR := "10.210.0.0/24"
-		dnsName := prefix + "dns"
-		qosMatch := "ip4.src == 10.210.0.10"
-		addressSetName := prefix + "as"
+		resources := v1NorthboundResources{
+			lrName:             prefix + "lr",
+			lsName:             prefix + "ls",
+			lrpName:            prefix + "lrp",
+			aclMatch:           "outport == \"" + prefix + "vm\"",
+			natLogicalIP:       "10.210.0.0/24",
+			lbName:             prefix + "lb",
+			dhcpCIDR:           "10.210.0.0/24",
+			dnsName:            prefix + "dns",
+			qosMatch:           "ip4.src == 10.210.0.10",
+			meterName:          prefix + "meter",
+			meterBandName:      prefix + "meter-band",
+			portGroupName:      prefix + "pg",
+			addressSetName:     prefix + "as",
+			gatewayChassisName: prefix + "gwc",
+			haChassisName:      prefix + "hac",
+			haGroupName:        prefix + "hag",
+			bfdDstIP:           "10.210.0.2",
+			suffix:             suffix,
+		}
 
-		cleanupV1Northbound(ctx, t, sdk, rawNB, lrName, lrpName, aclMatch, natLogicalIP, lbName, dhcpCIDR, dnsName, qosMatch, addressSetName)
+		cleanupV1Northbound(ctx, t, sdk, rawNB, resources)
 		t.Cleanup(func() {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			cleanupV1Northbound(cleanupCtx, t, sdk, rawNB, lrName, lrpName, aclMatch, natLogicalIP, lbName, dhcpCIDR, dnsName, qosMatch, addressSetName)
+			cleanupV1Northbound(cleanupCtx, t, sdk, rawNB, resources)
 		})
 
-		must(t, sdk.OVN().NB().LogicalRouter(lrName).Ensure().WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure logical router")
-		must(t, sdk.OVN().NB().LogicalRouter(lrName).Ensure().WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "repeat ensure logical router")
-		must(t, sdk.OVN().NB().LogicalRouterPort(lrpName).Ensure().WithMAC("00:00:5e:00:53:01").WithNetwork("10.210.0.1/24").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure router port")
-		must(t, sdk.OVN().NB().ACLByMatch("to-lport", 1001, aclMatch).Ensure().WithAction("allow").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure acl")
-		must(t, sdk.OVN().NB().NATByLogicalIP("snat", natLogicalIP).Ensure().WithExternalIP("192.0.2.210").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure nat")
-		must(t, sdk.OVN().NB().LoadBalancer(lbName).Ensure().WithVIP("192.0.2.211:80", "10.210.0.10:80").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure load balancer")
-		must(t, sdk.OVN().NB().DHCPOptions(dhcpCIDR).Ensure().WithOption("router", "10.210.0.1").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure dhcp options")
-		must(t, sdk.OVN().NB().DNS(dnsName).Ensure().WithRecord("vm.ovnflow.test", "10.210.0.10").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure dns")
-		must(t, sdk.OVN().NB().QoSByMatch("from-lport", 100, qosMatch).Ensure().WithRate(1000).WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure qos")
-		must(t, sdk.OVN().NB().AddressSet(addressSetName).Ensure().WithAddress("10.210.0.10").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure address set")
+		must(t, sdk.OVN().NB().LogicalRouter(resources.lrName).Ensure().WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure logical router")
+		must(t, sdk.OVN().NB().LogicalRouter(resources.lrName).Ensure().WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "repeat ensure logical router")
+		must(t, sdk.OVN().NB().LogicalSwitch(resources.lsName).Ensure().WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure logical switch")
+		must(t, sdk.OVN().NB().LogicalRouterPort(resources.lrpName).Ensure().WithMAC("00:00:5e:00:53:01").WithNetwork("10.210.0.1/24").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure router port")
+		must(t, sdk.OVN().NB().ACLByMatch("to-lport", 1001, resources.aclMatch).Ensure().WithAction("allow").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure acl")
+		must(t, sdk.OVN().NB().NATByLogicalIP("snat", resources.natLogicalIP).Ensure().AttachToRouter(resources.lrName).WithExternalIP("192.0.2.210").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure nat")
+		must(t, sdk.OVN().NB().LoadBalancer(resources.lbName).Ensure().AttachToRouter(resources.lrName).WithVIP("192.0.2.211:80", "10.210.0.10:80").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure load balancer")
+		must(t, sdk.OVN().NB().DHCPOptions(resources.dhcpCIDR).Ensure().WithOption("router", "10.210.0.1").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure dhcp options")
+		must(t, sdk.OVN().NB().DNS(resources.dnsName).Ensure().WithRecord("vm.ovnflow.test", "10.210.0.10").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure dns")
+		must(t, sdk.OVN().NB().QoSByMatch("from-lport", 100, resources.qosMatch).Ensure().AttachToSwitch(resources.lsName).WithRate(1000).WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure qos")
+		must(t, sdk.OVN().NB().Meter(resources.meterName).Ensure().WithUnit("kbps").WithNamedBand(resources.meterBandName, "drop", 100).WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure meter with band")
+		meterBand := requireOneRow(t, rawNB, nbDatabase, "Meter_Band", externalIDWhere(dnsNameExternalID, resources.meterBandName), []string{"_uuid", "action", "rate", "external_ids"})
+		meterBandUUID := rowUUIDMust(t, meterBand, "_uuid")
+		must(t, sdk.OVN().NB().PortGroup(resources.portGroupName).Ensure().WithACL("to-lport", 1001, resources.aclMatch, "allow").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure port group with acl")
+		acl := requireOneRow(t, rawNB, nbDatabase, "ACL", []any{
+			ovsdbjson.Condition("direction", "==", "to-lport"),
+			ovsdbjson.Condition("priority", "==", 1001),
+			ovsdbjson.Condition("match", "==", resources.aclMatch),
+		}, []string{"_uuid", "direction", "priority", "match", "action", "external_ids"})
+		aclUUID := rowUUIDMust(t, acl, "_uuid")
+		must(t, sdk.OVN().NB().AddressSet(resources.addressSetName).Ensure().WithAddress("10.210.0.10").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure address set")
+		must(t, sdk.OVN().NB().LogicalRouterPort(resources.lrpName).Ensure().
+			AttachToRouter(resources.lrName).
+			WithMAC("00:00:5e:00:53:01").
+			WithNetwork("10.210.0.1/24").
+			WithGatewayChassis(resources.gatewayChassisName, "gw-"+suffix, 20).
+			WithHAChassisGroup(resources.haGroupName).
+			WithHAChassis(resources.haChassisName, 30).
+			WithExternalID(testMarkerKey, testMarkerValue).
+			Execute(ctx), "ensure router port gateway and ha chain")
+		gatewayChassis := requireOneRow(t, rawNB, nbDatabase, "Gateway_Chassis", nameWhere(resources.gatewayChassisName), []string{"_uuid", "name", "chassis_name", "priority", "external_ids"})
+		gatewayChassisUUID := rowUUIDMust(t, gatewayChassis, "_uuid")
+		haChassis := requireOneRow(t, rawNB, nbDatabase, "HA_Chassis", []any{ovsdbjson.Condition("chassis_name", "==", resources.haChassisName)}, []string{"_uuid", "chassis_name", "priority", "external_ids"})
+		haChassisUUID := rowUUIDMust(t, haChassis, "_uuid")
+		haGroup := requireOneRow(t, rawNB, nbDatabase, "HA_Chassis_Group", nameWhere(resources.haGroupName), []string{"_uuid", "name", "ha_chassis", "external_ids"})
+		haGroupUUID := rowUUIDMust(t, haGroup, "_uuid")
+		must(t, sdk.OVN().NB().BFD(resources.lrpName, resources.bfdDstIP).Ensure().WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure bfd")
 
-		if _, err := sdk.OVN().NB().GetLogicalRouter(ctx, lrName); err != nil {
+		if _, err := sdk.OVN().NB().GetLogicalRouter(ctx, resources.lrName); err != nil {
 			t.Fatalf("get logical router: %v", err)
 		}
-		if rows := selectRows(t, rawNB, nbDatabase, "Logical_Router", nameWhere(lrName), []string{"name"}); len(rows) != 1 {
-			t.Fatalf("Logical_Router rows = %d, want 1", len(rows))
-		}
+		assertV1NorthboundReadback(t, rawNB, resources, meterBandUUID, aclUUID, gatewayChassisUUID, haChassisUUID, haGroupUUID)
+		must(t, sdk.OVN().NB().Meter(resources.meterName).Ensure().WithUnit("kbps").WithNamedBand(resources.meterBandName, "drop", 100).WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "repeat ensure meter with band")
+		must(t, sdk.OVN().NB().PortGroup(resources.portGroupName).Ensure().WithACL("to-lport", 1001, resources.aclMatch, "allow").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "repeat ensure port group with acl")
+		must(t, sdk.OVN().NB().LogicalRouterPort(resources.lrpName).Ensure().
+			AttachToRouter(resources.lrName).
+			WithMAC("00:00:5e:00:53:01").
+			WithNetwork("10.210.0.1/24").
+			WithGatewayChassis(resources.gatewayChassisName, "gw-"+suffix, 20).
+			WithHAChassisGroup(resources.haGroupName).
+			WithHAChassis(resources.haChassisName, 30).
+			WithExternalID(testMarkerKey, testMarkerValue).
+			Execute(ctx), "repeat ensure router port gateway and ha chain")
+		must(t, sdk.OVN().NB().NATByLogicalIP("snat", resources.natLogicalIP).Ensure().AttachToRouter(resources.lrName).WithExternalIP("192.0.2.210").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "repeat ensure nat")
+		must(t, sdk.OVN().NB().LoadBalancer(resources.lbName).Ensure().AttachToRouter(resources.lrName).WithVIP("192.0.2.211:80", "10.210.0.10:80").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "repeat ensure load balancer")
+		must(t, sdk.OVN().NB().QoSByMatch("from-lport", 100, resources.qosMatch).Ensure().AttachToSwitch(resources.lsName).WithRate(1000).WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "repeat ensure qos")
+		assertV1NorthboundReadback(t, rawNB, resources, meterBandUUID, aclUUID, gatewayChassisUUID, haChassisUUID, haGroupUUID)
 	})
 
 	t.Run("southbound typed reads and watch cancel", func(t *testing.T) {
@@ -208,9 +281,7 @@ func TestIntegrationV1MutationScenariosAreEnvGated(t *testing.T) {
 		must(t, sdk.LocalOVS().QoS(qosName).Ensure().WithQoSType("linux-htb").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure qos")
 		must(t, sdk.LocalOVS().Queue(queueName).Ensure().WithQueueOtherConfig("max-rate", "1000000").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "ensure queue")
 
-		if rows := selectRows(t, rawOVS, ovsDatabase, "Manager", []any{ovsdbjson.Condition("target", "==", managerTarget)}, []string{"target"}); len(rows) != 1 {
-			t.Fatalf("Manager rows = %d, want 1", len(rows))
-		}
+		assertV1OVSReadback(t, rawOVS, managerTarget, qosName, queueName)
 	})
 }
 
@@ -257,22 +328,41 @@ func assertSchemaReadiness(t *testing.T, schema libovsdb.DatabaseSchema, require
 	}
 }
 
-func cleanupV1Northbound(ctx context.Context, t *testing.T, sdk *Client, raw *ovsdbjson.Client, lrName, lrpName, aclMatch, natLogicalIP, lbName, dhcpCIDR, dnsName, qosMatch, addressSetName string) {
+func cleanupV1Northbound(ctx context.Context, t *testing.T, sdk *Client, raw *ovsdbjson.Client, resources v1NorthboundResources) {
 	t.Helper()
-	_ = sdk.OVN().NB().LogicalRouter(lrName).Delete().Execute(ctx)
-	_ = sdk.OVN().NB().LogicalRouterPort(lrpName).Delete().Execute(ctx)
-	_ = sdk.OVN().NB().ACLByMatch("to-lport", 1001, aclMatch).Delete().Execute(ctx)
-	_ = sdk.OVN().NB().NATByLogicalIP("snat", natLogicalIP).Delete().Execute(ctx)
-	_ = sdk.OVN().NB().LoadBalancer(lbName).Delete().Execute(ctx)
-	_ = sdk.OVN().NB().DHCPOptions(dhcpCIDR).Delete().Execute(ctx)
-	_ = sdk.OVN().NB().DNS(dnsName).Delete().Execute(ctx)
-	_ = sdk.OVN().NB().QoSByMatch("from-lport", 100, qosMatch).Delete().Execute(ctx)
-	_ = sdk.OVN().NB().AddressSet(addressSetName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().LogicalRouter(resources.lrName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().LogicalSwitch(resources.lsName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().LogicalRouterPort(resources.lrpName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().ACLByMatch("to-lport", 1001, resources.aclMatch).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().NATByLogicalIP("snat", resources.natLogicalIP).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().LoadBalancer(resources.lbName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().DHCPOptions(resources.dhcpCIDR).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().DNS(resources.dnsName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().QoSByMatch("from-lport", 100, resources.qosMatch).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().Meter(resources.meterName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().MeterBand(resources.meterBandName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().PortGroup(resources.portGroupName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().AddressSet(resources.addressSetName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().GatewayChassis(resources.gatewayChassisName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().HAChassis(resources.haChassisName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().HAChassisGroup(resources.haGroupName).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().BFD(resources.lrpName, resources.bfdDstIP).Delete().Execute(ctx)
 	_, err := raw.Transact(ctx, nbDatabase,
-		map[string]any{"op": "delete", "table": "Logical_Router", "where": nameWhere(lrName)},
-		map[string]any{"op": "delete", "table": "Logical_Router_Port", "where": nameWhere(lrpName)},
-		map[string]any{"op": "delete", "table": "Load_Balancer", "where": nameWhere(lbName)},
-		map[string]any{"op": "delete", "table": "Address_Set", "where": nameWhere(addressSetName)},
+		map[string]any{"op": "delete", "table": "Logical_Router", "where": nameWhere(resources.lrName)},
+		map[string]any{"op": "delete", "table": "Logical_Switch", "where": nameWhere(resources.lsName)},
+		map[string]any{"op": "delete", "table": "Logical_Router_Port", "where": nameWhere(resources.lrpName)},
+		map[string]any{"op": "delete", "table": "Load_Balancer", "where": nameWhere(resources.lbName)},
+		map[string]any{"op": "delete", "table": "Address_Set", "where": nameWhere(resources.addressSetName)},
+		map[string]any{"op": "delete", "table": "Meter", "where": nameWhere(resources.meterName)},
+		map[string]any{"op": "delete", "table": "Meter_Band", "where": externalIDWhere(dnsNameExternalID, resources.meterBandName)},
+		map[string]any{"op": "delete", "table": "Port_Group", "where": nameWhere(resources.portGroupName)},
+		map[string]any{"op": "delete", "table": "Gateway_Chassis", "where": nameWhere(resources.gatewayChassisName)},
+		map[string]any{"op": "delete", "table": "HA_Chassis", "where": []any{ovsdbjson.Condition("chassis_name", "==", resources.haChassisName)}},
+		map[string]any{"op": "delete", "table": "HA_Chassis_Group", "where": nameWhere(resources.haGroupName)},
+		map[string]any{"op": "delete", "table": "BFD", "where": []any{
+			ovsdbjson.Condition("logical_port", "==", resources.lrpName),
+			ovsdbjson.Condition("dst_ip", "==", resources.bfdDstIP),
+		}},
 	)
 	if err != nil {
 		t.Logf("fallback cleanup v1.0 northbound: %v", err)
@@ -299,4 +389,195 @@ func must(t *testing.T, err error, action string) {
 	if err != nil {
 		t.Fatalf("%s: %v", action, err)
 	}
+}
+
+func assertV1NorthboundReadback(t *testing.T, raw *ovsdbjson.Client, resources v1NorthboundResources, meterBandUUID, aclUUID, gatewayChassisUUID, haChassisUUID, haGroupUUID string) {
+	t.Helper()
+
+	lr := requireOneRow(t, raw, nbDatabase, "Logical_Router", nameWhere(resources.lrName), []string{"name", "external_ids"})
+	requireString(t, lr, "name", resources.lrName)
+	requireStringMapValue(t, lr, "external_ids", testMarkerKey, testMarkerValue)
+
+	ls := requireOneRow(t, raw, nbDatabase, "Logical_Switch", nameWhere(resources.lsName), []string{"name", "external_ids"})
+	requireString(t, ls, "name", resources.lsName)
+	requireStringMapValue(t, ls, "external_ids", testMarkerKey, testMarkerValue)
+
+	lrp := requireOneRow(t, raw, nbDatabase, "Logical_Router_Port", nameWhere(resources.lrpName), []string{"_uuid", "name", "mac", "networks", "external_ids"})
+	lrpUUID := rowUUIDMust(t, lrp, "_uuid")
+	requireString(t, lrp, "mac", "00:00:5e:00:53:01")
+	requireStringSetContains(t, lrp, "networks", "10.210.0.1/24")
+	requireStringMapValue(t, lrp, "external_ids", testMarkerKey, testMarkerValue)
+	lrRefs := requireOneRow(t, raw, nbDatabase, "Logical_Router", nameWhere(resources.lrName), []string{"ports"})
+	if !rowUUIDSetContains(t, lrRefs, "ports", lrpUUID) {
+		t.Fatalf("Logical_Router ports does not reference Logical_Router_Port")
+	}
+
+	acl := requireOneRow(t, raw, nbDatabase, "ACL", []any{
+		ovsdbjson.Condition("direction", "==", "to-lport"),
+		ovsdbjson.Condition("priority", "==", 1001),
+		ovsdbjson.Condition("match", "==", resources.aclMatch),
+	}, []string{"direction", "priority", "match", "action", "external_ids"})
+	requireString(t, acl, "action", "allow")
+	requireStringMapValue(t, acl, "external_ids", testMarkerKey, testMarkerValue)
+
+	nat := requireOneRow(t, raw, nbDatabase, "NAT", []any{
+		ovsdbjson.Condition("type", "==", "snat"),
+		ovsdbjson.Condition("logical_ip", "==", resources.natLogicalIP),
+	}, []string{"_uuid", "type", "logical_ip", "external_ip", "external_ids"})
+	natUUID := rowUUIDMust(t, nat, "_uuid")
+	requireString(t, nat, "external_ip", "192.0.2.210")
+	requireStringMapValue(t, nat, "external_ids", testMarkerKey, testMarkerValue)
+
+	lb := requireOneRow(t, raw, nbDatabase, "Load_Balancer", nameWhere(resources.lbName), []string{"_uuid", "name", "vips", "external_ids"})
+	lbUUID := rowUUIDMust(t, lb, "_uuid")
+	requireStringMapValue(t, lb, "vips", "192.0.2.211:80", "10.210.0.10:80")
+	requireStringMapValue(t, lb, "external_ids", testMarkerKey, testMarkerValue)
+	lrServiceRefs := requireOneRow(t, raw, nbDatabase, "Logical_Router", nameWhere(resources.lrName), []string{"nat", "load_balancer"})
+	if !rowUUIDSetContains(t, lrServiceRefs, "nat", natUUID) {
+		t.Fatalf("Logical_Router nat does not reference created NAT")
+	}
+	if !rowUUIDSetContains(t, lrServiceRefs, "load_balancer", lbUUID) {
+		t.Fatalf("Logical_Router load_balancer does not reference created Load_Balancer")
+	}
+
+	dhcp := requireOneRow(t, raw, nbDatabase, "DHCP_Options", []any{ovsdbjson.Condition("cidr", "==", resources.dhcpCIDR)}, []string{"cidr", "options", "external_ids"})
+	requireStringMapValue(t, dhcp, "options", "router", "10.210.0.1")
+	requireStringMapValue(t, dhcp, "external_ids", testMarkerKey, testMarkerValue)
+
+	dns := requireOneRow(t, raw, nbDatabase, "DNS", externalIDWhere(dnsNameExternalID, resources.dnsName), []string{"records", "external_ids"})
+	requireStringMapValue(t, dns, "records", "vm.ovnflow.test", "10.210.0.10")
+	requireStringMapValue(t, dns, "external_ids", testMarkerKey, testMarkerValue)
+
+	qos := requireOneRow(t, raw, nbDatabase, "QoS", []any{
+		ovsdbjson.Condition("direction", "==", "from-lport"),
+		ovsdbjson.Condition("priority", "==", 100),
+		ovsdbjson.Condition("match", "==", resources.qosMatch),
+	}, []string{"_uuid", "direction", "priority", "match", "bandwidth", "external_ids"})
+	qosUUID := rowUUIDMust(t, qos, "_uuid")
+	requireIntMapValue(t, qos, "bandwidth", "rate", 1000)
+	requireStringMapValue(t, qos, "external_ids", testMarkerKey, testMarkerValue)
+	lsRefs := requireOneRow(t, raw, nbDatabase, "Logical_Switch", nameWhere(resources.lsName), []string{"qos_rules"})
+	if !rowUUIDSetContains(t, lsRefs, "qos_rules", qosUUID) {
+		t.Fatalf("Logical_Switch qos_rules does not reference created QoS")
+	}
+
+	meter := requireOneRow(t, raw, nbDatabase, "Meter", nameWhere(resources.meterName), []string{"name", "unit", "bands", "external_ids"})
+	requireString(t, meter, "unit", "kbps")
+	if !rowUUIDSetContains(t, meter, "bands", meterBandUUID) {
+		t.Fatalf("Meter bands does not reference created Meter_Band")
+	}
+	requireStringMapValue(t, meter, "external_ids", testMarkerKey, testMarkerValue)
+
+	meterBand := requireOneRow(t, raw, nbDatabase, "Meter_Band", externalIDWhere(dnsNameExternalID, resources.meterBandName), []string{"action", "rate", "external_ids"})
+	requireString(t, meterBand, "action", "drop")
+	requireInt(t, meterBand, "rate", 100)
+	requireStringMapValue(t, meterBand, "external_ids", testMarkerKey, testMarkerValue)
+
+	portGroup := requireOneRow(t, raw, nbDatabase, "Port_Group", nameWhere(resources.portGroupName), []string{"name", "acls", "external_ids"})
+	if !rowUUIDSetContains(t, portGroup, "acls", aclUUID) {
+		t.Fatalf("Port_Group ACLs does not reference created ACL")
+	}
+	requireStringMapValue(t, portGroup, "external_ids", testMarkerKey, testMarkerValue)
+
+	addressSet := requireOneRow(t, raw, nbDatabase, "Address_Set", nameWhere(resources.addressSetName), []string{"name", "addresses", "external_ids"})
+	requireStringSetContains(t, addressSet, "addresses", "10.210.0.10")
+	requireStringMapValue(t, addressSet, "external_ids", testMarkerKey, testMarkerValue)
+
+	gatewayChassis := requireOneRow(t, raw, nbDatabase, "Gateway_Chassis", nameWhere(resources.gatewayChassisName), []string{"name", "chassis_name", "priority", "external_ids"})
+	requireString(t, gatewayChassis, "chassis_name", "gw-"+resources.suffix)
+	requireInt(t, gatewayChassis, "priority", 20)
+	requireStringMapValue(t, gatewayChassis, "external_ids", testMarkerKey, testMarkerValue)
+
+	haChassis := requireOneRow(t, raw, nbDatabase, "HA_Chassis", []any{ovsdbjson.Condition("chassis_name", "==", resources.haChassisName)}, []string{"chassis_name", "priority", "external_ids"})
+	requireInt(t, haChassis, "priority", 30)
+	requireStringMapValue(t, haChassis, "external_ids", testMarkerKey, testMarkerValue)
+
+	haGroup := requireOneRow(t, raw, nbDatabase, "HA_Chassis_Group", nameWhere(resources.haGroupName), []string{"name", "ha_chassis", "external_ids"})
+	if !rowUUIDSetContains(t, haGroup, "ha_chassis", haChassisUUID) {
+		t.Fatalf("HA_Chassis_Group does not reference created HA_Chassis")
+	}
+	requireStringMapValue(t, haGroup, "external_ids", testMarkerKey, testMarkerValue)
+
+	lrpRefs := requireOneRow(t, raw, nbDatabase, "Logical_Router_Port", nameWhere(resources.lrpName), []string{"gateway_chassis", "ha_chassis_group"})
+	if !rowUUIDSetContains(t, lrpRefs, "gateway_chassis", gatewayChassisUUID) {
+		t.Fatalf("Logical_Router_Port gateway_chassis does not reference created Gateway_Chassis")
+	}
+	if got := rowUUIDOptional(t, lrpRefs, "ha_chassis_group"); got != haGroupUUID {
+		t.Fatalf("Logical_Router_Port ha_chassis_group = %q, want %q", got, haGroupUUID)
+	}
+
+	bfd := requireOneRow(t, raw, nbDatabase, "BFD", []any{
+		ovsdbjson.Condition("logical_port", "==", resources.lrpName),
+		ovsdbjson.Condition("dst_ip", "==", resources.bfdDstIP),
+	}, []string{"logical_port", "dst_ip", "external_ids"})
+	requireStringMapValue(t, bfd, "external_ids", testMarkerKey, testMarkerValue)
+}
+
+func assertV1OVSReadback(t *testing.T, raw *ovsdbjson.Client, managerTarget, qosName, queueName string) {
+	t.Helper()
+
+	manager := requireOneRow(t, raw, ovsDatabase, "Manager", []any{ovsdbjson.Condition("target", "==", managerTarget)}, []string{"target", "external_ids"})
+	requireString(t, manager, "target", managerTarget)
+	requireStringMapValue(t, manager, "external_ids", testMarkerKey, testMarkerValue)
+
+	qos := requireOneRow(t, raw, ovsDatabase, "QoS", externalIDWhere("name", qosName), []string{"type", "external_ids"})
+	requireString(t, qos, "type", "linux-htb")
+	requireStringMapValue(t, qos, "external_ids", "name", qosName)
+	requireStringMapValue(t, qos, "external_ids", testMarkerKey, testMarkerValue)
+
+	queue := requireOneRow(t, raw, ovsDatabase, "Queue", externalIDWhere("name", queueName), []string{"other_config", "external_ids"})
+	requireStringMapValue(t, queue, "other_config", "max-rate", "1000000")
+	requireStringMapValue(t, queue, "external_ids", "name", queueName)
+	requireStringMapValue(t, queue, "external_ids", testMarkerKey, testMarkerValue)
+}
+
+func requireOneRow(t *testing.T, client *ovsdbjson.Client, database, table string, where []any, columns []string) map[string]json.RawMessage {
+	t.Helper()
+	rows := selectRows(t, client, database, table, where, columns)
+	if len(rows) != 1 {
+		t.Fatalf("%s rows = %d, want 1", table, len(rows))
+	}
+	return rows[0]
+}
+
+func externalIDWhere(key, value string) []any {
+	return []any{ovsdbjson.Condition("external_ids", "includes", ovsdbjson.Map(map[string]string{key: value}))}
+}
+
+func requireString(t *testing.T, row map[string]json.RawMessage, column, want string) {
+	t.Helper()
+	if got := rowString(t, row, column); got != want {
+		t.Fatalf("%s = %q, want %q", column, got, want)
+	}
+}
+
+func requireStringMapValue(t *testing.T, row map[string]json.RawMessage, column, key, want string) {
+	t.Helper()
+	if got := rowStringMap(t, row, column)[key]; got != want {
+		t.Fatalf("%s[%q] = %q, want %q", column, key, got, want)
+	}
+}
+
+func requireInt(t *testing.T, row map[string]json.RawMessage, column string, want int) {
+	t.Helper()
+	if got := rowInt(t, row, column); got != want {
+		t.Fatalf("%s = %d, want %d", column, got, want)
+	}
+}
+
+func requireIntMapValue(t *testing.T, row map[string]json.RawMessage, column, key string, want int) {
+	t.Helper()
+	if got := rowIntMap(t, row, column)[key]; got != want {
+		t.Fatalf("%s[%q] = %d, want %d", column, key, got, want)
+	}
+}
+
+func requireStringSetContains(t *testing.T, row map[string]json.RawMessage, column, want string) {
+	t.Helper()
+	for _, got := range rowStringSetValuesFromColumn(t, row, column) {
+		if got == want {
+			return
+		}
+	}
+	t.Fatalf("%s does not contain %q", column, want)
 }

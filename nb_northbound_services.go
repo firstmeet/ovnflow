@@ -211,6 +211,11 @@ func (b *QoSBuilder) WithMatch(match string) *QoSBuilder {
 	return b
 }
 
+func (b *QoSBuilder) AttachToSwitch(name string) *QoSBuilder {
+	b.switchName = name
+	return b
+}
+
 func (b *QoSBuilder) WithDSCP(value int) *QoSBuilder {
 	b.action["dscp"] = value
 	return b
@@ -257,7 +262,7 @@ func (b *QoSBuilder) Execute(ctx context.Context) error {
 	setRowMap(row, colExternalIDs, b.externalIDs)
 	mutations := []libovsdb.Mutation{}
 	nbAppendMapMutation(&mutations, colExternalIDs, b.externalIDs)
-	return b.client.executeByConditions(ctx, tableQoS, b.match, b.mode, b.conditions(), row, mutations)
+	return b.client.executeByConditionsWithPrePostOps(ctx, tableQoS, b.match, b.mode, b.conditions(), row, mutations, nil, b.attachToSwitchOps)
 }
 
 func (b *QoSBuilder) validate() error {
@@ -267,7 +272,29 @@ func (b *QoSBuilder) validate() error {
 	if b.priority < 0 || b.priority > 32767 {
 		return wrap(ErrorValidation, dbOVNNorthbound, tableQoS, string(b.mode), b.match, "priority must be between 0 and 32767", nil)
 	}
+	if b.switchName != "" {
+		if err := validateName("logical switch", b.switchName); err != nil {
+			return err
+		}
+		if err := b.client.db.schema.RequireColumns(tableLogicalSwitch, colQoSRules); err != nil {
+			return err
+		}
+	}
 	return nbValidateStringMaps(b.externalIDs)
+}
+
+func (b *QoSBuilder) attachToSwitchOps(qosUUID string) []libovsdb.Operation {
+	if b.switchName == "" || b.mode == nbModeDelete || qosUUID == "" {
+		return nil
+	}
+	return []libovsdb.Operation{{
+		Op:    libovsdb.OperationMutate,
+		Table: tableLogicalSwitch,
+		Where: conditionName(b.switchName),
+		Mutations: []libovsdb.Mutation{
+			*libovsdb.NewMutation(colQoSRules, libovsdb.MutateOperationInsert, uuidSet(qosUUID)),
+		},
+	}}
 }
 
 func (b *QoSBuilder) conditions() []libovsdb.Condition {

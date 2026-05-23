@@ -148,6 +148,11 @@ func (b *LogicalRouterPortBuilder) WithNetwork(network string) *LogicalRouterPor
 	return b
 }
 
+func (b *LogicalRouterPortBuilder) AttachToRouter(name string) *LogicalRouterPortBuilder {
+	b.routerName = name
+	return b
+}
+
 func (b *LogicalRouterPortBuilder) WithNetworks(networks ...string) *LogicalRouterPortBuilder {
 	b.networks = append(b.networks, networks...)
 	return b
@@ -158,8 +163,71 @@ func (b *LogicalRouterPortBuilder) WithGatewayChassisUUID(uuid string) *LogicalR
 	return b
 }
 
+func (b *LogicalRouterPortBuilder) WithGatewayChassis(name, chassisName string, priority int) *LogicalRouterPortBuilder {
+	b.gatewaySpecs = append(b.gatewaySpecs, gatewayChassisSpec{
+		name:        name,
+		chassisName: chassisName,
+		priority:    &priority,
+		options:     map[string]string{},
+		externalIDs: map[string]string{},
+	})
+	return b
+}
+
+func (b *LogicalRouterPortBuilder) WithGatewayChassisExternalID(key, value string) *LogicalRouterPortBuilder {
+	if len(b.gatewaySpecs) == 0 {
+		return b
+	}
+	last := &b.gatewaySpecs[len(b.gatewaySpecs)-1]
+	last.externalIDs[key] = value
+	return b
+}
+
+func (b *LogicalRouterPortBuilder) WithGatewayChassisOption(key, value string) *LogicalRouterPortBuilder {
+	if len(b.gatewaySpecs) == 0 {
+		return b
+	}
+	last := &b.gatewaySpecs[len(b.gatewaySpecs)-1]
+	last.options[key] = value
+	return b
+}
+
 func (b *LogicalRouterPortBuilder) WithHAChassisGroupUUID(uuid string) *LogicalRouterPortBuilder {
 	b.haChassisGroup = uuid
+	return b
+}
+
+func (b *LogicalRouterPortBuilder) WithHAChassisGroup(name string) *LogicalRouterPortBuilder {
+	b.haGroupSpec = &haChassisGroupSpec{name: name, externalIDs: map[string]string{}}
+	return b
+}
+
+func (b *LogicalRouterPortBuilder) WithHAChassis(chassisName string, priority int) *LogicalRouterPortBuilder {
+	if b.haGroupSpec == nil {
+		b.haGroupSpec = &haChassisGroupSpec{externalIDs: map[string]string{}}
+	}
+	b.haGroupSpec.haChassis = append(b.haGroupSpec.haChassis, haChassisSpec{
+		chassisName: chassisName,
+		priority:    &priority,
+		externalIDs: map[string]string{},
+	})
+	return b
+}
+
+func (b *LogicalRouterPortBuilder) WithHAChassisExternalID(key, value string) *LogicalRouterPortBuilder {
+	if b.haGroupSpec == nil || len(b.haGroupSpec.haChassis) == 0 {
+		return b
+	}
+	last := &b.haGroupSpec.haChassis[len(b.haGroupSpec.haChassis)-1]
+	last.externalIDs[key] = value
+	return b
+}
+
+func (b *LogicalRouterPortBuilder) WithHAChassisGroupExternalID(key, value string) *LogicalRouterPortBuilder {
+	if b.haGroupSpec == nil {
+		b.haGroupSpec = &haChassisGroupSpec{externalIDs: map[string]string{}}
+	}
+	b.haGroupSpec.externalIDs[key] = value
 	return b
 }
 
@@ -200,13 +268,93 @@ func (b *LogicalRouterPortBuilder) Execute(ctx context.Context) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
+	if len(b.gatewaySpecs) > 0 || b.haGroupSpec != nil {
+		return b.executeWithInlineAvailability(ctx)
+	}
+	row, mutations := b.rowAndMutations(b.gatewayChassis, b.haChassisGroup)
+	return b.client.executeNamed(ctx, tableLogicalRouterPort, b.name, b.mode, row, mutations)
+}
+
+func (b *LogicalRouterPortBuilder) executeWithInlineAvailability(ctx context.Context) error {
+	preOps := []libovsdb.Operation{}
+	gatewayRefs := append([]string{}, b.gatewayChassis...)
+	for _, spec := range b.gatewaySpecs {
+		gatewayRow := gatewayChassisRow(spec, b.externalIDs)
+		existingUUID, found, err := b.client.selectFirstUUID(ctx, tableGatewayChassis, conditionName(spec.name), spec.name)
+		if err != nil {
+			return err
+		}
+		if found {
+			gatewayRefs = append(gatewayRefs, existingUUID)
+			preOps = append(preOps, updateGatewayChassisOps(existingUUID, gatewayRow, mergeStringMaps(b.externalIDs, spec.externalIDs))...)
+			continue
+		}
+		gatewayUUID := namedUUID("gatewaychassis")
+		gatewayRefs = append(gatewayRefs, gatewayUUID)
+		preOps = append(preOps, libovsdb.Operation{
+			Op:       libovsdb.OperationInsert,
+			Table:    tableGatewayChassis,
+			UUIDName: gatewayUUID,
+			Row:      gatewayRow,
+		})
+	}
+
+	haGroupRef := b.haChassisGroup
+	if b.haGroupSpec != nil {
+		haRefs := []string{}
+		for _, spec := range b.haGroupSpec.haChassis {
+			haRow := haChassisRow(spec, b.externalIDs)
+			conditions := []libovsdb.Condition{libovsdb.NewCondition(colChassisName, libovsdb.ConditionEqual, spec.chassisName)}
+			existingUUID, found, err := b.client.selectFirstUUID(ctx, tableHAChassis, conditions, spec.chassisName)
+			if err != nil {
+				return err
+			}
+			if found {
+				haRefs = append(haRefs, existingUUID)
+				preOps = append(preOps, updateHAChassisOps(existingUUID, haRow, mergeStringMaps(b.externalIDs, spec.externalIDs))...)
+				continue
+			}
+			haUUID := namedUUID("hachassis")
+			haRefs = append(haRefs, haUUID)
+			preOps = append(preOps, libovsdb.Operation{
+				Op:       libovsdb.OperationInsert,
+				Table:    tableHAChassis,
+				UUIDName: haUUID,
+				Row:      haRow,
+			})
+		}
+		groupRow := haChassisGroupRow(b.haGroupSpec, haRefs, b.externalIDs)
+		existingUUID, found, err := b.client.selectFirstUUID(ctx, tableHAChassisGroup, conditionName(b.haGroupSpec.name), b.haGroupSpec.name)
+		if err != nil {
+			return err
+		}
+		if found {
+			haGroupRef = existingUUID
+			preOps = append(preOps, updateHAChassisGroupOps(existingUUID, groupRow, haRefs, mergeStringMaps(b.externalIDs, b.haGroupSpec.externalIDs))...)
+		} else {
+			groupUUID := namedUUID("hachassisgroup")
+			haGroupRef = groupUUID
+			preOps = append(preOps, libovsdb.Operation{
+				Op:       libovsdb.OperationInsert,
+				Table:    tableHAChassisGroup,
+				UUIDName: groupUUID,
+				Row:      groupRow,
+			})
+		}
+	}
+
+	row, mutations := b.rowAndMutations(gatewayRefs, haGroupRef)
+	return b.client.executeNamedWithPrePostOps(ctx, tableLogicalRouterPort, b.name, b.mode, row, mutations, preOps, b.attachToRouterOps)
+}
+
+func (b *LogicalRouterPortBuilder) rowAndMutations(gatewayRefs []string, haGroupRef string) (libovsdb.Row, []libovsdb.Mutation) {
 	row := libovsdb.Row{colName: b.name}
 	if b.mac != "" {
 		row[colMAC] = b.mac
 	}
 	nbSetStringSet(row, colNetworks, b.networks)
-	nbSetUUIDSet(row, colGatewayChassis, b.gatewayChassis)
-	nbSetOptionalUUID(row, colHAChassisGroup, b.haChassisGroup)
+	nbSetUUIDSet(row, colGatewayChassis, gatewayRefs)
+	nbSetOptionalUUID(row, colHAChassisGroup, haGroupRef)
 	nbSetOptionalString(row, colPeer, b.peer)
 	if b.enabled != nil {
 		row[colEnabled] = ovsSet(*b.enabled)
@@ -216,13 +364,13 @@ func (b *LogicalRouterPortBuilder) Execute(ctx context.Context) error {
 	setRowMap(row, colOptions, b.options)
 	setRowMap(row, colExternalIDs, b.externalIDs)
 	mutations := []libovsdb.Mutation{}
-	nbAppendUUIDSetMutation(&mutations, colGatewayChassis, b.gatewayChassis)
+	nbAppendUUIDSetMutation(&mutations, colGatewayChassis, gatewayRefs)
 	nbAppendStringSetMutation(&mutations, colNetworks, b.networks)
 	nbAppendStringSetMutation(&mutations, colIPv6Prefix, b.ipv6Prefixes)
 	nbAppendMapMutation(&mutations, colIPv6RAConfigs, b.ipv6RAConfigs)
 	nbAppendMapMutation(&mutations, colOptions, b.options)
 	nbAppendMapMutation(&mutations, colExternalIDs, b.externalIDs)
-	return b.client.executeNamed(ctx, tableLogicalRouterPort, b.name, b.mode, row, mutations)
+	return row, mutations
 }
 
 func (b *LogicalRouterPortBuilder) validate() error {
@@ -239,7 +387,66 @@ func (b *LogicalRouterPortBuilder) validate() error {
 			return wrap(ErrorValidation, dbOVNNorthbound, tableLogicalRouterPort, string(b.mode), b.name, "invalid network", err)
 		}
 	}
-	return nbValidateStringMaps(b.ipv6RAConfigs, b.options, b.externalIDs)
+	maps := []map[string]string{b.ipv6RAConfigs, b.options, b.externalIDs}
+	for _, spec := range b.gatewaySpecs {
+		if err := b.client.db.schema.RequireColumns(tableLogicalRouterPort, colGatewayChassis); err != nil {
+			return err
+		}
+		if err := validateName("gateway chassis", spec.name); err != nil {
+			return err
+		}
+		if b.mode != nbModeDelete && spec.chassisName == "" {
+			return wrap(ErrorValidation, dbOVNNorthbound, tableGatewayChassis, string(b.mode), spec.name, "chassis_name is required", nil)
+		}
+		if err := b.client.db.schema.RequireColumns(tableGatewayChassis, colName, colChassisName, colPriority, colExternalIDs); err != nil {
+			return err
+		}
+		maps = append(maps, spec.options, spec.externalIDs)
+	}
+	if b.haGroupSpec != nil {
+		if err := b.client.db.schema.RequireColumns(tableLogicalRouterPort, colHAChassisGroup); err != nil {
+			return err
+		}
+		if err := validateName("ha chassis group", b.haGroupSpec.name); err != nil {
+			return err
+		}
+		if err := b.client.db.schema.RequireColumns(tableHAChassisGroup, colName, colHAChassis, colExternalIDs); err != nil {
+			return err
+		}
+		maps = append(maps, b.haGroupSpec.externalIDs)
+		for _, spec := range b.haGroupSpec.haChassis {
+			if err := validateName("ha chassis", spec.chassisName); err != nil {
+				return err
+			}
+			if err := b.client.db.schema.RequireColumns(tableHAChassis, colChassisName, colPriority, colExternalIDs); err != nil {
+				return err
+			}
+			maps = append(maps, spec.externalIDs)
+		}
+	}
+	if b.routerName != "" {
+		if err := validateName("logical router", b.routerName); err != nil {
+			return err
+		}
+		if err := b.client.db.schema.RequireColumns(tableLogicalRouter, colPorts); err != nil {
+			return err
+		}
+	}
+	return nbValidateStringMaps(maps...)
+}
+
+func (b *LogicalRouterPortBuilder) attachToRouterOps(portUUID string) []libovsdb.Operation {
+	if b.routerName == "" || b.mode == nbModeDelete || portUUID == "" {
+		return nil
+	}
+	return []libovsdb.Operation{{
+		Op:    libovsdb.OperationMutate,
+		Table: tableLogicalRouter,
+		Where: conditionName(b.routerName),
+		Mutations: []libovsdb.Mutation{
+			*libovsdb.NewMutation(colPorts, libovsdb.MutateOperationInsert, uuidSet(portUUID)),
+		},
+	}}
 }
 
 func (n *NBClient) ACL(name string) *ACLRef {
@@ -462,6 +669,11 @@ func (b *NATBuilder) WithExternalIP(ip string) *NATBuilder {
 	return b
 }
 
+func (b *NATBuilder) AttachToRouter(name string) *NATBuilder {
+	b.routerName = name
+	return b
+}
+
 func (b *NATBuilder) WithLogicalPort(port string) *NATBuilder {
 	b.logicalPort = port
 	return b
@@ -547,7 +759,7 @@ func (b *NATBuilder) Execute(ctx context.Context) error {
 	mutations := []libovsdb.Mutation{}
 	nbAppendMapMutation(&mutations, colOptions, b.options)
 	nbAppendMapMutation(&mutations, colExternalIDs, b.externalIDs)
-	return b.client.executeByConditions(ctx, tableNAT, b.logicalIP, b.mode, b.conditions(), row, mutations)
+	return b.client.executeByConditionsWithPrePostOps(ctx, tableNAT, b.logicalIP, b.mode, b.conditions(), row, mutations, nil, b.attachToRouterOps)
 }
 
 func (b *NATBuilder) validate() error {
@@ -565,7 +777,29 @@ func (b *NATBuilder) validate() error {
 	if b.priority != nil && (*b.priority < 0 || *b.priority > 32767) {
 		return wrap(ErrorValidation, dbOVNNorthbound, tableNAT, string(b.mode), b.logicalIP, "priority must be between 0 and 32767", nil)
 	}
+	if b.routerName != "" {
+		if err := validateName("logical router", b.routerName); err != nil {
+			return err
+		}
+		if err := b.client.db.schema.RequireColumns(tableLogicalRouter, colNAT); err != nil {
+			return err
+		}
+	}
 	return nbValidateStringMaps(b.options, b.externalIDs)
+}
+
+func (b *NATBuilder) attachToRouterOps(natUUID string) []libovsdb.Operation {
+	if b.routerName == "" || b.mode == nbModeDelete || natUUID == "" {
+		return nil
+	}
+	return []libovsdb.Operation{{
+		Op:    libovsdb.OperationMutate,
+		Table: tableLogicalRouter,
+		Where: conditionName(b.routerName),
+		Mutations: []libovsdb.Mutation{
+			*libovsdb.NewMutation(colNAT, libovsdb.MutateOperationInsert, uuidSet(natUUID)),
+		},
+	}}
 }
 
 func (b *NATBuilder) conditions() []libovsdb.Condition {
@@ -626,6 +860,11 @@ func (b *LoadBalancerBuilder) WithVIP(vip, backends string) *LoadBalancerBuilder
 	return b
 }
 
+func (b *LoadBalancerBuilder) AttachToRouter(name string) *LoadBalancerBuilder {
+	b.routerName = name
+	return b
+}
+
 func (b *LoadBalancerBuilder) WithProtocol(protocol string) *LoadBalancerBuilder {
 	b.protocol = protocol
 	return b
@@ -678,12 +917,34 @@ func (b *LoadBalancerBuilder) Execute(ctx context.Context) error {
 	nbAppendUUIDSetMutation(&mutations, "health_check", b.healthChecks)
 	nbAppendMapMutation(&mutations, colOptions, b.options)
 	nbAppendMapMutation(&mutations, colExternalIDs, b.externalIDs)
-	return b.client.executeNamed(ctx, tableLoadBalancer, b.name, b.mode, row, mutations)
+	return b.client.executeNamedWithPrePostOps(ctx, tableLoadBalancer, b.name, b.mode, row, mutations, nil, b.attachToRouterOps)
 }
 
 func (b *LoadBalancerBuilder) validate() error {
 	if err := validateName("load balancer", b.name); err != nil {
 		return err
 	}
+	if b.routerName != "" {
+		if err := validateName("logical router", b.routerName); err != nil {
+			return err
+		}
+		if err := b.client.db.schema.RequireColumns(tableLogicalRouter, colLoadBalancer); err != nil {
+			return err
+		}
+	}
 	return nbValidateStringMaps(b.vips, b.ipPortMappings, b.options, b.externalIDs)
+}
+
+func (b *LoadBalancerBuilder) attachToRouterOps(loadBalancerUUID string) []libovsdb.Operation {
+	if b.routerName == "" || b.mode == nbModeDelete || loadBalancerUUID == "" {
+		return nil
+	}
+	return []libovsdb.Operation{{
+		Op:    libovsdb.OperationMutate,
+		Table: tableLogicalRouter,
+		Where: conditionName(b.routerName),
+		Mutations: []libovsdb.Mutation{
+			*libovsdb.NewMutation(colLoadBalancer, libovsdb.MutateOperationInsert, uuidSet(loadBalancerUUID)),
+		},
+	}}
 }

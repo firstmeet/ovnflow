@@ -65,15 +65,13 @@ func (b *GatewayChassisBuilder) Execute(ctx context.Context) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
-	row := libovsdb.Row{colName: b.name}
-	if b.chassisName != "" {
-		row[colChassisName] = b.chassisName
-	}
-	if b.priority != nil {
-		row[colPriority] = *b.priority
-	}
-	setRowMap(row, colOptions, b.options)
-	setRowMap(row, colExternalIDs, b.externalIDs)
+	row := gatewayChassisRow(gatewayChassisSpec{
+		name:        b.name,
+		chassisName: b.chassisName,
+		priority:    b.priority,
+		options:     b.options,
+		externalIDs: b.externalIDs,
+	}, nil)
 	mutations := []libovsdb.Mutation{}
 	nbAppendMapMutation(&mutations, colOptions, b.options)
 	nbAppendMapMutation(&mutations, colExternalIDs, b.externalIDs)
@@ -88,6 +86,45 @@ func (b *GatewayChassisBuilder) validate() error {
 		return wrap(ErrorValidation, dbOVNNorthbound, tableGatewayChassis, string(b.mode), b.name, "chassis_name is required", nil)
 	}
 	return nbValidateStringMaps(b.options, b.externalIDs)
+}
+
+func gatewayChassisRow(spec gatewayChassisSpec, inheritedExternalIDs map[string]string) libovsdb.Row {
+	row := libovsdb.Row{colName: spec.name}
+	if spec.chassisName != "" {
+		row[colChassisName] = spec.chassisName
+	}
+	if spec.priority != nil {
+		row[colPriority] = *spec.priority
+	}
+	setRowMap(row, colOptions, spec.options)
+	setRowMap(row, colExternalIDs, mergeStringMaps(inheritedExternalIDs, spec.externalIDs))
+	return row
+}
+
+func updateGatewayChassisOps(uuid string, row libovsdb.Row, externalIDs map[string]string) []libovsdb.Operation {
+	updateRow := cloneRow(row)
+	delete(updateRow, colName)
+	delete(updateRow, colExternalIDs)
+	ops := []libovsdb.Operation{}
+	if len(updateRow) > 0 {
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationUpdate,
+			Table: tableGatewayChassis,
+			Where: conditionUUID(uuid),
+			Row:   updateRow,
+		})
+	}
+	if len(externalIDs) > 0 {
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationMutate,
+			Table: tableGatewayChassis,
+			Where: conditionUUID(uuid),
+			Mutations: []libovsdb.Mutation{
+				*libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationInsert, ovsMap(externalIDs)),
+			},
+		})
+	}
+	return ops
 }
 
 func (n *NBClient) HAChassis(chassisName string) *HAChassisRef {
@@ -139,11 +176,11 @@ func (b *HAChassisBuilder) Execute(ctx context.Context) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
-	row := libovsdb.Row{colChassisName: b.chassisName}
-	if b.priority != nil {
-		row[colPriority] = *b.priority
-	}
-	setRowMap(row, colExternalIDs, b.externalIDs)
+	row := haChassisRow(haChassisSpec{
+		chassisName: b.chassisName,
+		priority:    b.priority,
+		externalIDs: b.externalIDs,
+	}, nil)
 	mutations := []libovsdb.Mutation{}
 	nbAppendMapMutation(&mutations, colExternalIDs, b.externalIDs)
 	conditions := []libovsdb.Condition{libovsdb.NewCondition(colChassisName, libovsdb.ConditionEqual, b.chassisName)}
@@ -155,6 +192,41 @@ func (b *HAChassisBuilder) validate() error {
 		return err
 	}
 	return nbValidateStringMaps(b.externalIDs)
+}
+
+func haChassisRow(spec haChassisSpec, inheritedExternalIDs map[string]string) libovsdb.Row {
+	row := libovsdb.Row{colChassisName: spec.chassisName}
+	if spec.priority != nil {
+		row[colPriority] = *spec.priority
+	}
+	setRowMap(row, colExternalIDs, mergeStringMaps(inheritedExternalIDs, spec.externalIDs))
+	return row
+}
+
+func updateHAChassisOps(uuid string, row libovsdb.Row, externalIDs map[string]string) []libovsdb.Operation {
+	updateRow := cloneRow(row)
+	delete(updateRow, colChassisName)
+	delete(updateRow, colExternalIDs)
+	ops := []libovsdb.Operation{}
+	if len(updateRow) > 0 {
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationUpdate,
+			Table: tableHAChassis,
+			Where: conditionUUID(uuid),
+			Row:   updateRow,
+		})
+	}
+	if len(externalIDs) > 0 {
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationMutate,
+			Table: tableHAChassis,
+			Where: conditionUUID(uuid),
+			Mutations: []libovsdb.Mutation{
+				*libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationInsert, ovsMap(externalIDs)),
+			},
+		})
+	}
+	return ops
 }
 
 func (n *NBClient) HAChassisGroup(name string) *HAChassisGroupRef {
@@ -205,9 +277,11 @@ func (b *HAChassisGroupBuilder) Execute(ctx context.Context) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
-	row := libovsdb.Row{colName: b.name}
-	nbSetUUIDSet(row, colHAChassis, b.haChassis)
-	setRowMap(row, colExternalIDs, b.externalIDs)
+	row := haChassisGroupRow(&haChassisGroupSpec{
+		name:        b.name,
+		haChassis:   nil,
+		externalIDs: b.externalIDs,
+	}, b.haChassis, nil)
 	mutations := []libovsdb.Mutation{}
 	nbAppendUUIDSetMutation(&mutations, colHAChassis, b.haChassis)
 	nbAppendMapMutation(&mutations, colExternalIDs, b.externalIDs)
@@ -219,6 +293,54 @@ func (b *HAChassisGroupBuilder) validate() error {
 		return err
 	}
 	return nbValidateStringMaps(b.externalIDs)
+}
+
+func haChassisGroupRow(spec *haChassisGroupSpec, haChassisRefs []string, inheritedExternalIDs map[string]string) libovsdb.Row {
+	row := libovsdb.Row{}
+	if spec == nil {
+		return row
+	}
+	row[colName] = spec.name
+	nbSetUUIDSet(row, colHAChassis, haChassisRefs)
+	setRowMap(row, colExternalIDs, mergeStringMaps(inheritedExternalIDs, spec.externalIDs))
+	return row
+}
+
+func updateHAChassisGroupOps(uuid string, row libovsdb.Row, haChassisRefs []string, externalIDs map[string]string) []libovsdb.Operation {
+	updateRow := cloneRow(row)
+	delete(updateRow, colName)
+	delete(updateRow, colHAChassis)
+	delete(updateRow, colExternalIDs)
+	ops := []libovsdb.Operation{}
+	if len(updateRow) > 0 {
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationUpdate,
+			Table: tableHAChassisGroup,
+			Where: conditionUUID(uuid),
+			Row:   updateRow,
+		})
+	}
+	if len(haChassisRefs) > 0 {
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationMutate,
+			Table: tableHAChassisGroup,
+			Where: conditionUUID(uuid),
+			Mutations: []libovsdb.Mutation{
+				*libovsdb.NewMutation(colHAChassis, libovsdb.MutateOperationInsert, uuidSet(haChassisRefs...)),
+			},
+		})
+	}
+	if len(externalIDs) > 0 {
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationMutate,
+			Table: tableHAChassisGroup,
+			Where: conditionUUID(uuid),
+			Mutations: []libovsdb.Mutation{
+				*libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationInsert, ovsMap(externalIDs)),
+			},
+		})
+	}
+	return ops
 }
 
 func (n *NBClient) BFD(logicalPort, dstIP string) *BFDRef {

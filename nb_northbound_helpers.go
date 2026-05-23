@@ -34,11 +34,42 @@ func (n *NBClient) selectRows(ctx context.Context, table string, where []libovsd
 	return results[0].Rows, nil
 }
 
+func (n *NBClient) selectFirstUUID(ctx context.Context, table string, where []libovsdb.Condition, object string) (string, bool, error) {
+	rows, err := n.selectRows(ctx, table, where, []string{colUUID}, object)
+	if err != nil {
+		return "", false, err
+	}
+	if len(rows) == 0 {
+		return "", false, nil
+	}
+	uuid := rowUUIDValue(rows[0])
+	if uuid == "" {
+		return "", false, wrap(ErrorConflict, dbOVNNorthbound, table, "select", object, "row UUID missing", nil)
+	}
+	return uuid, true, nil
+}
+
 func (n *NBClient) executeNamed(ctx context.Context, table, name string, mode nbMode, row libovsdb.Row, mutations []libovsdb.Mutation) error {
 	return n.executeByConditions(ctx, table, name, mode, conditionName(name), row, mutations)
 }
 
+func (n *NBClient) executeNamedWithPreOps(ctx context.Context, table, name string, mode nbMode, row libovsdb.Row, mutations []libovsdb.Mutation, preOps []libovsdb.Operation) error {
+	return n.executeByConditionsWithPreOps(ctx, table, name, mode, conditionName(name), row, mutations, preOps)
+}
+
+func (n *NBClient) executeNamedWithPrePostOps(ctx context.Context, table, name string, mode nbMode, row libovsdb.Row, mutations []libovsdb.Mutation, preOps []libovsdb.Operation, postOps func(string) []libovsdb.Operation) error {
+	return n.executeByConditionsWithPrePostOps(ctx, table, name, mode, conditionName(name), row, mutations, preOps, postOps)
+}
+
 func (n *NBClient) executeByConditions(ctx context.Context, table, object string, mode nbMode, conditions []libovsdb.Condition, row libovsdb.Row, mutations []libovsdb.Mutation) error {
+	return n.executeByConditionsWithPreOps(ctx, table, object, mode, conditions, row, mutations, nil)
+}
+
+func (n *NBClient) executeByConditionsWithPreOps(ctx context.Context, table, object string, mode nbMode, conditions []libovsdb.Condition, row libovsdb.Row, mutations []libovsdb.Mutation, preOps []libovsdb.Operation) error {
+	return n.executeByConditionsWithPrePostOps(ctx, table, object, mode, conditions, row, mutations, preOps, nil)
+}
+
+func (n *NBClient) executeByConditionsWithPrePostOps(ctx context.Context, table, object string, mode nbMode, conditions []libovsdb.Condition, row libovsdb.Row, mutations []libovsdb.Mutation, preOps []libovsdb.Operation, postOps func(string) []libovsdb.Operation) error {
 	if err := n.db.schema.RequireTable(table); err != nil {
 		return err
 	}
@@ -47,25 +78,35 @@ func (n *NBClient) executeByConditions(ctx context.Context, table, object string
 	}
 	row = n.supportedRow(table, row)
 	mutations = n.supportedMutations(table, mutations)
+	preOps = n.supportedPreOps(preOps)
 	switch mode {
 	case nbModeCreate:
-		return n.executeInsert(ctx, table, object, string(mode), row)
+		return n.executeInsertWithPrePostOps(ctx, table, object, string(mode), row, preOps, postOps)
 	case nbModeEnsure:
 		rows, err := n.selectRows(ctx, table, conditions, []string{colUUID}, object)
 		if err != nil {
 			return err
 		}
 		if len(rows) == 0 {
-			err := n.executeInsert(ctx, table, object, string(mode), row)
+			err := n.executeInsertWithPrePostOps(ctx, table, object, string(mode), row, preOps, postOps)
 			if err == nil {
 				return nil
 			}
 			if IsKind(err, ErrorAlreadyExists) {
-				return n.executeUpdate(ctx, table, object, string(mode), conditions, row, mutations, false)
+				rows, selectErr := n.selectRows(ctx, table, conditions, []string{colUUID}, object)
+				if selectErr != nil {
+					return selectErr
+				}
+				existingUUID := ""
+				if len(rows) > 0 {
+					existingUUID = rowUUIDValue(rows[0])
+				}
+				return n.executeUpdateWithPrePostOps(ctx, table, object, string(mode), conditions, row, mutations, false, preOps, postOpsForUUID(postOps, existingUUID))
 			}
 			return err
 		}
-		return n.executeUpdate(ctx, table, object, string(mode), conditions, row, mutations, false)
+		existingUUID := rowUUIDValue(rows[0])
+		return n.executeUpdateWithPrePostOps(ctx, table, object, string(mode), conditions, row, mutations, false, preOps, postOpsForUUID(postOps, existingUUID))
 	case nbModeDelete:
 		rows, err := n.selectRows(ctx, table, conditions, []string{colUUID}, object)
 		if err != nil {
@@ -149,20 +190,47 @@ func (n *NBClient) unreferenceOps(ctx context.Context, targetTable, targetUUID s
 }
 
 func (n *NBClient) executeInsert(ctx context.Context, table, object, op string, row libovsdb.Row) error {
+	return n.executeInsertWithPreOps(ctx, table, object, op, row, nil)
+}
+
+func (n *NBClient) executeInsertWithPreOps(ctx context.Context, table, object, op string, row libovsdb.Row, preOps []libovsdb.Operation) error {
+	return n.executeInsertWithPrePostOps(ctx, table, object, op, row, preOps, nil)
+}
+
+func (n *NBClient) executeInsertWithPrePostOps(ctx context.Context, table, object, op string, row libovsdb.Row, preOps []libovsdb.Operation, postOps func(string) []libovsdb.Operation) error {
 	if len(row) == 0 {
 		return wrap(ErrorValidation, dbOVNNorthbound, table, op, object, "insert row is empty", nil)
 	}
-	_, err := n.db.transact(ctx, table, op, object, libovsdb.Operation{
+	targetUUID := namedUUID(tableUUIDPrefix(table))
+	ops := append([]libovsdb.Operation{}, preOps...)
+	ops = append(ops, libovsdb.Operation{
 		Op:       libovsdb.OperationInsert,
 		Table:    table,
-		UUIDName: namedUUID(tableUUIDPrefix(table)),
+		UUIDName: targetUUID,
 		Row:      row,
 	})
-	return err
+	if postOps != nil {
+		ops = append(ops, n.supportedPreOps(postOps(targetUUID))...)
+	}
+	results, err := n.db.transact(ctx, table, op, object, ops...)
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, nbPostMustAffectIndexes(len(preOps)+1, ops), dbOVNNorthbound, table, op, object)
 }
 
 func (n *NBClient) executeUpdate(ctx context.Context, table, object, op string, conditions []libovsdb.Condition, row libovsdb.Row, mutations []libovsdb.Mutation, allowNoop bool) error {
+	return n.executeUpdateWithPreOps(ctx, table, object, op, conditions, row, mutations, allowNoop, nil)
+}
+
+func (n *NBClient) executeUpdateWithPreOps(ctx context.Context, table, object, op string, conditions []libovsdb.Condition, row libovsdb.Row, mutations []libovsdb.Mutation, allowNoop bool, preOps []libovsdb.Operation) error {
+	return n.executeUpdateWithPrePostOps(ctx, table, object, op, conditions, row, mutations, allowNoop, preOps, nil)
+}
+
+func (n *NBClient) executeUpdateWithPrePostOps(ctx context.Context, table, object, op string, conditions []libovsdb.Condition, row libovsdb.Row, mutations []libovsdb.Mutation, allowNoop bool, preOps []libovsdb.Operation, postOps func(string) []libovsdb.Operation) error {
 	var ops []libovsdb.Operation
+	ops = append(ops, preOps...)
+	mainStart := len(ops)
 	updateRow := cloneRow(row)
 	delete(updateRow, colUUID)
 	delete(updateRow, colName)
@@ -175,6 +243,9 @@ func (n *NBClient) executeUpdate(ctx context.Context, table, object, op string, 
 	if len(mutations) > 0 {
 		ops = append(ops, libovsdb.Operation{Op: libovsdb.OperationMutate, Table: table, Where: conditions, Mutations: mutations})
 	}
+	if postOps != nil {
+		ops = append(ops, n.supportedPreOps(postOps(""))...)
+	}
 	if len(ops) == 0 {
 		if allowNoop {
 			return nil
@@ -185,11 +256,33 @@ func (n *NBClient) executeUpdate(ctx context.Context, table, object, op string, 
 	if err != nil {
 		return err
 	}
-	mustAffect := make([]int, len(ops))
+	mustAffect := make([]int, 0, len(ops))
 	for i := range ops {
-		mustAffect[i] = i
+		if i >= mainStart {
+			mustAffect = append(mustAffect, i)
+		}
 	}
 	return ensureAffected(results, mustAffect, dbOVNNorthbound, table, op, object)
+}
+
+func postOpsForUUID(postOps func(string) []libovsdb.Operation, uuid string) func(string) []libovsdb.Operation {
+	if postOps == nil {
+		return nil
+	}
+	return func(string) []libovsdb.Operation {
+		return postOps(uuid)
+	}
+}
+
+func nbPostMustAffectIndexes(start int, ops []libovsdb.Operation) []int {
+	indexes := make([]int, 0, len(ops))
+	for i := start; i < len(ops); i++ {
+		switch ops[i].Op {
+		case libovsdb.OperationUpdate, libovsdb.OperationMutate, libovsdb.OperationDelete:
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes
 }
 
 func (n *NBClient) supportedColumns(table string, columns []string) []string {
@@ -221,6 +314,19 @@ func (n *NBClient) supportedMutations(table string, mutations []libovsdb.Mutatio
 		if n.db.schema.HasColumn(table, mutation.Column) {
 			out = append(out, mutation)
 		}
+	}
+	return out
+}
+
+func (n *NBClient) supportedPreOps(ops []libovsdb.Operation) []libovsdb.Operation {
+	out := make([]libovsdb.Operation, 0, len(ops))
+	for _, op := range ops {
+		if op.Table != "" && !n.db.schema.HasTable(op.Table) {
+			continue
+		}
+		op.Row = n.supportedRow(op.Table, op.Row)
+		op.Mutations = n.supportedMutations(op.Table, op.Mutations)
+		out = append(out, op)
 	}
 	return out
 }

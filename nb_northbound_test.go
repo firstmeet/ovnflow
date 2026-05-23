@@ -281,6 +281,248 @@ func TestNBNorthboundEnsureMutatesExistingRows(t *testing.T) {
 	}
 }
 
+func TestMeterEnsureCreatesInlineBandInSameTransaction(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{},
+			{},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).Meter("meter0").Ensure().
+		WithUnit("kbps").
+		WithNamedBand("band0", "drop", 100).
+		WithExternalID("owner", "test").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	bandOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableMeterBand)
+	if bandOp == nil {
+		t.Fatalf("ops missing Meter_Band insert: %#v", rec.ops)
+	}
+	if got := rowStringMapValue(bandOp.Row, colExternalIDs)[dnsNameExternalID]; got != "band0" {
+		t.Fatalf("band external_ids[%q] = %q, want band0: %#v", dnsNameExternalID, got, bandOp.Row)
+	}
+	if got := rowStringMapValue(bandOp.Row, colExternalIDs)["owner"]; got != "test" {
+		t.Fatalf("band inherited external_ids[owner] = %q, want test: %#v", got, bandOp.Row)
+	}
+	meterOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableMeter)
+	if meterOp == nil {
+		t.Fatalf("ops missing Meter insert: %#v", rec.ops)
+	}
+	if len(rowUUIDSliceValue(meterOp.Row, colBands)) != 1 {
+		t.Fatalf("meter bands = %#v, want one inline band reference", meterOp.Row[colBands])
+	}
+}
+
+func TestPortGroupEnsureCreatesInlineACLInSameTransaction(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{},
+			{},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).PortGroup("pg0").Ensure().
+		WithACL("to-lport", 1001, "outport == \"vm0\"", "allow").
+		WithExternalID("owner", "test").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	aclOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableACL)
+	if aclOp == nil {
+		t.Fatalf("ops missing ACL insert: %#v", rec.ops)
+	}
+	if got := rowStringMapValue(aclOp.Row, colExternalIDs)["owner"]; got != "test" {
+		t.Fatalf("ACL inherited external_ids[owner] = %q, want test: %#v", got, aclOp.Row)
+	}
+	portGroupOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tablePortGroup)
+	if portGroupOp == nil {
+		t.Fatalf("ops missing Port_Group insert: %#v", rec.ops)
+	}
+	if len(rowUUIDSliceValue(portGroupOp.Row, colACLs)) != 1 {
+		t.Fatalf("port group ACLs = %#v, want one inline ACL reference", portGroupOp.Row[colACLs])
+	}
+}
+
+func TestLogicalRouterPortEnsureCreatesInlineGatewayAndHAInSameTransaction(t *testing.T) {
+	db := testNBDBClient(t)
+	db.schema.schema.Tables[tableLogicalRouterPort].Columns[colGatewayChassis] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Gateway_Chassis"},"min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableLogicalRouterPort].Columns[colHAChassisGroup] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"HA_Chassis_Group"},"min":0}}`)
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{},
+			{},
+			{},
+			{},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).LogicalRouterPort("lrp0").Ensure().
+		AttachToRouter("lr0").
+		WithMAC("00:00:5e:00:53:01").
+		WithNetwork("10.0.0.1/24").
+		WithGatewayChassis("gwc0", "gw0", 20).
+		WithHAChassisGroup("hag0").
+		WithHAChassis("ha0", 30).
+		WithExternalID("owner", "test").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	gatewayOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableGatewayChassis)
+	if gatewayOp == nil {
+		t.Fatalf("ops missing Gateway_Chassis insert: %#v", rec.ops)
+	}
+	haOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableHAChassis)
+	if haOp == nil {
+		t.Fatalf("ops missing HA_Chassis insert: %#v", rec.ops)
+	}
+	haGroupOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableHAChassisGroup)
+	if haGroupOp == nil {
+		t.Fatalf("ops missing HA_Chassis_Group insert: %#v", rec.ops)
+	}
+	lrpOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableLogicalRouterPort)
+	if lrpOp == nil {
+		t.Fatalf("ops missing Logical_Router_Port insert: %#v", rec.ops)
+	}
+	routerAttachOp := findRecordedOp(rec.ops, libovsdb.OperationMutate, tableLogicalRouter)
+	if routerAttachOp == nil {
+		t.Fatalf("ops missing Logical_Router attach mutate: %#v", rec.ops)
+	}
+	if got := rowStringMapValue(gatewayOp.Row, colExternalIDs)["owner"]; got != "test" {
+		t.Fatalf("gateway inherited external_ids[owner] = %q, want test", got)
+	}
+	if got := rowStringMapValue(haOp.Row, colExternalIDs)["owner"]; got != "test" {
+		t.Fatalf("ha chassis inherited external_ids[owner] = %q, want test", got)
+	}
+	if got := rowStringMapValue(haGroupOp.Row, colExternalIDs)["owner"]; got != "test" {
+		t.Fatalf("ha group inherited external_ids[owner] = %q, want test", got)
+	}
+	if len(rowUUIDSliceValue(haGroupOp.Row, colHAChassis)) != 1 {
+		t.Fatalf("ha group refs = %#v, want one HA_Chassis reference", haGroupOp.Row[colHAChassis])
+	}
+	if len(rowUUIDSliceValue(lrpOp.Row, colGatewayChassis)) != 1 {
+		t.Fatalf("lrp gateway refs = %#v, want one Gateway_Chassis reference", lrpOp.Row[colGatewayChassis])
+	}
+	if rowOptionalUUIDValue(lrpOp.Row, colHAChassisGroup) == nil {
+		t.Fatalf("lrp ha_chassis_group = %#v, want inline HA group reference", lrpOp.Row[colHAChassisGroup])
+	}
+	if len(routerAttachOp.Where) != 1 || routerAttachOp.Where[0].Column != colName {
+		t.Fatalf("router attach where = %#v, want router name", routerAttachOp.Where)
+	}
+}
+
+func TestNATEnsureAttachesToRouterInSameTransaction(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).NATByLogicalIP("snat", "10.0.0.0/24").Ensure().
+		AttachToRouter("lr0").
+		WithExternalIP("192.0.2.10").
+		WithExternalID("owner", "test").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	if len(rec.ops) != 3 {
+		t.Fatalf("ops = %d, want select/insert nat/router attach: %#v", len(rec.ops), rec.ops)
+	}
+	if rec.ops[1].Op != libovsdb.OperationInsert || rec.ops[1].Table != tableNAT {
+		t.Fatalf("nat op = %#v, want NAT insert", rec.ops[1])
+	}
+	if rec.ops[2].Op != libovsdb.OperationMutate || rec.ops[2].Table != tableLogicalRouter {
+		t.Fatalf("router attach op = %#v, want Logical_Router mutate", rec.ops[2])
+	}
+	if len(rec.ops[2].Mutations) != 1 || rec.ops[2].Mutations[0].Column != colNAT {
+		t.Fatalf("router attach mutations = %#v, want nat insert", rec.ops[2].Mutations)
+	}
+}
+
+func TestLoadBalancerEnsureAttachesToRouterInSameTransaction(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).LoadBalancer("lb0").Ensure().
+		AttachToRouter("lr0").
+		WithVIP("192.0.2.20:80", "10.0.0.20:80").
+		WithExternalID("owner", "test").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	if len(rec.ops) != 3 {
+		t.Fatalf("ops = %d, want select/insert lb/router attach: %#v", len(rec.ops), rec.ops)
+	}
+	if rec.ops[1].Op != libovsdb.OperationInsert || rec.ops[1].Table != tableLoadBalancer {
+		t.Fatalf("load balancer op = %#v, want Load_Balancer insert", rec.ops[1])
+	}
+	if rec.ops[2].Op != libovsdb.OperationMutate || rec.ops[2].Table != tableLogicalRouter {
+		t.Fatalf("router attach op = %#v, want Logical_Router mutate", rec.ops[2])
+	}
+	if len(rec.ops[2].Mutations) != 1 || rec.ops[2].Mutations[0].Column != colLoadBalancer {
+		t.Fatalf("router attach mutations = %#v, want load_balancer insert", rec.ops[2].Mutations)
+	}
+}
+
+func TestQoSEnsureAttachesToSwitchInSameTransaction(t *testing.T) {
+	db := testNBDBClient(t)
+	db.schema.schema.Tables[tableLogicalSwitch].Columns[colQoSRules] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"QoS"},"min":0,"max":"unlimited"}}`)
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&NBClient{db: db}).QoSByMatch("from-lport", 100, "ip4").Ensure().
+		AttachToSwitch("ls0").
+		WithRate(1000).
+		WithExternalID("owner", "test").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	if len(rec.ops) != 3 {
+		t.Fatalf("ops = %d, want select/insert qos/switch attach: %#v", len(rec.ops), rec.ops)
+	}
+	if rec.ops[1].Op != libovsdb.OperationInsert || rec.ops[1].Table != tableQoS {
+		t.Fatalf("qos op = %#v, want QoS insert", rec.ops[1])
+	}
+	if rec.ops[2].Op != libovsdb.OperationMutate || rec.ops[2].Table != tableLogicalSwitch {
+		t.Fatalf("switch attach op = %#v, want Logical_Switch mutate", rec.ops[2])
+	}
+	if len(rec.ops[2].Mutations) != 1 || rec.ops[2].Mutations[0].Column != colQoSRules {
+		t.Fatalf("switch attach mutations = %#v, want qos_rules insert", rec.ops[2].Mutations)
+	}
+}
+
 func TestTableRefListHonorsWhereConditions(t *testing.T) {
 	db := testNBDBClient(t)
 	rec := &nbRecordingExecutor{
@@ -448,6 +690,15 @@ type nbRecordingExecutor struct {
 	ops     []libovsdb.Operation
 	results []libovsdb.OperationResult
 	errs    []error
+}
+
+func findRecordedOp(ops []libovsdb.Operation, op, table string) *libovsdb.Operation {
+	for i := range ops {
+		if ops[i].Op == op && ops[i].Table == table {
+			return &ops[i]
+		}
+	}
+	return nil
 }
 
 func (r *nbRecordingExecutor) Transact(_ context.Context, ops ...libovsdb.Operation) ([]libovsdb.OperationResult, error) {

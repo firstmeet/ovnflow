@@ -564,6 +564,19 @@ func rowString(t *testing.T, row map[string]json.RawMessage, column string) stri
 	return value
 }
 
+func rowInt(t *testing.T, row map[string]json.RawMessage, column string) int {
+	t.Helper()
+	raw, ok := row[column]
+	if !ok {
+		t.Fatalf("row is missing column %q", column)
+	}
+	var value int
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("decode %s int: %v", column, err)
+	}
+	return value
+}
+
 func rowUUID(t *testing.T, row map[string]json.RawMessage, column string) (string, bool) {
 	t.Helper()
 	raw, ok := row[column]
@@ -574,7 +587,7 @@ func rowUUID(t *testing.T, row map[string]json.RawMessage, column string) (strin
 	if err := json.Unmarshal(raw, &value); err != nil {
 		t.Fatalf("decode %s uuid: %v", column, err)
 	}
-	if len(value) != 2 || value[0] != "uuid" {
+	if len(value) != 2 || (value[0] != "uuid" && value[0] != "named-uuid") {
 		t.Fatalf("column %s is not an OVSDB uuid: %s", column, string(raw))
 	}
 	return value[1], true
@@ -587,6 +600,23 @@ func rowUUIDMust(t *testing.T, row map[string]json.RawMessage, column string) st
 		t.Fatalf("row is missing UUID column %q", column)
 	}
 	return value
+}
+
+func rowUUIDOptional(t *testing.T, row map[string]json.RawMessage, column string) string {
+	t.Helper()
+	raw, ok := row[column]
+	if !ok {
+		return ""
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("decode %s optional uuid: %v", column, err)
+	}
+	values := ovsdbUUIDSetValues(t, column, value)
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 func rowUUIDSetContains(t *testing.T, row map[string]json.RawMessage, column, want string) bool {
@@ -623,7 +653,7 @@ func ovsdbUUIDSetValues(t *testing.T, column string, value any) []string {
 				out := make([]string, 0, len(values))
 				for _, item := range values {
 					uuidValue, ok := item.([]any)
-					if !ok || len(uuidValue) != 2 || uuidValue[0] != "uuid" {
+					if !ok || len(uuidValue) != 2 || (uuidValue[0] != "uuid" && uuidValue[0] != "named-uuid") {
 						t.Fatalf("column %s contains non-uuid set value: %v", column, item)
 					}
 					id, ok := uuidValue[1].(string)
@@ -645,7 +675,7 @@ func ovsdbUUIDSetValues(t *testing.T, column string, value any) []string {
 	out := make([]string, 0, len(items))
 	for _, item := range items {
 		uuidValue, ok := item.([]any)
-		if !ok || len(uuidValue) != 2 || uuidValue[0] != "uuid" {
+		if !ok || len(uuidValue) != 2 || (uuidValue[0] != "uuid" && uuidValue[0] != "named-uuid") {
 			t.Fatalf("column %s contains non-uuid set value: %v", column, item)
 		}
 		id, ok := uuidValue[1].(string)
@@ -653,6 +683,40 @@ func ovsdbUUIDSetValues(t *testing.T, column string, value any) []string {
 			t.Fatalf("column %s UUID value is not string: %v", column, item)
 		}
 		out = append(out, id)
+	}
+	return out
+}
+
+func rowStringSetValuesFromColumn(t *testing.T, row map[string]json.RawMessage, column string) []string {
+	t.Helper()
+	raw, ok := row[column]
+	if !ok {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("decode %s string set: %v", column, err)
+	}
+	items := []any{value}
+	if outer, ok := value.([]any); ok {
+		if len(outer) == 0 {
+			return nil
+		}
+		if len(outer) == 2 && outer[0] == "set" {
+			setItems, ok := outer[1].([]any)
+			if !ok {
+				t.Fatalf("column %s has invalid set shape: %v", column, value)
+			}
+			items = setItems
+		}
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		s, ok := item.(string)
+		if !ok {
+			t.Fatalf("column %s contains non-string set value: %v", column, item)
+		}
+		out = append(out, s)
 	}
 	return out
 }
@@ -688,6 +752,41 @@ func rowStringMap(t *testing.T, row map[string]json.RawMessage, column string) m
 			t.Fatalf("column %s map pair is not string:string: %v", column, pair)
 		}
 		result[key] = val
+	}
+	return result
+}
+
+func rowIntMap(t *testing.T, row map[string]json.RawMessage, column string) map[string]int {
+	t.Helper()
+	raw, ok := row[column]
+	if !ok {
+		return map[string]int{}
+	}
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("decode %s map: %v", column, err)
+	}
+	result := map[string]int{}
+	outer, ok := value.([]any)
+	if !ok || len(outer) != 2 || outer[0] != "map" {
+		t.Fatalf("column %s is not an OVSDB map: %s", column, string(raw))
+	}
+	pairs, ok := outer[1].([]any)
+	if !ok {
+		t.Fatalf("column %s has invalid OVSDB map pairs: %s", column, string(raw))
+	}
+	for _, pairValue := range pairs {
+		pair, ok := pairValue.([]any)
+		if !ok || len(pair) != 2 {
+			t.Fatalf("column %s has invalid OVSDB map pair: %v", column, pairValue)
+		}
+		key, keyOK := pair[0].(string)
+		val, valOK := pair[1].(float64)
+		if !keyOK || !valOK {
+			t.Fatalf("column %s map pair is not string:int: %v", column, pair)
+		}
+		result[key] = int(val)
 	}
 	return result
 }

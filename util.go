@@ -215,6 +215,17 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
+func mergeStringMaps(base, overlay map[string]string) map[string]string {
+	out := cloneStringMap(base)
+	for key, value := range overlay {
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[key] = value
+	}
+	return out
+}
+
 func decodeRows[T any](results []libovsdb.OperationResult) ([]T, error) {
 	if len(results) == 0 {
 		return nil, nil
