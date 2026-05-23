@@ -449,7 +449,7 @@ func conditionMatches(fn libovsdb.ConditionFunction, got, want any) bool {
 	case libovsdb.ConditionIncludes:
 		return conditionValueIncludes(got, want)
 	case libovsdb.ConditionExcludes:
-		return !conditionValueIncludes(got, want)
+		return conditionValueExcludes(got, want)
 	default:
 		return false
 	}
@@ -534,6 +534,41 @@ func conditionValueIncludes(got, want any) bool {
 	}
 	for _, wantValue := range wantValues {
 		if !containsString(gotValues, wantValue) {
+			return false
+		}
+	}
+	return true
+}
+
+func conditionValueExcludes(got, want any) bool {
+	wantMap := anyStringMap(want)
+	if len(wantMap) > 0 {
+		gotMap := anyStringMap(got)
+		for key, value := range wantMap {
+			if gotMap[key] == value {
+				return false
+			}
+		}
+		return true
+	}
+
+	wantValues := anyStringSlice(want)
+	if len(wantValues) == 0 {
+		if s := anyString(want); s != "" {
+			wantValues = []string{s}
+		}
+	}
+	gotValues := anyStringSlice(got)
+	if len(gotValues) == 0 {
+		if s := anyString(got); s != "" {
+			gotValues = []string{s}
+		}
+	}
+	if len(wantValues) == 0 {
+		return false
+	}
+	for _, wantValue := range wantValues {
+		if containsString(gotValues, wantValue) {
 			return false
 		}
 	}
