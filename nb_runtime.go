@@ -218,8 +218,35 @@ func anyStringMap(value any) map[string]string {
 	case map[string]any:
 		out := map[string]string{}
 		for k, v := range typed {
-			if s, ok := v.(string); ok {
+			if s, ok := anyMapStringValue(v); ok {
 				out[k] = s
+			}
+		}
+		return out
+	case []any:
+		if len(typed) != 2 {
+			return nil
+		}
+		marker, ok := typed[0].(string)
+		if !ok || marker != "map" {
+			return nil
+		}
+		pairs, ok := typed[1].([]any)
+		if !ok {
+			return nil
+		}
+		out := map[string]string{}
+		for _, item := range pairs {
+			pair, ok := item.([]any)
+			if !ok || len(pair) != 2 {
+				continue
+			}
+			key, ok := pair[0].(string)
+			if !ok {
+				continue
+			}
+			if value, ok := anyMapStringValue(pair[1]); ok {
+				out[key] = value
 			}
 		}
 		return out
@@ -227,7 +254,7 @@ func anyStringMap(value any) map[string]string {
 		out := map[string]string{}
 		for k, v := range typed.GoMap {
 			key, keyOK := k.(string)
-			val, valOK := v.(string)
+			val, valOK := anyMapStringValue(v)
 			if keyOK && valOK {
 				out[key] = val
 			}
@@ -236,4 +263,11 @@ func anyStringMap(value any) map[string]string {
 	default:
 		return nil
 	}
+}
+
+func anyMapStringValue(value any) (string, bool) {
+	if s, ok := value.(string); ok {
+		return s, true
+	}
+	return anyUUIDString(value)
 }

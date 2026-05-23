@@ -134,6 +134,19 @@ func TestOVSTableDeleteDoesNotRequireUnreferenceMutationsToAffectRows(t *testing
 	}
 }
 
+func TestOVSMapUUIDReferenceCleanupSupportsJSONUUIDValues(t *testing.T) {
+	keys := ovsMapDeleteKeysForUUID([]any{
+		"map",
+		[]any{
+			[]any{"selected", []any{"uuid", "port-uuid"}},
+			[]any{"other", []any{"uuid", "other-uuid"}},
+		},
+	}, "port-uuid")
+	if len(keys) != 1 || keys[0] != "selected" {
+		t.Fatalf("delete keys = %#v, want selected", keys)
+	}
+}
+
 func TestOVSBridgeDeleteDoesNotCascadeSharedConfigRows(t *testing.T) {
 	db := testOVSDBClient(t)
 	rec := &recordingExecutor{
@@ -241,6 +254,40 @@ func TestOVSManagerEnsureReferencesRootManagerOptions(t *testing.T) {
 	}
 	if len(rec.ops[3].Mutations) != 1 || rec.ops[3].Mutations[0].Column != colManagerOptions {
 		t.Fatalf("root mutations = %#v, want manager_options", rec.ops[3].Mutations)
+	}
+}
+
+func TestOVSManagerEnsureRepairsMissingRootReference(t *testing.T) {
+	db := testOVSDBClient(t)
+	db.schema.schema.Tables[tableOpenVSwitch].Columns[colManagerOptions] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Manager"},"min":0,"max":"unlimited"}}`)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("manager-uuid")}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("root-uuid")}}},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Manager("ptcp:6640:127.0.0.1").
+		Ensure().
+		WithExternalID("owner", "test").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	if len(rec.ops) != 4 {
+		t.Fatalf("ops = %d, want select manager/select root/mutate root/mutate manager: %#v", len(rec.ops), rec.ops)
+	}
+	if rec.ops[2].Op != libovsdb.OperationMutate || rec.ops[2].Table != tableOpenVSwitch {
+		t.Fatalf("root repair op = %#v", rec.ops[2])
+	}
+	if len(rec.ops[2].Mutations) != 1 || rec.ops[2].Mutations[0].Column != colManagerOptions {
+		t.Fatalf("root repair mutations = %#v, want manager_options", rec.ops[2].Mutations)
+	}
+	if rec.ops[3].Op != libovsdb.OperationMutate || rec.ops[3].Table != tableManager {
+		t.Fatalf("manager update op = %#v", rec.ops[3])
 	}
 }
 

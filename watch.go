@@ -98,6 +98,7 @@ type rowWatchSubscription struct {
 	done        chan struct{}
 	closed      atomic.Bool
 	initialDone bool
+	initialRows map[string]Row
 	pending     []RowEvent
 }
 
@@ -235,6 +236,7 @@ func (m *watchManager) pollRows(table string, stop <-chan struct{}) {
 				old, hadOld := seen[id]
 				switch {
 				case !seeded:
+					m.enqueue(table, RowEvent{Type: EventAdd, New: row, baseline: true})
 				case !hadOld:
 					m.enqueue(table, RowEvent{Type: EventAdd, New: row})
 				case rowFingerprint(old) != rowFingerprint(row):
@@ -298,6 +300,11 @@ func (s *rowWatchSubscription) offerLocked(event RowEvent) bool {
 		s.pending = append(s.pending, event)
 		return true
 	}
+	var ok bool
+	event, ok = s.normalizeBaselineLocked(event)
+	if !ok {
+		return true
+	}
 	return s.sendLocked(event)
 }
 
@@ -317,6 +324,7 @@ func (s *rowWatchSubscription) finishInitial(initial []RowEvent) {
 	if s.closed.Load() {
 		return
 	}
+	s.initialRows = initialEventRows(initial)
 	for _, event := range initial {
 		if !s.sendLocked(event) {
 			return
@@ -326,10 +334,46 @@ func (s *rowWatchSubscription) finishInitial(initial []RowEvent) {
 	pending := s.pending
 	s.pending = nil
 	for _, event := range pending {
+		var ok bool
+		event, ok = s.normalizeBaselineLocked(event)
+		if !ok {
+			continue
+		}
 		if !s.sendLocked(event) {
 			return
 		}
 	}
+}
+
+func (s *rowWatchSubscription) normalizeBaselineLocked(event RowEvent) (RowEvent, bool) {
+	if !event.baseline || event.Type != EventAdd {
+		return event, true
+	}
+	id := rowIdentity(event.New)
+	if id == "" {
+		event.baseline = false
+		return event, true
+	}
+	initial, ok := s.initialRows[id]
+	if !ok {
+		event.baseline = false
+		return event, true
+	}
+	if rowFingerprint(initial) == rowFingerprint(event.New) {
+		return RowEvent{}, false
+	}
+	return RowEvent{Type: EventUpdate, Old: initial, New: event.New}, true
+}
+
+func initialEventRows(events []RowEvent) map[string]Row {
+	rows := map[string]Row{}
+	for _, event := range events {
+		id := rowIdentity(event.New)
+		if id != "" {
+			rows[id] = event.New
+		}
+	}
+	return rows
 }
 
 func (s *rowWatchSubscription) reportOverflowLocked() {

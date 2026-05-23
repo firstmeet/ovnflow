@@ -397,9 +397,20 @@ func anyUUIDString(value any) (string, bool) {
 		return typed.GoUUID, typed.GoUUID != ""
 	case string:
 		return typed, typed != ""
+	case []any:
+		if len(typed) == 2 {
+			if marker, ok := typed[0].(string); ok && (marker == "uuid" || marker == "named-uuid") {
+				id, ok := typed[1].(string)
+				return id, ok && id != ""
+			}
+		}
+	case map[string]any:
+		id, ok := typed["GoUUID"].(string)
+		return id, ok && id != ""
 	default:
 		return "", false
 	}
+	return "", false
 }
 
 func containsString(values []string, want string) bool {

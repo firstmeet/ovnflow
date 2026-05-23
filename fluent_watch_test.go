@@ -71,6 +71,19 @@ func TestRowMatchesConditionFunctions(t *testing.T) {
 	}
 }
 
+func TestRowMatchesOVSDBJSONMapShape(t *testing.T) {
+	row := Row(rawRow(libovsdb.Row{
+		colExternalIDs: ovsMap(map[string]string{"owner": "ovnflow"}),
+	}))
+	condition := libovsdb.NewCondition(colExternalIDs, libovsdb.ConditionIncludes, ovsMap(map[string]string{"owner": "ovnflow"}))
+	if !rowMatches([]libovsdb.Condition{condition}, row) {
+		t.Fatalf("rowMatches() = false for OVSDB JSON map row: %#v", row)
+	}
+	if got := anyStringMap(row[colExternalIDs])["owner"]; got != "ovnflow" {
+		t.Fatalf("anyStringMap() owner = %q, want ovnflow; row=%#v", got, row)
+	}
+}
+
 func TestDecodeModelRowUsesOVSDBTags(t *testing.T) {
 	row := decodeModelRow(&SBPortBinding{
 		UUID:        "pb-uuid",
@@ -191,6 +204,72 @@ func TestWatchSubscriptionQueuesLiveEventsUntilInitialDelivered(t *testing.T) {
 	}
 	if second.Type != EventUpdate {
 		t.Fatalf("second event = %s, want update", second.Type)
+	}
+}
+
+func TestWatchSubscriptionBaselineSuppressesDuplicateInitialRows(t *testing.T) {
+	manager := newWatchManager(&dbClient{database: dbOVNSouthbound})
+	errs := make(chan error, 1)
+	events := make(chan RowEvent, 4)
+	sub := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: events, errs: errs, done: make(chan struct{})}
+
+	initial := RowEvent{Type: EventInitial, New: Row{colUUID: "pb-uuid", colLogicalPort: "lp0"}}
+	baseline := RowEvent{Type: EventAdd, New: Row{colUUID: "pb-uuid", colLogicalPort: "lp0"}, baseline: true}
+	if !sub.offer(baseline) {
+		t.Fatal("baseline offer before initial failed")
+	}
+	sub.finishInitial([]RowEvent{initial})
+
+	if got := <-events; got.Type != EventInitial {
+		t.Fatalf("first event = %s, want initial", got.Type)
+	}
+	select {
+	case got := <-events:
+		t.Fatalf("duplicate baseline event was delivered: %#v", got)
+	default:
+	}
+}
+
+func TestWatchSubscriptionBaselineDeliversRowsMissingFromInitial(t *testing.T) {
+	manager := newWatchManager(&dbClient{database: dbOVNSouthbound})
+	errs := make(chan error, 1)
+	events := make(chan RowEvent, 4)
+	sub := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: events, errs: errs, done: make(chan struct{})}
+
+	baseline := RowEvent{Type: EventAdd, New: Row{colUUID: "pb-uuid", colLogicalPort: "lp0"}, baseline: true}
+	if !sub.offer(baseline) {
+		t.Fatal("baseline offer before initial failed")
+	}
+	sub.finishInitial(nil)
+
+	got := <-events
+	if got.Type != EventAdd || anyString(got.New[colUUID]) != "pb-uuid" {
+		t.Fatalf("baseline event = %#v, want add for pb-uuid", got)
+	}
+}
+
+func TestWatchSubscriptionBaselineBecomesUpdateWhenInitialDiffers(t *testing.T) {
+	manager := newWatchManager(&dbClient{database: dbOVNSouthbound})
+	errs := make(chan error, 1)
+	events := make(chan RowEvent, 4)
+	sub := &rowWatchSubscription{id: 1, m: manager, table: tablePortBinding, events: events, errs: errs, done: make(chan struct{})}
+
+	initial := RowEvent{Type: EventInitial, New: Row{colUUID: "pb-uuid", colLogicalPort: "lp0", colExternalIDs: map[string]string{"phase": "initial"}}}
+	baseline := RowEvent{Type: EventAdd, New: Row{colUUID: "pb-uuid", colLogicalPort: "lp0", colExternalIDs: map[string]string{"phase": "baseline"}}, baseline: true}
+	if !sub.offer(baseline) {
+		t.Fatal("baseline offer before initial failed")
+	}
+	sub.finishInitial([]RowEvent{initial})
+
+	if got := <-events; got.Type != EventInitial {
+		t.Fatalf("first event = %s, want initial", got.Type)
+	}
+	got := <-events
+	if got.Type != EventUpdate {
+		t.Fatalf("baseline event = %s, want update", got.Type)
+	}
+	if anyStringMap(got.Old[colExternalIDs])["phase"] != "initial" || anyStringMap(got.New[colExternalIDs])["phase"] != "baseline" {
+		t.Fatalf("update old/new = %#v/%#v", got.Old, got.New)
 	}
 }
 

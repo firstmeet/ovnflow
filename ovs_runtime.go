@@ -316,6 +316,13 @@ func (b *TableBuilder) executeOVSManagerCreate(ctx context.Context, ensure bool)
 			return err
 		}
 		if len(rows) > 0 {
+			id := anyString(rows[0][colUUID])
+			if id == "" {
+				return wrap(ErrorConflict, dbOpenVSwitch, tableManager, string(b.mode), b.ref.identityValue, "row UUID missing", nil)
+			}
+			if err := b.ensureOVSManagerRootReference(ctx, id); err != nil {
+				return err
+			}
 			return b.executeUpdate(ctx)
 		}
 	}
@@ -353,6 +360,25 @@ func (b *TableBuilder) executeOVSManagerCreate(ctx context.Context, ensure bool)
 		return err
 	}
 	return ensureAffected(results, []int{1}, dbOpenVSwitch, b.ref.table, string(b.mode), b.ref.identityValue)
+}
+
+func (b *TableBuilder) ensureOVSManagerRootReference(ctx context.Context, managerUUID string) error {
+	rootUUID, err := (&OVSClient{db: b.ref.db}).openVSwitchUUID(ctx)
+	if err != nil {
+		return err
+	}
+	results, err := b.ref.db.transact(ctx, tableManager, string(b.mode), b.ref.identityValue, libovsdb.Operation{
+		Op:    libovsdb.OperationMutate,
+		Table: tableOpenVSwitch,
+		Where: conditionUUID(rootUUID),
+		Mutations: []libovsdb.Mutation{
+			*libovsdb.NewMutation(colManagerOptions, libovsdb.MutateOperationInsert, uuidSet(managerUUID)),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, []int{0}, dbOpenVSwitch, tableManager, string(b.mode), b.ref.identityValue)
 }
 
 func (b *TableBuilder) executeOVSManagerDelete(ctx context.Context) error {

@@ -15,9 +15,10 @@ type Row map[string]any
 
 // RowEvent is emitted by table-level watches.
 type RowEvent struct {
-	Type EventType
-	Old  Row
-	New  Row
+	Type     EventType
+	Old      Row
+	New      Row
+	baseline bool
 }
 
 // TableRef is a runtime-schema-aware fluent handle for any OVSDB table.
