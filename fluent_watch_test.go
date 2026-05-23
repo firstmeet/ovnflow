@@ -184,6 +184,30 @@ func TestWatchSubscriptionOverflowThenPublishDoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestWatchRowsForwarderStopsAfterSubscriptionDoneWithFullOutput(t *testing.T) {
+	db := &dbClient{
+		database: dbOVNNorthbound,
+		schema: newSchemaRegistry(dbOVNNorthbound, databaseSchemaWithColumns(dbOVNNorthbound, map[string][]string{
+			tableLogicalSwitch: {colName},
+		})),
+		executor: &nbRecordingExecutor{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	events, _ := db.watchRows(ctx, tableLogicalSwitch, nil, 1, 1)
+	manager := db.watchManager()
+	waitForWatchSubscriptions(t, manager, tableLogicalSwitch, 1)
+
+	manager.publish(tableLogicalSwitch, RowEvent{Type: EventAdd, New: Row{colName: "ls0"}})
+	manager.publish(tableLogicalSwitch, RowEvent{Type: EventAdd, New: Row{colName: "ls1"}})
+	cancel()
+	select {
+	case <-events:
+	case <-time.After(time.Second):
+		t.Fatal("watch forwarder did not unblock after subscription cancellation")
+	}
+	waitForWatchSubscriptions(t, manager, tableLogicalSwitch, 0)
+}
+
 func TestWatchSubscriptionQueuesLiveEventsUntilInitialDelivered(t *testing.T) {
 	manager := newWatchManager(&dbClient{database: dbOVNSouthbound})
 	errs := make(chan error, 1)
@@ -426,6 +450,37 @@ func TestWatchSubscriptionDoesNotReportLateErrorAfterCancel(t *testing.T) {
 		t.Fatalf("received late error after cancel: %v", err)
 	default:
 	}
+}
+
+func TestDBClientCloseStopsWatchManagerAndPollers(t *testing.T) {
+	db := &dbClient{
+		database: dbOVNNorthbound,
+		schema: newSchemaRegistry(dbOVNNorthbound, databaseSchemaWithColumns(dbOVNNorthbound, map[string][]string{
+			tableLogicalSwitch: {colName},
+		})),
+		executor: &nbRecordingExecutor{},
+	}
+	ctx := context.Background()
+	events, _ := db.Table(tableLogicalSwitch).Watch(ctx)
+	manager := db.watchManager()
+	waitForWatchSubscriptions(t, manager, tableLogicalSwitch, 1)
+
+	db.close()
+	select {
+	case _, ok := <-events:
+		if ok {
+			t.Fatal("watch event channel delivered an event after db close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watch event channel did not close after db close")
+	}
+	waitForWatchSubscriptions(t, manager, tableLogicalSwitch, 0)
+	select {
+	case <-manager.done:
+	default:
+		t.Fatal("watch manager done channel is not closed after db close")
+	}
+	db.close()
 }
 
 func waitForWatchSubscriptions(t *testing.T, manager *watchManager, table string, want int) {

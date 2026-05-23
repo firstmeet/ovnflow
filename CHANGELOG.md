@@ -13,7 +13,8 @@ All notable changes to `ovnflow` are tracked here.
 - Fluent Open_vSwitch table APIs for bridge, port, interface, controller,
   manager, mirror, QoS, queue, flow table, NetFlow, sFlow, IPFIX, SSL, and
   AutoAttach configuration.
-- GitHub release workflow for `v*` tags.
+- GitHub release workflow for `v*` tags, including static analysis,
+  vulnerability scanning, race, integration, and mutation gates.
 
 ### Hardened
 
@@ -22,6 +23,8 @@ All notable changes to `ovnflow` are tracked here.
   the create race.
 - Watch subscription cleanup exits when a subscription closes before its parent
   context is canceled.
+- Watch manager shutdown now closes subscriptions and pollers when the SDK
+  client closes.
 - Watch subscriptions deliver the initial snapshot before buffered live events
   for that subscription.
 - NB delete paths now clean UUID set and map references by selecting actual
@@ -33,7 +36,12 @@ All notable changes to `ovnflow` are tracked here.
   the target row itself.
 - OVS bridge and port delete paths now keep shared Port and Interface rows
   instead of deleting objects still referenced by other rows.
-- CI now includes `go vet` and Linux race testing.
+- OVS Bridge advanced config rows preserve external map/set values on repeated
+  ensure calls and keep multiple Mirror/Flow_Table references on new bridges.
+- OVS Manager ensure repairs the root `Open_vSwitch.manager_options` reference
+  after concurrent duplicate-create races.
+- CI now includes `go vet`, `staticcheck`, `govulncheck`, and Linux race
+  testing on a patched Go toolchain.
 
 ### Compatibility
 

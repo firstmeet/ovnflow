@@ -52,6 +52,8 @@ func (d *dbClient) watchRows(ctx context.Context, table string, where []libovsdb
 				}
 				select {
 				case events <- event:
+				case <-sub.done:
+					return
 				case <-ctx.Done():
 					return
 				}
@@ -80,11 +82,14 @@ type watchManager struct {
 
 	once sync.Once
 	in   chan rowWatchDispatch
+	done chan struct{}
 
 	mu       sync.RWMutex
 	nextID   uint64
 	byTable  map[string]map[uint64]*rowWatchSubscription
 	pollOnce map[string]chan struct{}
+
+	closeOnce sync.Once
 }
 
 type rowWatchDispatch struct {
@@ -111,6 +116,7 @@ func newWatchManager(db *dbClient) *watchManager {
 	return &watchManager{
 		db:       db,
 		in:       make(chan rowWatchDispatch, defaultWatchRawBuffer),
+		done:     make(chan struct{}),
 		byTable:  map[string]map[uint64]*rowWatchSubscription{},
 		pollOnce: map[string]chan struct{}{},
 	}
@@ -156,15 +162,46 @@ func (m *watchManager) start() {
 func (m *watchManager) enqueue(table string, event RowEvent) {
 	select {
 	case m.in <- rowWatchDispatch{table: table, event: event}:
+	case <-m.done:
 	default:
 		m.publishError(table, wrap(ErrorPartial, m.db.database, table, "watch", "", "watch dispatch queue overflow", nil))
 	}
 }
 
 func (m *watchManager) run() {
-	for dispatch := range m.in {
-		m.publish(dispatch.table, dispatch.event)
+	for {
+		select {
+		case dispatch := <-m.in:
+			m.publish(dispatch.table, dispatch.event)
+		case <-m.done:
+			return
+		}
 	}
+}
+
+func (m *watchManager) close() {
+	if m == nil {
+		return
+	}
+	m.closeOnce.Do(func() {
+		close(m.done)
+		m.mu.Lock()
+		var subs []*rowWatchSubscription
+		for _, tableSubs := range m.byTable {
+			for _, sub := range tableSubs {
+				subs = append(subs, sub)
+			}
+		}
+		for _, stop := range m.pollOnce {
+			close(stop)
+		}
+		m.byTable = map[string]map[uint64]*rowWatchSubscription{}
+		m.pollOnce = map[string]chan struct{}{}
+		m.mu.Unlock()
+		for _, sub := range subs {
+			sub.cancel()
+		}
+	})
 }
 
 func (m *watchManager) publish(table string, event RowEvent) {

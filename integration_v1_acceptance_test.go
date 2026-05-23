@@ -36,6 +36,15 @@ type integrationSchemaCheck struct {
 	columns []string
 }
 
+type integrationSchemaReferenceCheck struct {
+	table    string
+	column   string
+	refTable string
+	kind     referenceColumnKind
+	keyRef   bool
+	valueRef bool
+}
+
 type v1NorthboundResources struct {
 	lrName             string
 	lsName             string
@@ -72,6 +81,8 @@ type v1OVSResources struct {
 }
 
 var v1NorthboundSchemaPlan = []integrationSchemaCheck{
+	{table: "Logical_Switch", columns: []string{"name", "ports", "qos_rules", "other_config", "external_ids"}},
+	{table: "Logical_Switch_Port", columns: []string{"name", "addresses", "options", "type", "external_ids"}},
 	{table: "Logical_Router", columns: []string{"name", "ports", "static_routes", "nat", "options", "external_ids"}},
 	{table: "Logical_Router_Port", columns: []string{"name", "mac", "networks", "options", "external_ids"}},
 	{table: "ACL", columns: []string{"priority", "direction", "match", "action", "external_ids"}},
@@ -90,6 +101,20 @@ var v1NorthboundSchemaPlan = []integrationSchemaCheck{
 	{table: "BFD", columns: []string{"logical_port", "dst_ip", "status", "external_ids"}},
 }
 
+var v1NorthboundReferencePlan = []integrationSchemaReferenceCheck{
+	{table: tableLogicalSwitch, column: colPorts, refTable: tableLogicalSwitchPort, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableLogicalSwitch, column: colQoSRules, refTable: tableQoS, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableLogicalRouter, column: colPorts, refTable: tableLogicalRouterPort, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableLogicalRouter, column: colNAT, refTable: tableNAT, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableLogicalRouter, column: colLoadBalancer, refTable: tableLoadBalancer, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableLogicalRouterPort, column: colGatewayChassis, refTable: tableGatewayChassis, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableLogicalRouterPort, column: colHAChassisGroup, refTable: tableHAChassisGroup, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableMeter, column: colBands, refTable: tableMeterBand, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tablePortGroup, column: colACLs, refTable: tableACL, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tablePortGroup, column: colPorts, refTable: tableLogicalSwitchPort, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableHAChassisGroup, column: colHAChassis, refTable: tableHAChassis, kind: referenceColumnSetUUID, keyRef: true},
+}
+
 var v1SouthboundSchemaPlan = []integrationSchemaCheck{
 	{table: "Chassis", columns: []string{"name", "hostname", "external_ids"}},
 	{table: "Port_Binding", columns: []string{"logical_port", "chassis", "datapath", "mac", "external_ids"}},
@@ -105,6 +130,17 @@ var v1SouthboundSchemaPlan = []integrationSchemaCheck{
 	{table: "Meter_Band", columns: []string{"action", "rate"}},
 	{table: "DNS", columns: []string{"records", "datapaths", "external_ids"}},
 	{table: "BFD", columns: []string{"logical_port", "dst_ip", "status", "external_ids"}},
+}
+
+var v1SouthboundReferencePlan = []integrationSchemaReferenceCheck{
+	{table: tablePortBinding, column: colChassis, refTable: tableChassis, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tablePortBinding, column: colDatapath, refTable: tableDatapathBinding, kind: referenceColumnScalarUUID, keyRef: true},
+	{table: tableMACBinding, column: colDatapath, refTable: tableDatapathBinding, kind: referenceColumnScalarUUID, keyRef: true},
+	{table: tableMulticastGroup, column: colDatapath, refTable: tableDatapathBinding, kind: referenceColumnScalarUUID, keyRef: true},
+	{table: tableMulticastGroup, column: colPorts, refTable: tablePortBinding, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableRBACRole, column: "permissions", refTable: tableRBACPermission, kind: referenceColumnMapUUID, valueRef: true},
+	{table: tableMeter, column: colBands, refTable: tableMeterBand, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableDNS, column: "datapaths", refTable: tableDatapathBinding, kind: referenceColumnSetUUID, keyRef: true},
 }
 
 var v1OpenVSwitchSchemaPlan = []integrationSchemaCheck{
@@ -125,6 +161,23 @@ var v1OpenVSwitchSchemaPlan = []integrationSchemaCheck{
 	{table: "AutoAttach", columns: []string{"system_name", "system_description", "mappings"}},
 }
 
+var v1OpenVSwitchReferencePlan = []integrationSchemaReferenceCheck{
+	{table: tableOpenVSwitch, column: colBridges, refTable: tableBridge, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableOpenVSwitch, column: colManagerOptions, refTable: tableManager, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableOpenVSwitch, column: colSSL, refTable: tableSSL, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableBridge, column: colPorts, refTable: tablePort, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableBridge, column: colController, refTable: tableController, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableBridge, column: colMirrors, refTable: tableMirror, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableBridge, column: colFlowTables, refTable: tableFlowTable, kind: referenceColumnMapUUID, valueRef: true},
+	{table: tableBridge, column: colNetFlow, refTable: tableNetFlow, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableBridge, column: colSFlow, refTable: tableSFlow, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableBridge, column: colIPFIX, refTable: tableIPFIX, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableBridge, column: colAutoAttach, refTable: tableAutoAttach, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tablePort, column: colInterfaces, refTable: tableInterface, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tablePort, column: colQoS, refTable: tableQoS, kind: referenceColumnSetUUID, keyRef: true},
+	{table: tableQoS, column: colQueues, refTable: tableQueue, kind: referenceColumnMapUUID, valueRef: true},
+}
+
 func TestIntegrationV1SchemaReadiness(t *testing.T) {
 	requireAnyEnvOptIn(t, "read-only v1.0 schema checks", EnvV1SchemaChecks, EnvV02SchemaChecks)
 
@@ -134,10 +187,11 @@ func TestIntegrationV1SchemaReadiness(t *testing.T) {
 		address  string
 		database string
 		required []integrationSchemaCheck
+		refs     []integrationSchemaReferenceCheck
 	}{
-		{name: "Northbound", address: cfg.OVNNBAddr, database: nbDatabase, required: v1NorthboundSchemaPlan},
-		{name: "Southbound", address: cfg.OVNSBAddr, database: sbDatabase, required: v1SouthboundSchemaPlan},
-		{name: "Open_vSwitch", address: cfg.OVSAddr, database: ovsDatabase, required: v1OpenVSwitchSchemaPlan},
+		{name: "Northbound", address: cfg.OVNNBAddr, database: nbDatabase, required: v1NorthboundSchemaPlan, refs: v1NorthboundReferencePlan},
+		{name: "Southbound", address: cfg.OVNSBAddr, database: sbDatabase, required: v1SouthboundSchemaPlan, refs: v1SouthboundReferencePlan},
+		{name: "Open_vSwitch", address: cfg.OVSAddr, database: ovsDatabase, required: v1OpenVSwitchSchemaPlan, refs: v1OpenVSwitchReferencePlan},
 	}
 
 	for _, check := range checks {
@@ -148,6 +202,7 @@ func TestIntegrationV1SchemaReadiness(t *testing.T) {
 			})
 			schema := getIntegrationSchema(t, client, check.database)
 			assertSchemaReadiness(t, schema, check.required)
+			assertSchemaReferenceReadiness(t, check.database, schema, check.refs)
 		})
 	}
 }
@@ -254,6 +309,8 @@ func TestIntegrationV1MutationScenariosAreEnvGated(t *testing.T) {
 		must(t, sdk.OVN().NB().LoadBalancer(resources.lbName).Ensure().AttachToRouter(resources.lrName).WithVIP("192.0.2.211:80", "10.210.0.10:80").WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "repeat ensure load balancer")
 		must(t, sdk.OVN().NB().QoSByMatch("from-lport", 100, resources.qosMatch).Ensure().AttachToSwitch(resources.lsName).WithRate(1000).WithExternalID(testMarkerKey, testMarkerValue).Execute(ctx), "repeat ensure qos")
 		assertV1NorthboundReadback(t, rawNB, resources, meterBandUUID, aclUUID, gatewayChassisUUID, haChassisUUID, haGroupUUID)
+		cleanupV1Northbound(ctx, t, sdk, rawNB, resources)
+		assertV1NorthboundCleanup(t, rawNB, resources)
 	})
 
 	t.Run("southbound typed reads and watch cancel", func(t *testing.T) {
@@ -394,6 +451,29 @@ func assertSchemaReadiness(t *testing.T, schema libovsdb.DatabaseSchema, require
 	}
 }
 
+func assertSchemaReferenceReadiness(t *testing.T, database string, schema libovsdb.DatabaseSchema, required []integrationSchemaReferenceCheck) {
+	t.Helper()
+	registry := newSchemaRegistry(database, schema)
+	for _, required := range required {
+		t.Run(required.table+"."+required.column, func(t *testing.T) {
+			infos := registry.ReferenceColumnInfos(required.table, required.refTable)
+			for _, info := range infos {
+				if info.Name != required.column {
+					continue
+				}
+				if info.Kind != required.kind {
+					t.Fatalf("%s.%s reference kind = %s, want %s", required.table, required.column, info.Kind, required.kind)
+				}
+				if info.KeyRef != required.keyRef || info.ValueRef != required.valueRef {
+					t.Fatalf("%s.%s key/value refs = %t/%t, want %t/%t", required.table, required.column, info.KeyRef, info.ValueRef, required.keyRef, required.valueRef)
+				}
+				return
+			}
+			t.Fatalf("%s.%s does not reference %s", required.table, required.column, required.refTable)
+		})
+	}
+}
+
 func cleanupV1Northbound(ctx context.Context, t *testing.T, sdk *Client, raw *ovsdbjson.Client, resources v1NorthboundResources) {
 	t.Helper()
 	_ = sdk.OVN().NB().LogicalRouter(resources.lrName).Delete().Execute(ctx)
@@ -432,6 +512,53 @@ func cleanupV1Northbound(ctx context.Context, t *testing.T, sdk *Client, raw *ov
 	)
 	if err != nil {
 		t.Logf("fallback cleanup v1.0 northbound: %v", err)
+	}
+}
+
+func assertV1NorthboundCleanup(t *testing.T, raw *ovsdbjson.Client, resources v1NorthboundResources) {
+	t.Helper()
+	checks := []struct {
+		table   string
+		where   []any
+		columns []string
+	}{
+		{table: "Logical_Router", where: nameWhere(resources.lrName), columns: []string{"name"}},
+		{table: "Logical_Switch", where: nameWhere(resources.lsName), columns: []string{"name"}},
+		{table: "Logical_Router_Port", where: nameWhere(resources.lrpName), columns: []string{"name"}},
+		{table: "ACL", where: []any{
+			ovsdbjson.Condition("direction", "==", "to-lport"),
+			ovsdbjson.Condition("priority", "==", 1001),
+			ovsdbjson.Condition("match", "==", resources.aclMatch),
+		}, columns: []string{"direction", "priority", "match"}},
+		{table: "NAT", where: []any{
+			ovsdbjson.Condition("type", "==", "snat"),
+			ovsdbjson.Condition("logical_ip", "==", resources.natLogicalIP),
+		}, columns: []string{"type", "logical_ip"}},
+		{table: "Load_Balancer", where: nameWhere(resources.lbName), columns: []string{"name"}},
+		{table: "DHCP_Options", where: []any{ovsdbjson.Condition("cidr", "==", resources.dhcpCIDR)}, columns: []string{"cidr"}},
+		{table: "DNS", where: externalIDWhere(dnsNameExternalID, resources.dnsName), columns: []string{"external_ids"}},
+		{table: "QoS", where: []any{
+			ovsdbjson.Condition("direction", "==", "from-lport"),
+			ovsdbjson.Condition("priority", "==", 100),
+			ovsdbjson.Condition("match", "==", resources.qosMatch),
+		}, columns: []string{"direction", "priority", "match"}},
+		{table: "Meter", where: nameWhere(resources.meterName), columns: []string{"name"}},
+		{table: "Meter_Band", where: externalIDWhere(dnsNameExternalID, resources.meterBandName), columns: []string{"external_ids"}},
+		{table: "Port_Group", where: nameWhere(resources.portGroupName), columns: []string{"name"}},
+		{table: "Address_Set", where: nameWhere(resources.addressSetName), columns: []string{"name"}},
+		{table: "Gateway_Chassis", where: nameWhere(resources.gatewayChassisName), columns: []string{"name"}},
+		{table: "HA_Chassis", where: []any{ovsdbjson.Condition("chassis_name", "==", resources.haChassisName)}, columns: []string{"chassis_name"}},
+		{table: "HA_Chassis_Group", where: nameWhere(resources.haGroupName), columns: []string{"name"}},
+		{table: "BFD", where: []any{
+			ovsdbjson.Condition("logical_port", "==", resources.lrpName),
+			ovsdbjson.Condition("dst_ip", "==", resources.bfdDstIP),
+		}, columns: []string{"logical_port", "dst_ip"}},
+	}
+	for _, check := range checks {
+		rows := selectRows(t, raw, nbDatabase, check.table, check.where, check.columns)
+		if len(rows) != 0 {
+			t.Fatalf("%s rows after cleanup = %d, want 0", check.table, len(rows))
+		}
 	}
 }
 

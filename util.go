@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
-	"reflect"
 	"strings"
 	"sync"
 
@@ -50,22 +49,6 @@ func validateExternalID(key string) error {
 func ovsSet(values ...any) libovsdb.OvsSet {
 	set, _ := libovsdb.NewOvsSet(values)
 	return set
-}
-
-func ovsSetFromSlice(values any) libovsdb.OvsSet {
-	if values == nil {
-		return libovsdb.OvsSet{}
-	}
-	value := reflect.ValueOf(values)
-	if value.Kind() != reflect.Slice {
-		set, _ := libovsdb.NewOvsSet(values)
-		return set
-	}
-	items := make([]any, 0, value.Len())
-	for i := 0; i < value.Len(); i++ {
-		items = append(items, value.Index(i).Interface())
-	}
-	return ovsSet(items...)
 }
 
 func stringSet(values []string) libovsdb.OvsSet {
@@ -136,17 +119,6 @@ func rawRow(row libovsdb.Row) map[string]any {
 	data, _ := json.Marshal(row)
 	var out map[string]any
 	_ = json.Unmarshal(data, &out)
-	return out
-}
-
-func rawConditions(conditions []libovsdb.Condition) []any {
-	out := make([]any, 0, len(conditions))
-	for _, condition := range conditions {
-		data, _ := json.Marshal(condition)
-		var raw any
-		_ = json.Unmarshal(data, &raw)
-		out = append(out, raw)
-	}
 	return out
 }
 
@@ -240,25 +212,6 @@ func mergeStringMaps(base, overlay map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
-}
-
-func decodeRows[T any](results []libovsdb.OperationResult) ([]T, error) {
-	if len(results) == 0 {
-		return nil, nil
-	}
-	out := make([]T, 0, len(results[0].Rows))
-	for _, row := range results[0].Rows {
-		data, err := json.Marshal(row)
-		if err != nil {
-			return nil, err
-		}
-		var item T
-		if err := json.Unmarshal(data, &item); err != nil {
-			return nil, err
-		}
-		out = append(out, item)
-	}
-	return out, nil
 }
 
 func rowUUIDValue(row libovsdb.Row) string {

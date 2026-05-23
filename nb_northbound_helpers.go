@@ -151,14 +151,6 @@ func (n *NBClient) unreferenceOps(ctx context.Context, targetTable, targetUUID s
 	return n.db.referenceCleanupOps(ctx, targetTable, targetUUID, dbOVNNorthbound)
 }
 
-func (n *NBClient) executeInsert(ctx context.Context, table, object, op string, row libovsdb.Row) error {
-	return n.executeInsertWithPreOps(ctx, table, object, op, row, nil)
-}
-
-func (n *NBClient) executeInsertWithPreOps(ctx context.Context, table, object, op string, row libovsdb.Row, preOps []libovsdb.Operation) error {
-	return n.executeInsertWithPrePostOps(ctx, table, object, op, row, preOps, nil)
-}
-
 func (n *NBClient) executeInsertWithPrePostOps(ctx context.Context, table, object, op string, row libovsdb.Row, preOps []libovsdb.Operation, postOps func(string) []libovsdb.Operation) error {
 	if len(row) == 0 {
 		return wrap(ErrorValidation, dbOVNNorthbound, table, op, object, "insert row is empty", nil)
@@ -179,14 +171,6 @@ func (n *NBClient) executeInsertWithPrePostOps(ctx context.Context, table, objec
 		return err
 	}
 	return ensureAffected(results, nbPostMustAffectIndexes(len(preOps)+1, ops), dbOVNNorthbound, table, op, object)
-}
-
-func (n *NBClient) executeUpdate(ctx context.Context, table, object, op string, conditions []libovsdb.Condition, row libovsdb.Row, mutations []libovsdb.Mutation, allowNoop bool) error {
-	return n.executeUpdateWithPreOps(ctx, table, object, op, conditions, row, mutations, allowNoop, nil)
-}
-
-func (n *NBClient) executeUpdateWithPreOps(ctx context.Context, table, object, op string, conditions []libovsdb.Condition, row libovsdb.Row, mutations []libovsdb.Mutation, allowNoop bool, preOps []libovsdb.Operation) error {
-	return n.executeUpdateWithPrePostOps(ctx, table, object, op, conditions, row, mutations, allowNoop, preOps, nil)
 }
 
 func (n *NBClient) executeUpdateWithPrePostOps(ctx context.Context, table, object, op string, conditions []libovsdb.Condition, row libovsdb.Row, mutations []libovsdb.Mutation, allowNoop bool, preOps []libovsdb.Operation, postOps func(string) []libovsdb.Operation) error {

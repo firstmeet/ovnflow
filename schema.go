@@ -165,19 +165,6 @@ func (s *SchemaRegistry) table(table string) *libovsdb.TableSchema {
 	return s.schema.Table(table)
 }
 
-func (s *SchemaRegistry) column(table, column string) *libovsdb.ColumnSchema {
-	tableSchema := s.table(table)
-	if tableSchema == nil {
-		return nil
-	}
-	return tableSchema.Column(column)
-}
-
-func columnReferencesTable(column *libovsdb.ColumnSchema, refTable string) bool {
-	_, ok := referenceColumnInfoFor("", column, refTable)
-	return ok
-}
-
 func referenceColumnInfoFor(name string, column *libovsdb.ColumnSchema, refTable string) (referenceColumnInfo, bool) {
 	if column == nil || column.TypeObj == nil || column.TypeObj.Key == nil {
 		return referenceColumnInfo{}, false

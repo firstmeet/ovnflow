@@ -276,6 +276,51 @@ func TestOVSBridgeEnsureCreatesAdvancedConfigRowsAndReferences(t *testing.T) {
 	}
 }
 
+func TestOVSBridgeEnsureNewBridgeMergesMultipleAdvancedSetAndMapReferences(t *testing.T) {
+	db := testOVSDBClient(t)
+	db.schema.schema.Tables[tableBridge].Columns[colMirrors] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Mirror"},"min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableBridge].Columns[colFlowTables] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"integer","minInteger":0,"maxInteger":254},"value":{"type":"uuid","refTable":"Flow_Table"},"min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableMirror].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableFlowTable].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("root-uuid")}}},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").Ensure().
+		WithMirror("mirror0", nil).
+		WithMirror("mirror1", nil).
+		WithFlowTable(0, "ft0", nil).
+		WithFlowTable(1, "ft1", nil).
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	bridgeInsert := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableBridge)
+	if bridgeInsert == nil {
+		t.Fatalf("missing Bridge insert: %#v", rec.ops)
+	}
+	if got := rowUUIDSliceValue(bridgeInsert.Row, colMirrors); len(got) != 2 {
+		t.Fatalf("bridge mirrors = %#v, want two named UUIDs", bridgeInsert.Row[colMirrors])
+	}
+	if got := rowIntUUIDMapValue(bridgeInsert.Row, colFlowTables); len(got) != 2 || got[0] == "" || got[1] == "" {
+		t.Fatalf("bridge flow_tables = %#v, want keys 0 and 1 named UUIDs", bridgeInsert.Row[colFlowTables])
+	}
+}
+
 func TestOVSBridgeEnsureSkipsUnsupportedAdvancedConfigReferences(t *testing.T) {
 	db := testOVSDBClient(t)
 	delete(db.schema.schema.Tables, tableMirror)
@@ -337,6 +382,56 @@ func TestOVSBridgeEnsureReportsInvalidSchemaForUnsupportedAdvancedConfigColumns(
 	if findRecordedOp(rec.ops, libovsdb.OperationInsert, tableBridge) != nil ||
 		findRecordedOp(rec.ops, libovsdb.OperationInsert, tableMirror) != nil {
 		t.Fatalf("invalid schema should fail before writes: %#v", rec.ops)
+	}
+}
+
+func TestOVSBridgeEnsureExistingAdvancedConfigMutatesMapAndSetWithoutUpdateOverwrite(t *testing.T) {
+	db := testOVSDBClient(t)
+	db.schema.schema.Tables[tableBridge].Columns[colMirrors] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Mirror"},"min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableMirror].Columns[colExternalIDs] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	db.schema.schema.Tables[tableMirror].Columns[colSelectSrcPort] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Port"},"min":0,"max":"unlimited"}}`)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("bridge-uuid"), colName: "br-test"}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("mirror-uuid")}}},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").Ensure().
+		WithMirror("mirror0", func(mirror *TableBuilder) {
+			mirror.WithExternalID("owner", "test").
+				MutateUUIDSet(colSelectSrcPort, "port-uuid")
+		}).
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	for _, op := range rec.ops {
+		if op.Op == libovsdb.OperationUpdate && op.Table == tableMirror {
+			if _, ok := op.Row[colExternalIDs]; ok {
+				t.Fatalf("Mirror update overwrites external_ids instead of mutating: %#v", rec.ops)
+			}
+			if _, ok := op.Row[colSelectSrcPort]; ok {
+				t.Fatalf("Mirror update overwrites select_src_port instead of mutating: %#v", rec.ops)
+			}
+		}
+	}
+	var mirrorMutates int
+	for _, op := range rec.ops {
+		if op.Op != libovsdb.OperationMutate || op.Table != tableMirror {
+			continue
+		}
+		for _, mutation := range op.Mutations {
+			if mutation.Column == colExternalIDs || mutation.Column == colSelectSrcPort {
+				mirrorMutates++
+			}
+		}
+	}
+	if mirrorMutates != 2 {
+		t.Fatalf("Mirror mutate count = %d, want external_ids and select_src_port mutates: %#v", mirrorMutates, rec.ops)
 	}
 }
 
@@ -736,6 +831,11 @@ func TestOVSDeletePortKeepsInterfaceReferencedByAnotherPort(t *testing.T) {
 				colName:       "p0",
 				colInterfaces: uuidSet("shared-iface-uuid"),
 			}}},
+			{Rows: []libovsdb.Row{{
+				colUUID:  uuidValue("br-uuid"),
+				colName:  "br-test",
+				colPorts: uuidSet("port-uuid"),
+			}}},
 			{Rows: []libovsdb.Row{
 				{colUUID: uuidValue("port-uuid"), colName: "p0", colInterfaces: uuidSet("shared-iface-uuid")},
 				{colUUID: uuidValue("other-port-uuid"), colName: "p1", colInterfaces: uuidSet("shared-iface-uuid")},
@@ -753,6 +853,40 @@ func TestOVSDeletePortKeepsInterfaceReferencedByAnotherPort(t *testing.T) {
 	for _, op := range rec.ops {
 		if op.Op == libovsdb.OperationDelete && op.Table == tableInterface {
 			t.Fatalf("unexpected delete of shared interface: %#v; ops=%#v", op, rec.ops)
+		}
+	}
+}
+
+func TestOVSDeletePortKeepsPortReferencedByAnotherBridge(t *testing.T) {
+	db := testOVSDBClient(t)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{
+				colUUID:  uuidValue("br-uuid"),
+				colName:  "br-test",
+				colPorts: uuidSet("shared-port-uuid"),
+			}}},
+			{Rows: []libovsdb.Row{{
+				colUUID:       uuidValue("shared-port-uuid"),
+				colName:       "p0",
+				colInterfaces: uuidSet("iface-uuid"),
+			}}},
+			{Rows: []libovsdb.Row{
+				{colUUID: uuidValue("br-uuid"), colName: "br-test", colPorts: uuidSet("shared-port-uuid")},
+				{colUUID: uuidValue("br-other-uuid"), colName: "br-other", colPorts: uuidSet("shared-port-uuid")},
+			}},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").DeletePort("p0").Execute(context.Background())
+	if err != nil {
+		t.Fatalf("DeletePort() = %v", err)
+	}
+	for _, op := range rec.ops {
+		if op.Op == libovsdb.OperationDelete && (op.Table == tablePort || op.Table == tableInterface) {
+			t.Fatalf("unexpected delete of shared port/interface: %#v; ops=%#v", op, rec.ops)
 		}
 	}
 }
@@ -861,6 +995,48 @@ func TestOVSManagerEnsureRepairsMissingRootReference(t *testing.T) {
 	}
 }
 
+func TestOVSManagerEnsureDuplicateFallbackRepairsRootReference(t *testing.T) {
+	db := testOVSDBClient(t)
+	db.schema.schema.Tables[tableOpenVSwitch].Columns[colManagerOptions] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Manager"},"min":0,"max":"unlimited"}}`)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("root-uuid")}}},
+			{Error: "constraint violation", Details: "duplicate manager"},
+			{Count: 0},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("manager-uuid")}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("root-uuid")}}},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Manager("ptcp:6640:127.0.0.1").
+		Ensure().
+		WithExternalID("owner", "test").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	var rootRepairs int
+	for _, op := range rec.ops {
+		if op.Op == libovsdb.OperationMutate && op.Table == tableOpenVSwitch {
+			for _, mutation := range op.Mutations {
+				if mutation.Column == colManagerOptions {
+					rootRepairs++
+				}
+			}
+		}
+	}
+	if rootRepairs < 2 {
+		t.Fatalf("root manager_options repairs = %d, want insert attempt and fallback repair: %#v", rootRepairs, rec.ops)
+	}
+	if last := rec.ops[len(rec.ops)-1]; last.Op != libovsdb.OperationMutate || last.Table != tableManager {
+		t.Fatalf("last op = %#v, want manager update after fallback root repair", last)
+	}
+}
+
 func TestOVSExtendedTableHelpersSelectExpectedIdentities(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -966,6 +1142,9 @@ func (r *recordingExecutor) Transact(_ context.Context, ops ...libovsdb.Operatio
 		r.results = r.results[n:]
 		for len(out) < len(ops) {
 			out = append(out, libovsdb.OperationResult{Count: 1})
+		}
+		if err := checkOperationResults(out, dbOpenVSwitch, "", "", ""); err != nil {
+			return out, err
 		}
 		return out, nil
 	}

@@ -28,12 +28,18 @@ go get github.com/firstmeet/ovnflow@v1.0.0
 - OVS Bridge advanced config references use UUID-safe reads, mutate set/map
   references, and update scalar optional references such as `netflow`, `sflow`,
   `ipfix`, and `auto_attach`.
+- OVS Bridge advanced config ensure calls preserve existing map/set values,
+  retain multiple Mirror/Flow_Table references, and avoid deleting shared Port
+  or Interface rows.
+- Watch subscriptions and pollers shut down when the SDK client closes.
 - Integration tests support Windows-to-WSL endpoints and Linux Docker Compose.
 
 ## Validation
 
 - `go test ./...`
 - `go vet ./...`
+- `go run honnef.co/go/tools/cmd/staticcheck@latest ./...`
+- `GOTOOLCHAIN=go1.25.10 go run golang.org/x/vuln/cmd/govulncheck@latest ./...`
 - `go test -run Example ./...`
 - `go test -bench=. -benchmem ./...`
 - `OVNFLOW_REQUIRE_INTEGRATION=1 go test -tags=integration ./...`

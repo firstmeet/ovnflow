@@ -110,7 +110,16 @@ func connectDB(ctx context.Context, database, address string) (*dbClient, error)
 }
 
 func (d *dbClient) close() {
-	if d != nil && d.raw != nil {
+	if d == nil {
+		return
+	}
+	d.watchesMu.Lock()
+	watches := d.watches
+	d.watchesMu.Unlock()
+	if watches != nil {
+		watches.close()
+	}
+	if d.raw != nil {
 		d.raw.Close()
 	}
 }

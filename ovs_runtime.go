@@ -419,6 +419,20 @@ func (b *TableBuilder) executeOVSManagerCreate(ctx context.Context, ensure bool)
 	}
 	results, err := b.ref.db.transact(ctx, b.ref.table, string(b.mode), b.ref.identityValue, ops...)
 	if ensure && IsKind(err, ErrorAlreadyExists) {
+		rows, selectErr := b.ref.selectRows(ctx, b.ref.identityConditions(), []string{colUUID})
+		if selectErr != nil {
+			return selectErr
+		}
+		if len(rows) == 0 {
+			return err
+		}
+		id := anyString(rows[0][colUUID])
+		if id == "" {
+			return wrap(ErrorConflict, dbOpenVSwitch, tableManager, string(b.mode), b.ref.identityValue, "row UUID missing", nil)
+		}
+		if refErr := b.ensureOVSManagerRootReference(ctx, id); refErr != nil {
+			return refErr
+		}
 		return b.executeUpdate(ctx)
 	}
 	if err != nil {
