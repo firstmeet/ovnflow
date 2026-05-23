@@ -339,6 +339,27 @@ func TestTableWatchCancelRemovesSubscriptionAndStopsPoller(t *testing.T) {
 	}
 }
 
+func TestTableWatchNilReferenceReturnsValidationError(t *testing.T) {
+	tests := []struct {
+		name string
+		ref  *TableRef
+	}{
+		{name: "nil ref", ref: nil},
+		{name: "nil db", ref: &TableRef{table: tableLogicalSwitch}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events, errs := tt.ref.Watch(context.Background())
+			if err := <-errs; !IsKind(err, ErrorValidation) {
+				t.Fatalf("watch error = %v, want ErrorValidation", err)
+			}
+			if _, ok := <-events; ok {
+				t.Fatal("watch event channel is open after validation failure")
+			}
+		})
+	}
+}
+
 func TestTableWatchRejectsMissingConditionColumnBeforeSubscribing(t *testing.T) {
 	db := &dbClient{
 		database: dbOVNNorthbound,

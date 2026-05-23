@@ -89,6 +89,13 @@ func (r *TableRef) List(ctx context.Context) ([]Row, error) {
 
 // Watch subscribes to table changes through libovsdb monitor/cache events.
 func (r *TableRef) Watch(ctx context.Context) (<-chan RowEvent, <-chan error) {
+	events := make(chan RowEvent)
+	errs := make(chan error, 1)
+	if err := r.validateTable("watch"); err != nil {
+		errs <- err
+		close(events)
+		return events, errs
+	}
 	return r.db.watchRows(ctx, r.table, r.identityConditions(), 64, 256)
 }
 
