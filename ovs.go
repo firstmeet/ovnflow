@@ -185,7 +185,10 @@ func (b *BridgeBuilder) executeEnsureOnce(ctx context.Context) error {
 	var controllerUUIDs []string
 	var controllerOps []libovsdb.Operation
 	if b.client.db.schema.HasTable(tableController) && b.client.db.schema.HasColumn(tableBridge, colController) {
-		controllerUUIDs, controllerOps = b.controllerOps()
+		controllerUUIDs, controllerOps, err = b.controllerOps(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	if b.port != nil {
@@ -405,11 +408,20 @@ func (b *BridgeBuilder) insertBridgeOp(controllerNamedUUIDs []string, portNamedU
 	}
 }
 
-func (b *BridgeBuilder) controllerOps() ([]string, []libovsdb.Operation) {
-	controllerUUIDs := make([]string, 0, len(b.controllerTargets))
-	ops := make([]libovsdb.Operation, 0, len(b.controllerTargets))
-	for _, target := range b.controllerTargets {
+func (b *BridgeBuilder) controllerOps(ctx context.Context) ([]string, []libovsdb.Operation, error) {
+	targets := uniqueStrings(b.controllerTargets)
+	controllerUUIDs := make([]string, 0, len(targets))
+	ops := make([]libovsdb.Operation, 0, len(targets))
+	for _, target := range targets {
 		if target == "" {
+			continue
+		}
+		existing, err := b.client.selectControllers(ctx, target)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(existing) > 0 {
+			controllerUUIDs = append(controllerUUIDs, existing[0].UUID)
 			continue
 		}
 		controllerUUID := namedUUID("controller")
@@ -423,7 +435,7 @@ func (b *BridgeBuilder) controllerOps() ([]string, []libovsdb.Operation) {
 			},
 		})
 	}
-	return controllerUUIDs, ops
+	return controllerUUIDs, ops, nil
 }
 
 func opsBridgeUUID(ops []libovsdb.Operation) string {
@@ -735,6 +747,38 @@ func (o *OVSClient) selectAllPorts(ctx context.Context) ([]OVSPort, error) {
 		return nil, err
 	}
 	return decodeOVSPorts(results)
+}
+
+func (o *OVSClient) selectControllers(ctx context.Context, target string) ([]OVSController, error) {
+	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+		Op:      libovsdb.OperationSelect,
+		Table:   tableController,
+		Where:   []libovsdb.Condition{libovsdb.NewCondition(colTarget, libovsdb.ConditionEqual, target)},
+		Columns: o.db.schema.existingColumns(tableController, colUUID, colTarget, colExternalIDs, colOtherConfig),
+	})
+	if err != nil {
+		return nil, classifyTransactError(err, dbOpenVSwitch, tableController, "select", target)
+	}
+	if err := checkOperationResults(results, dbOpenVSwitch, tableController, "select", target); err != nil {
+		return nil, err
+	}
+	return decodeOVSControllers(results), nil
+}
+
+func decodeOVSControllers(results []libovsdb.OperationResult) []OVSController {
+	if len(results) == 0 {
+		return nil
+	}
+	rows := make([]OVSController, 0, len(results[0].Rows))
+	for _, row := range results[0].Rows {
+		rows = append(rows, OVSController{
+			UUID:        rowUUIDValue(row),
+			Target:      rowStringValue(row, colTarget),
+			ExternalIDs: rowStringMapValue(row, colExternalIDs),
+			OtherConfig: rowStringMapValue(row, colOtherConfig),
+		})
+	}
+	return rows
 }
 
 func (o *OVSClient) selectPortsByUUID(ctx context.Context, ids []string) ([]OVSPort, error) {

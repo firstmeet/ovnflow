@@ -9,12 +9,22 @@ import (
 )
 
 func TestOVSBridgeControllerUsesSingularControllerColumn(t *testing.T) {
-	builder := (&OVSClient{db: testOVSDBClient(t)}).
+	db := testOVSDBClient(t)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+		},
+	}
+	db.executor = rec
+	builder := (&OVSClient{db: db}).
 		Bridge("br-test").
 		Ensure().
 		WithControllerTarget("tcp:127.0.0.1:6653")
 
-	controllerUUIDs, controllerOps := builder.controllerOps()
+	controllerUUIDs, controllerOps, err := builder.controllerOps(context.Background())
+	if err != nil {
+		t.Fatalf("controllerOps() = %v", err)
+	}
 	op := builder.insertBridgeOp(controllerUUIDs)
 
 	if len(controllerOps) != 1 {
@@ -25,6 +35,146 @@ func TestOVSBridgeControllerUsesSingularControllerColumn(t *testing.T) {
 	}
 	if _, ok := op.Row[colControllers]; ok {
 		t.Fatalf("bridge insert row used invalid %q column: %#v", colControllers, op.Row)
+	}
+}
+
+func TestOVSBridgeControllerEnsureReusesExistingController(t *testing.T) {
+	db := testOVSDBClient(t)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{
+				colUUID:   uuidValue("controller-uuid"),
+				colTarget: "tcp:127.0.0.1:6653",
+			}}},
+		},
+	}
+	db.executor = rec
+	builder := (&OVSClient{db: db}).
+		Bridge("br-test").
+		Ensure().
+		WithControllerTarget("tcp:127.0.0.1:6653")
+
+	controllerUUIDs, controllerOps, err := builder.controllerOps(context.Background())
+	if err != nil {
+		t.Fatalf("controllerOps() = %v", err)
+	}
+	if len(controllerOps) != 0 {
+		t.Fatalf("controller ops = %d, want no insert for existing controller: %#v", len(controllerOps), controllerOps)
+	}
+	if got, want := controllerUUIDs, []string{"controller-uuid"}; !equalStringSlices(got, want) {
+		t.Fatalf("controller UUIDs = %#v, want %#v", got, want)
+	}
+	if len(rec.ops) != 1 || rec.ops[0].Op != libovsdb.OperationSelect || rec.ops[0].Table != tableController {
+		t.Fatalf("recorded ops = %#v, want controller select", rec.ops)
+	}
+}
+
+func TestOVSBridgeEnsureWithExistingControllerDoesNotInsertDuplicate(t *testing.T) {
+	db := testOVSDBClient(t)
+	db.schema.schema.Tables[tableBridge].Columns[colController] = columnSchemaFromJSON(t, `{"type":{"key":{"type":"uuid","refTable":"Controller"},"min":0,"max":"unlimited"}}`)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("bridge-uuid"), colName: "br-test"}}},
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("controller-uuid"), colTarget: "tcp:127.0.0.1:6653"}}},
+			{Count: 1},
+		},
+	}
+	db.executor = rec
+
+	err := (&OVSClient{db: db}).Bridge("br-test").Ensure().
+		WithControllerTarget("tcp:127.0.0.1:6653").
+		Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+	var controllerInserts int
+	var bridgeControllerMutates int
+	for _, op := range rec.ops {
+		if op.Op == libovsdb.OperationInsert && op.Table == tableController {
+			controllerInserts++
+		}
+		if op.Op == libovsdb.OperationMutate && op.Table == tableBridge {
+			for _, mutation := range op.Mutations {
+				if mutation.Column == colController && mutation.Mutator == libovsdb.MutateOperationInsert {
+					bridgeControllerMutates++
+					if got := rowUUIDSliceValue(libovsdb.Row{colController: mutation.Value}, colController); !equalStringSlices(got, []string{"controller-uuid"}) {
+						t.Fatalf("controller mutation value = %#v, want controller-uuid", mutation.Value)
+					}
+				}
+			}
+		}
+	}
+	if controllerInserts != 0 {
+		t.Fatalf("controller inserts = %d, want 0: %#v", controllerInserts, rec.ops)
+	}
+	if bridgeControllerMutates != 1 {
+		t.Fatalf("bridge controller mutates = %d, want 1: %#v", bridgeControllerMutates, rec.ops)
+	}
+}
+
+func TestOVSBridgeControllerEnsureReusesExistingAndInsertsMissing(t *testing.T) {
+	db := testOVSDBClient(t)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("existing-controller-uuid"), colTarget: "tcp:127.0.0.1:6653"}}},
+			{Rows: nil},
+		},
+	}
+	db.executor = rec
+	builder := (&OVSClient{db: db}).
+		Bridge("br-test").
+		Ensure().
+		WithControllerTarget("tcp:127.0.0.1:6653").
+		WithControllerTarget("tcp:127.0.0.1:6654")
+
+	controllerUUIDs, controllerOps, err := builder.controllerOps(context.Background())
+	if err != nil {
+		t.Fatalf("controllerOps() = %v", err)
+	}
+	if len(controllerUUIDs) != 2 {
+		t.Fatalf("controller UUIDs = %#v, want existing plus named UUID", controllerUUIDs)
+	}
+	if controllerUUIDs[0] != "existing-controller-uuid" {
+		t.Fatalf("first controller UUID = %q, want existing-controller-uuid", controllerUUIDs[0])
+	}
+	if controllerUUIDs[1] == "" || controllerUUIDs[1] == "existing-controller-uuid" {
+		t.Fatalf("second controller UUID = %q, want new named UUID", controllerUUIDs[1])
+	}
+	if len(controllerOps) != 1 || controllerOps[0].Op != libovsdb.OperationInsert || controllerOps[0].Table != tableController {
+		t.Fatalf("controller ops = %#v, want one controller insert", controllerOps)
+	}
+	if got := rowStringValue(controllerOps[0].Row, colTarget); got != "tcp:127.0.0.1:6654" {
+		t.Fatalf("insert controller target = %q, want missing target", got)
+	}
+	op := builder.insertBridgeOp(controllerUUIDs)
+	if got := rowUUIDSliceValue(op.Row, colController); !equalStringSlices(got, controllerUUIDs) {
+		t.Fatalf("bridge controller UUID set = %#v, want %#v", got, controllerUUIDs)
+	}
+}
+
+func TestOVSBridgeControllerEnsureDeduplicatesTargets(t *testing.T) {
+	db := testOVSDBClient(t)
+	rec := &recordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+		},
+	}
+	db.executor = rec
+	builder := (&OVSClient{db: db}).
+		Bridge("br-test").
+		Ensure().
+		WithControllerTarget("tcp:127.0.0.1:6653").
+		WithControllerTarget("tcp:127.0.0.1:6653")
+
+	controllerUUIDs, controllerOps, err := builder.controllerOps(context.Background())
+	if err != nil {
+		t.Fatalf("controllerOps() = %v", err)
+	}
+	if len(rec.ops) != 1 {
+		t.Fatalf("controller selects = %d, want one deduplicated select: %#v", len(rec.ops), rec.ops)
+	}
+	if len(controllerUUIDs) != 1 || len(controllerOps) != 1 {
+		t.Fatalf("controller UUIDs/ops = %#v/%#v, want one UUID and one insert", controllerUUIDs, controllerOps)
 	}
 }
 
@@ -519,4 +669,16 @@ func (r *recordingExecutor) Transact(_ context.Context, ops ...libovsdb.Operatio
 
 func (r *recordingExecutor) List(context.Context, any) error {
 	return nil
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
