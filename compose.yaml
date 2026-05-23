@@ -1,0 +1,26 @@
+services:
+  ovs-ovn:
+    image: ubuntu:22.04
+    privileged: true
+    ports:
+      - "6640:6640"
+      - "6641:6641"
+      - "6642:6642"
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends openvswitch-switch ovn-common ovn-central ca-certificates
+        mkdir -p /var/run/openvswitch /var/log/openvswitch /etc/openvswitch /var/lib/openvswitch
+        test -f /etc/openvswitch/conf.db || ovsdb-tool create /etc/openvswitch/conf.db /usr/share/openvswitch/vswitch.ovsschema
+        ovsdb-server --remote=punix:/var/run/openvswitch/db.sock --remote=ptcp:6640:0.0.0.0 --pidfile --detach /etc/openvswitch/conf.db
+        ovs-vsctl --no-wait init
+        mkdir -p /var/run/ovn /var/log/ovn /etc/ovn
+        test -f /etc/ovn/ovnnb_db.db || ovsdb-tool create /etc/ovn/ovnnb_db.db /usr/share/ovn/ovn-nb.ovsschema
+        test -f /etc/ovn/ovnsb_db.db || ovsdb-tool create /etc/ovn/ovnsb_db.db /usr/share/ovn/ovn-sb.ovsschema
+        ovsdb-server --remote=punix:/var/run/ovn/ovnnb_db.sock --remote=ptcp:6641:0.0.0.0 --pidfile=/var/run/ovn/ovnnb_db.pid --detach /etc/ovn/ovnnb_db.db
+        ovsdb-server --remote=punix:/var/run/ovn/ovnsb_db.sock --remote=ptcp:6642:0.0.0.0 --pidfile=/var/run/ovn/ovnsb_db.pid --detach /etc/ovn/ovnsb_db.db
+        tail -f /dev/null

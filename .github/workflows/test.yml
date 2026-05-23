@@ -1,0 +1,42 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 ./...
+
+  integration-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: docker compose up -d
+      - name: Wait for OVSDB ports
+        run: |
+          for port in 6640 6641 6642; do
+            for i in $(seq 1 60); do
+              nc -z 127.0.0.1 "$port" && break
+              sleep 1
+            done
+            nc -z 127.0.0.1 "$port"
+          done
+      - run: go test -tags=integration -count=1 -v ./...
+        env:
+          OVNFLOW_OVS_ADDR: tcp:127.0.0.1:6640
+          OVNFLOW_OVN_NB_ADDR: tcp:127.0.0.1:6641
+          OVNFLOW_OVN_SB_ADDR: tcp:127.0.0.1:6642
+      - if: always()
+        run: docker compose logs
+      - if: always()
+        run: docker compose down -v
