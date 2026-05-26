@@ -15,6 +15,8 @@ The current SDK surface covers:
 | OVN Northbound | logical switch/port plus router, router port, ACL, NAT, load balancer, DHCP, DNS, QoS, meter, port group, address set, gateway/HA/BFD builders |
 | OVN Southbound | typed list/get/watch for chassis, port binding, datapath, logical flow, MAC/FDB, multicast, service monitor, RBAC, meter, DNS, and BFD |
 | Open_vSwitch | bridge/port/interface lifecycle plus controller, manager, mirror, QoS, queue, flow table, NetFlow, sFlow, IPFIX, SSL, and AutoAttach fluent table APIs |
+| v2 intent | platform-neutral `VirtualNetwork`, `LogicalSwitchDNS`, `WorkloadAttachment`, and `SecurityPolicy` with owner/label metadata, dry-run/reconcile, typed get/inspect, and delete helpers |
+| LinuxRouter | optional Linux-only namespace router model with DNSMasq, SNAT/MASQUERADE/DNAT/port-forward/destination-map, firewall rules, fake executor tests, and a Linux command backend |
 | Runtime | schema-aware `TableRef` create/ensure/update/delete/get/list/watch with optional columns and map/set mutations |
 
 ```go
@@ -65,6 +67,25 @@ err = client.LocalOVS().
 if err != nil {
     return err
 }
+
+err = client.OVN().NB().
+    VirtualNetwork("net-web").
+    Ensure().
+    WithCIDR("10.20.0.0/24").
+    WithOwner("project", "alpha").
+    WithDNS("net-web-dns", func(d *ovnflow.LogicalSwitchDNSBuilder) {
+        d.AddRecord("api.service", "10.20.0.10", "10.20.0.11")
+    }).
+    Execute(ctx)
+if err != nil {
+    return err
+}
+
+network, err := client.OVN().NB().VirtualNetwork("net-web").Get(ctx)
+if err != nil {
+    return err
+}
+_ = network
 ```
 
 Normal tests are local and dependency-free:
@@ -87,6 +108,14 @@ and validate the NB, SB, and OVS runtime schemas:
 
 ```powershell
 $env:OVNFLOW_V1_SCHEMA_CHECKS="1"
+go test -tags=integration ./...
+```
+
+v2 schema and mutation gates are also available:
+
+```powershell
+$env:OVNFLOW_V2_SCHEMA_CHECKS="1"
+$env:OVNFLOW_V2_MUTATION_CHECKS="1"
 go test -tags=integration ./...
 ```
 
