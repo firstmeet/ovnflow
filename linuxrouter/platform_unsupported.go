@@ -2,7 +2,11 @@
 
 package linuxrouter
 
-import "context"
+import (
+	"context"
+
+	"github.com/firstmeet/ovnflow"
+)
 
 type UnsupportedClient struct{}
 
@@ -28,4 +32,13 @@ func (r *UnsupportedRef) Apply(context.Context, Router) error {
 
 func (r *UnsupportedRef) Patch(context.Context, Patch) (Router, error) {
 	return Router{}, unsupported(r.name)
+}
+
+func unsupported(name string) error {
+	return &ovnflow.Error{
+		Kind:      ovnflow.ErrorUnsupported,
+		Operation: "linuxrouter",
+		Object:    name,
+		Message:   "LinuxRouter is only supported on linux builds",
+	}
 }
