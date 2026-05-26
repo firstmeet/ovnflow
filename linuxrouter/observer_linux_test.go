@@ -42,15 +42,16 @@ func TestParseIPRouteJSON(t *testing.T) {
 	}
 }
 
-func TestParseOwnedComments(t *testing.T) {
+func TestParseScopedOwnedComments(t *testing.T) {
 	data := []byte(`table ip ovnflow_nat {
 		chain postrouting {
-			ip saddr 10.0.0.0/24 oifname "wan0" masquerade comment "ovnflow:egress"
-			ip daddr 192.168.0.1 snat to 192.0.2.10 comment "ovnflow:legacy-snat"
+			ip saddr 10.0.0.0/24 oifname "wan0" masquerade comment "ovnflow:edge:egress"
+			ip daddr 192.168.0.1 snat to 192.0.2.10 comment "ovnflow:edge:legacy-snat"
+			ip saddr 10.1.0.0/24 oifname "wan0" masquerade comment "ovnflow:other:egress"
 		}
 	}
-	-A POSTROUTING -m comment --comment ovnflow:egress -j MASQUERADE`)
-	got := parseOwnedComments(data)
+	-A POSTROUTING -m comment --comment ovnflow:edge:egress -j MASQUERADE`)
+	got := parseScopedOwnedComments(data, "edge")
 	if len(got) != 2 || got[0] != "egress" || got[1] != "legacy-snat" {
 		t.Fatalf("owned comments = %#v", got)
 	}
@@ -58,16 +59,18 @@ func TestParseOwnedComments(t *testing.T) {
 
 func TestParseIPTablesTableCommentsFiltersByTable(t *testing.T) {
 	data := []byte(`*filter
--A FORWARD -m comment --comment ovnflow:allow-web -j ACCEPT
+-A FORWARD -m comment --comment ovnflow:edge:allow-web -j ACCEPT
+-A FORWARD -m comment --comment ovnflow:other:allow-web -j ACCEPT
 COMMIT
 *nat
--A POSTROUTING -m comment --comment ovnflow:egress -j MASQUERADE
+-A POSTROUTING -m comment --comment ovnflow:edge:egress -j MASQUERADE
+-A POSTROUTING -m comment --comment ovnflow:other:egress -j MASQUERADE
 COMMIT`)
-	got := parseIPTablesTableComments(data, "nat")
+	got := parseIPTablesTableComments(data, "nat", "edge")
 	if len(got) != 1 || got[0] != "egress" {
 		t.Fatalf("nat comments = %#v", got)
 	}
-	got = parseIPTablesTableComments(data, "filter")
+	got = parseIPTablesTableComments(data, "filter", "edge")
 	if len(got) != 1 || got[0] != "allow-web" {
 		t.Fatalf("filter comments = %#v", got)
 	}

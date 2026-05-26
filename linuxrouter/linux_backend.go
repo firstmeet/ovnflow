@@ -63,8 +63,9 @@ func (r LinuxRenderer) RenderApply(router Router) ([]Command, error) {
 	if router.Spec.DNSMasq.Enabled {
 		commands = append(commands, renderDNSMasqCommand(ns, router)...)
 	}
-	commands = append(commands, renderNATCommands(ns, backend, router.Spec.NAT)...)
-	commands = append(commands, renderFirewallCommands(ns, backend, router.Spec.Firewall)...)
+	scope := routerRuleScope(router.Name, ns)
+	commands = append(commands, renderNATCommands(ns, scope, backend, router.Spec.NAT)...)
+	commands = append(commands, renderFirewallCommands(ns, scope, backend, router.Spec.Firewall)...)
 	return commands, nil
 }
 
@@ -150,67 +151,68 @@ func renderDNSMasqCommand(ns string, router Router) []Command {
 	return []Command{{Program: "ip", Args: args}}
 }
 
-func renderNATCommands(ns, backend string, nat NAT) []Command {
+func renderNATCommands(ns, scope, backend string, nat NAT) []Command {
 	if backend == ovnflow.NATBackendIPTables {
-		return renderIPTablesNATCommands(ns, nat)
+		return renderIPTablesNATCommands(ns, scope, nat)
 	}
-	return renderNFTNATCommands(ns, nat)
+	return renderNFTNATCommands(ns, scope, nat)
 }
 
-func renderNFTNATCommands(ns string, nat NAT) []Command {
+func renderNFTNATCommands(ns, scope string, nat NAT) []Command {
+	table := nftNATTable(scope)
 	commands := []Command{
-		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "delete", "table", "ip", "ovnflow_nat"}, IgnoreNotFound: true},
-		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "table", "ip", "ovnflow_nat"}},
-		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "ip", "ovnflow_nat", "prerouting", "{", "type", "nat", "hook", "prerouting", "priority", "dstnat", ";", "}"}},
-		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "ip", "ovnflow_nat", "postrouting", "{", "type", "nat", "hook", "postrouting", "priority", "srcnat", ";", "}"}},
+		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "delete", "table", "ip", table}, IgnoreNotFound: true},
+		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "table", "ip", table}},
+		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "ip", table, "prerouting", "{", "type", "nat", "hook", "prerouting", "priority", "dstnat", ";", "}"}},
+		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "ip", table, "postrouting", "{", "type", "nat", "hook", "postrouting", "priority", "srcnat", ";", "}"}},
 	}
 	for _, rule := range nat.Masquerades {
-		commands = append(commands, nftRule(ns, "postrouting", "ip", "saddr", rule.SourceCIDR, "oifname", rule.OutInterface, "masquerade", "comment", nftComment(rule.StableName())))
+		commands = append(commands, nftRule(ns, table, "postrouting", "ip", "saddr", rule.SourceCIDR, "oifname", rule.OutInterface, "masquerade", "comment", scopedNftComment(scope, rule.StableName())))
 	}
 	for _, rule := range nat.SNATRules {
-		commands = append(commands, nftRule(ns, "postrouting", "ip", "saddr", rule.SourceCIDR, "oifname", rule.OutInterface, "snat", "to", rule.ToSource, "comment", nftComment(rule.StableName())))
+		commands = append(commands, nftRule(ns, table, "postrouting", "ip", "saddr", rule.SourceCIDR, "oifname", rule.OutInterface, "snat", "to", rule.ToSource, "comment", scopedNftComment(scope, rule.StableName())))
 	}
 	for _, rule := range nat.DNATRules {
-		commands = append(commands, nftRule(ns, "prerouting", "iifname", rule.InInterface, "ip", "daddr", rule.MatchAddress, "dnat", "to", rule.TargetAddress, "comment", nftComment(rule.StableName())))
+		commands = append(commands, nftRule(ns, table, "prerouting", "iifname", rule.InInterface, "ip", "daddr", rule.MatchAddress, "dnat", "to", rule.TargetAddress, "comment", scopedNftComment(scope, rule.StableName())))
 	}
 	for _, rule := range nat.PortForwards {
 		match := []string{"iifname", rule.InInterface}
 		if rule.ListenIP != "" {
 			match = append(match, "ip", "daddr", rule.ListenIP)
 		}
-		match = append(match, rule.Protocol, "dport", fmt.Sprint(rule.ListenPort), "dnat", "to", fmt.Sprintf("%s:%d", rule.TargetIP, rule.TargetPort), "comment", nftComment(rule.StableName()))
-		commands = append(commands, nftRule(ns, append([]string{"prerouting"}, match...)...))
+		match = append(match, rule.Protocol, "dport", fmt.Sprint(rule.ListenPort), "dnat", "to", fmt.Sprintf("%s:%d", rule.TargetIP, rule.TargetPort), "comment", scopedNftComment(scope, rule.StableName()))
+		commands = append(commands, nftRule(ns, table, append([]string{"prerouting"}, match...)...))
 	}
 	for _, rule := range nat.DestinationMaps {
 		match := []string{"iifname", rule.InInterface, "ip", "daddr", rule.MatchAddress}
 		if rule.FromCIDR != "" {
 			match = append([]string{"ip", "saddr", rule.FromCIDR}, match...)
 		}
-		commands = append(commands, nftRule(ns, append([]string{"prerouting"}, append(match, "dnat", "to", rule.TargetAddress, "comment", nftComment(rule.StableName()))...)...))
+		commands = append(commands, nftRule(ns, table, append([]string{"prerouting"}, append(match, "dnat", "to", rule.TargetAddress, "comment", scopedNftComment(scope, rule.StableName()))...)...))
 		if rule.SourceNAT != "" {
-			commands = append(commands, nftRule(ns, "postrouting", "ip", "daddr", rule.TargetAddress, "snat", "to", rule.SourceNAT, "comment", nftComment(rule.StableName()+"-snat")))
+			commands = append(commands, nftRule(ns, table, "postrouting", "ip", "daddr", rule.TargetAddress, "snat", "to", rule.SourceNAT, "comment", scopedNftComment(scope, rule.StableName()+"-snat")))
 		}
 	}
 	return commands
 }
 
-func renderIPTablesNATCommands(ns string, nat NAT) []Command {
-	commands := []Command{iptablesCleanupOwnedRules(ns, "nat")}
+func renderIPTablesNATCommands(ns, scope string, nat NAT) []Command {
+	commands := []Command{iptablesCleanupOwnedRules(ns, scope, "nat")}
 	for _, rule := range nat.Masquerades {
-		commands = append(commands, iptablesReplaceRule(ns, "-t", "nat", "-A", "POSTROUTING", "-s", rule.SourceCIDR, "-o", rule.OutInterface, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "MASQUERADE")...)
+		commands = append(commands, iptablesReplaceRule(ns, "-t", "nat", "-A", "POSTROUTING", "-s", rule.SourceCIDR, "-o", rule.OutInterface, "-m", "comment", "--comment", scopedIPTablesComment(scope, rule.StableName()), "-j", "MASQUERADE")...)
 	}
 	for _, rule := range nat.SNATRules {
-		commands = append(commands, iptablesReplaceRule(ns, "-t", "nat", "-A", "POSTROUTING", "-s", rule.SourceCIDR, "-o", rule.OutInterface, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "SNAT", "--to-source", rule.ToSource)...)
+		commands = append(commands, iptablesReplaceRule(ns, "-t", "nat", "-A", "POSTROUTING", "-s", rule.SourceCIDR, "-o", rule.OutInterface, "-m", "comment", "--comment", scopedIPTablesComment(scope, rule.StableName()), "-j", "SNAT", "--to-source", rule.ToSource)...)
 	}
 	for _, rule := range nat.DNATRules {
-		commands = append(commands, iptablesReplaceRule(ns, "-t", "nat", "-A", "PREROUTING", "-i", rule.InInterface, "-d", rule.MatchAddress, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "DNAT", "--to-destination", rule.TargetAddress)...)
+		commands = append(commands, iptablesReplaceRule(ns, "-t", "nat", "-A", "PREROUTING", "-i", rule.InInterface, "-d", rule.MatchAddress, "-m", "comment", "--comment", scopedIPTablesComment(scope, rule.StableName()), "-j", "DNAT", "--to-destination", rule.TargetAddress)...)
 	}
 	for _, rule := range nat.PortForwards {
 		args := []string{"-t", "nat", "-A", "PREROUTING", "-i", rule.InInterface, "-p", rule.Protocol, "--dport", fmt.Sprint(rule.ListenPort)}
 		if rule.ListenIP != "" {
 			args = append(args, "-d", rule.ListenIP)
 		}
-		args = append(args, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "DNAT", "--to-destination", fmt.Sprintf("%s:%d", rule.TargetIP, rule.TargetPort))
+		args = append(args, "-m", "comment", "--comment", scopedIPTablesComment(scope, rule.StableName()), "-j", "DNAT", "--to-destination", fmt.Sprintf("%s:%d", rule.TargetIP, rule.TargetPort))
 		commands = append(commands, iptablesReplaceRule(ns, args...)...)
 	}
 	for _, rule := range nat.DestinationMaps {
@@ -218,41 +220,42 @@ func renderIPTablesNATCommands(ns string, nat NAT) []Command {
 		if rule.FromCIDR != "" {
 			args = append(args, "-s", rule.FromCIDR)
 		}
-		args = append(args, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "DNAT", "--to-destination", rule.TargetAddress)
+		args = append(args, "-m", "comment", "--comment", scopedIPTablesComment(scope, rule.StableName()), "-j", "DNAT", "--to-destination", rule.TargetAddress)
 		commands = append(commands, iptablesReplaceRule(ns, args...)...)
 		if rule.SourceNAT != "" {
-			commands = append(commands, iptablesReplaceRule(ns, "-t", "nat", "-A", "POSTROUTING", "-d", rule.TargetAddress, "-m", "comment", "--comment", iptablesComment(rule.StableName()+"-snat"), "-j", "SNAT", "--to-source", rule.SourceNAT)...)
+			commands = append(commands, iptablesReplaceRule(ns, "-t", "nat", "-A", "POSTROUTING", "-d", rule.TargetAddress, "-m", "comment", "--comment", scopedIPTablesComment(scope, rule.StableName()+"-snat"), "-j", "SNAT", "--to-source", rule.SourceNAT)...)
 		}
 	}
 	return commands
 }
 
-func renderFirewallCommands(ns, backend string, firewall Firewall) []Command {
+func renderFirewallCommands(ns, scope, backend string, firewall Firewall) []Command {
 	if backend == ovnflow.NATBackendIPTables {
-		commands := []Command{iptablesCleanupOwnedRules(ns, "filter")}
+		commands := []Command{iptablesCleanupOwnedRules(ns, scope, "filter")}
 		for _, rule := range firewall.Rules {
-			commands = append(commands, iptablesReplaceFirewallRule(ns, rule)...)
+			commands = append(commands, iptablesReplaceFirewallRule(ns, scope, rule)...)
 		}
 		return commands
 	}
+	table := nftFilterTable(scope)
 	commands := []Command{
-		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "delete", "table", "inet", "ovnflow_filter"}, IgnoreNotFound: true},
+		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "delete", "table", "inet", table}, IgnoreNotFound: true},
 	}
 	if len(firewall.Rules) == 0 {
 		return commands
 	}
 	commands = append(commands,
-		Command{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "table", "inet", "ovnflow_filter"}},
-		Command{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "inet", "ovnflow_filter", "forward", "{", "type", "filter", "hook", "forward", "priority", "filter", ";", "}"}},
+		Command{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "table", "inet", table}},
+		Command{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "inet", table, "forward", "{", "type", "filter", "hook", "forward", "priority", "filter", ";", "}"}},
 	)
 	for _, rule := range firewall.Rules {
-		commands = append(commands, nftFirewallRule(ns, rule))
+		commands = append(commands, nftFirewallRule(ns, table, scope, rule))
 	}
 	return commands
 }
 
-func nftRule(ns string, args ...string) Command {
-	return Command{Program: "ip", Args: append([]string{"netns", "exec", ns, "nft", "add", "rule", "ip", "ovnflow_nat"}, args...)}
+func nftRule(ns, table string, args ...string) Command {
+	return Command{Program: "ip", Args: append([]string{"netns", "exec", ns, "nft", "add", "rule", "ip", table}, args...)}
 }
 
 func iptablesRule(ns string, args ...string) Command {
@@ -272,15 +275,15 @@ func iptablesReplaceRule(ns string, args ...string) []Command {
 	return []Command{deleteRule, iptablesRule(ns, args...)}
 }
 
-func nftFirewallRule(ns string, rule FirewallRule) Command {
-	args := []string{"netns", "exec", ns, "nft", "add", "rule", "inet", "ovnflow_filter", firewallChain(rule)}
+func nftFirewallRule(ns, table, scope string, rule FirewallRule) Command {
+	args := []string{"netns", "exec", ns, "nft", "add", "rule", "inet", table, firewallChain(rule)}
 	args = append(args, nftFirewallMatches(rule)...)
-	args = append(args, firewallVerdict(rule), "comment", nftComment(rule.Name))
+	args = append(args, firewallVerdict(rule), "comment", scopedNftComment(scope, rule.Name))
 	return Command{Program: "ip", Args: args}
 }
 
-func iptablesReplaceFirewallRule(ns string, rule FirewallRule) []Command {
-	args := iptablesFirewallArgs(rule)
+func iptablesReplaceFirewallRule(ns, scope string, rule FirewallRule) []Command {
+	args := iptablesFirewallArgs(scope, rule)
 	deleteArgs := append([]string{}, args...)
 	for i, arg := range deleteArgs {
 		if arg == "-A" {
@@ -293,7 +296,7 @@ func iptablesReplaceFirewallRule(ns string, rule FirewallRule) []Command {
 	return []Command{deleteRule, iptablesRule(ns, args...)}
 }
 
-func iptablesFirewallArgs(rule FirewallRule) []string {
+func iptablesFirewallArgs(scope string, rule FirewallRule) []string {
 	args := []string{"-A", strings.ToUpper(firewallChain(rule))}
 	for _, cidr := range rule.CIDRs {
 		args = append(args, "-s", cidr)
@@ -304,12 +307,12 @@ func iptablesFirewallArgs(rule FirewallRule) []string {
 	for _, port := range rule.Ports {
 		args = append(args, "--dport", fmt.Sprint(port))
 	}
-	return append(args, "-m", "comment", "--comment", iptablesComment(rule.Name), "-j", strings.ToUpper(firewallVerdict(rule)))
+	return append(args, "-m", "comment", "--comment", scopedIPTablesComment(scope, rule.Name), "-j", strings.ToUpper(firewallVerdict(rule)))
 }
 
-func iptablesCleanupOwnedRules(ns, table string) Command {
-	script := `iptables-save` + iptablesSaveTableArg(table) + ` | awk '` + iptablesOwnedRuleAWK(table) + `' | while IFS= read -r rule; do iptables ` + iptablesTableArg(table) + ` $rule || true; done`
-	return Command{Program: "ip", Args: []string{"netns", "exec", ns, "sh", "-c", script}, IgnoreNotFound: true}
+func iptablesCleanupOwnedRules(ns, scope, table string) Command {
+	script := `prefix="$1"; iptables-save` + iptablesSaveTableArg(table) + ` | awk -v prefix="$prefix" '` + iptablesOwnedRuleAWK(table) + `' | while IFS= read -r rule; do iptables ` + iptablesTableArg(table) + ` $rule || true; done`
+	return Command{Program: "ip", Args: []string{"netns", "exec", ns, "sh", "-c", script, "ovnflow-iptables-cleanup", scopedRulePrefix(scope)}, IgnoreNotFound: true}
 }
 
 func iptablesSaveTableArg(table string) string {
@@ -328,9 +331,9 @@ func iptablesTableArg(table string) string {
 
 func iptablesOwnedRuleAWK(table string) string {
 	if table == "nat" {
-		return `/ovnflow:/ { sub(/^-A /,"-D "); print }`
+		return `index($0, prefix) { sub(/^-A /,"-D "); print }`
 	}
-	return `BEGIN { in_filter=0 } /^\*filter$/ { in_filter=1; next } /^\*/ { in_filter=0 } /^COMMIT$/ { in_filter=0 } in_filter && /ovnflow:/ { sub(/^-A /,"-D "); print }`
+	return `BEGIN { in_filter=0 } /^\*filter$/ { in_filter=1; next } /^\*/ { in_filter=0 } /^COMMIT$/ { in_filter=0 } in_filter && index($0, prefix) { sub(/^-A /,"-D "); print }`
 }
 
 func linuxRouterOVSOwnershipGuardCommand(table, name, ns string) Command {
@@ -380,12 +383,59 @@ func firewallVerdict(rule FirewallRule) string {
 	}
 }
 
-func nftComment(name string) string {
-	return strconv.Quote("ovnflow:" + name)
+func nftNATTable(scope string) string {
+	return "ovnflow_nat_" + scope
 }
 
-func iptablesComment(name string) string {
-	return "ovnflow:" + name
+func nftFilterTable(scope string) string {
+	return "ovnflow_filter_" + scope
+}
+
+func scopedNftComment(scope, name string) string {
+	return strconv.Quote(scopedIPTablesComment(scope, name))
+}
+
+func scopedIPTablesComment(scope, name string) string {
+	return scopedRulePrefix(scope) + name
+}
+
+func scopedRulePrefix(scope string) string {
+	return "ovnflow:" + scope + ":"
+}
+
+func routerRuleScope(routerName, ns string) string {
+	scope := sanitizeRuleScope(routerName)
+	if scope == "" {
+		scope = sanitizeRuleScope(ns)
+	}
+	if scope == "" {
+		scope = "router"
+	}
+	return scope
+}
+
+func sanitizeRuleScope(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		valid := r >= 'a' && r <= 'z' || r >= '0' && r <= '9'
+		if valid {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('_')
+			lastDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if len(out) > 48 {
+		out = out[:48]
+		out = strings.TrimRight(out, "_")
+	}
+	return out
 }
 
 func commandNotFound(message string) bool {
@@ -405,6 +455,10 @@ func commandAlreadyExists(message string) bool {
 }
 
 func errorKindForExec(err error) ovnflow.ErrorKind {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 77 {
+		return ovnflow.ErrorOwnershipViolation
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		return ovnflow.ErrorCanceled

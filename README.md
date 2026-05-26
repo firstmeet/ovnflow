@@ -12,7 +12,7 @@ The current SDK surface covers:
 
 | Area | Coverage |
 | --- | --- |
-| OVN Northbound | logical switch/port plus router, router port, ACL, NAT, load balancer, DHCP, DNS, QoS, meter, port group, address set, gateway/HA/BFD builders |
+| OVN Northbound | logical switch/port plus router, router port, ACL, NAT, load balancer, DHCP, DNS, QoS, meter, port group, address set, OVN gateway, HA chassis group, and BFD table builders |
 | OVN Southbound | typed list/get/watch for chassis, port binding, datapath, logical flow, MAC/FDB, multicast, service monitor, RBAC, meter, DNS, and BFD |
 | Open_vSwitch | bridge/port/interface lifecycle plus controller, manager, mirror, QoS, queue, flow table, NetFlow, sFlow, IPFIX, SSL, and AutoAttach fluent table APIs |
 | v2 intent | platform-neutral `VirtualNetwork`, `LogicalSwitchDNS`, `WorkloadAttachment`, `ProviderNetwork`, and `SecurityPolicy` with owner/label metadata, dry-run/reconcile, typed get/inspect, and delete helpers |
@@ -168,6 +168,6 @@ See [v1.0 hardening](docs/v1.0-hardening.md) and
 [API stability](docs/api-stability.md) for the current release gates and stable
 surface. The [v0.1 scope](docs/v0.1-scope.md) and
 [v0.2 scope](docs/v0.2-scope.md) documents are historical compatibility notes.
-Future high-level, platform-neutral intent APIs are tracked in
-[roadmap](docs/roadmap.md), with the v2.0.0 execution plan in
-[v2.0 plan](docs/v2.0-plan.md).
+The delivered v2.0.0 high-level, platform-neutral intent APIs are recorded in
+[v2.0 acceptance](docs/v2.0-plan.md). Future v2.x candidates and deeper
+hardening work are tracked in [roadmap](docs/roadmap.md).

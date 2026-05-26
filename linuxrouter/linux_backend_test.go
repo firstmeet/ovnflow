@@ -48,14 +48,14 @@ func TestLinuxRendererRendersNamespaceInterfacesDNSMasqAndNFTables(t *testing.T)
 	assertCommandContains(t, commands, "ovs-vsctl", "external_ids:ovnflow.io/linux-router-ns=ovnflow-edge")
 	assertCommandContains(t, commands, "ip", "dhclient", "-v", "wan0")
 	assertCommandContains(t, commands, "ip", "dnsmasq", "--conf-file=/run/ovnflow/edge/dnsmasq.conf", "--host-record=api.service,172.16.100.6")
-	assertCommandContains(t, commands, "ip", "nft", "delete", "table", "ip", "ovnflow_nat")
-	assertCommandContains(t, commands, "ip", "nft", "add", "table", "ip", "ovnflow_nat")
-	assertCommandContains(t, commands, "ip", "masquerade", "comment", `"ovnflow:masq-lan"`)
+	assertCommandContains(t, commands, "ip", "nft", "delete", "table", "ip", "ovnflow_nat_edge")
+	assertCommandContains(t, commands, "ip", "nft", "add", "table", "ip", "ovnflow_nat_edge")
+	assertCommandContains(t, commands, "ip", "masquerade", "comment", `"ovnflow:edge:masq-lan"`)
 	assertCommandContains(t, commands, "ip", "snat", "to", "172.17.100.29")
 	assertCommandContains(t, commands, "ip", "tcp", "dport", "8080", "dnat", "to", "172.16.100.6:80")
 	assertCommandContains(t, commands, "ip", "saddr", "172.16.100.0/24", "iifname", "lan0", "ip", "daddr", "192.168.9.2", "dnat", "to", "192.168.0.1")
-	assertCommandContains(t, commands, "ip", "table", "inet", "ovnflow_filter")
-	assertCommandContains(t, commands, "ip", "accept", "comment", `"ovnflow:allow-web"`)
+	assertCommandContains(t, commands, "ip", "table", "inet", "ovnflow_filter_edge")
+	assertCommandContains(t, commands, "ip", "accept", "comment", `"ovnflow:edge:allow-web"`)
 }
 
 func TestLinuxRendererRendersIPTablesBackend(t *testing.T) {
@@ -92,6 +92,37 @@ func TestSystemExecutorClassifiesCommandFailures(t *testing.T) {
 	if !ovnflow.IsKind(err, ovnflow.ErrorUnavailable) {
 		t.Fatalf("error kind = %q for %v, want unavailable", ovnflow.KindOf(err), err)
 	}
+}
+
+func TestSystemExecutorClassifiesOwnershipGuardExit(t *testing.T) {
+	err := (SystemExecutor{}).Run(context.Background(), Command{Program: "sh", Args: []string{"-c", "echo ownership >&2; exit 77"}})
+	if !ovnflow.IsKind(err, ovnflow.ErrorOwnershipViolation) {
+		t.Fatalf("error kind = %q for %v, want ownership violation", ovnflow.KindOf(err), err)
+	}
+}
+
+func TestLinuxRendererScopesNATCleanupPerRouter(t *testing.T) {
+	a := Router{Name: "edge-a", Spec: Spec{
+		Interfaces: []Interface{{Name: "wan0", Role: InterfaceWAN}},
+		NAT:        NAT{Masquerades: []MasqueradeRule{{Name: "egress", SourceCIDR: "10.0.0.0/24"}}},
+	}}
+	b := Router{Name: "edge-b", Spec: Spec{
+		Interfaces: []Interface{{Name: "wan0", Role: InterfaceWAN}},
+		NAT:        NAT{Masquerades: []MasqueradeRule{{Name: "egress", SourceCIDR: "10.0.0.0/24"}}},
+	}}
+	aCommands, err := (LinuxRenderer{NATBackend: ovnflow.NATBackendIPTables}).RenderApply(a)
+	if err != nil {
+		t.Fatalf("RenderApply edge-a returned error: %v", err)
+	}
+	bCommands, err := (LinuxRenderer{NATBackend: ovnflow.NATBackendIPTables}).RenderApply(b)
+	if err != nil {
+		t.Fatalf("RenderApply edge-b returned error: %v", err)
+	}
+	assertCommandContains(t, aCommands, "ip", "sh", "-c")
+	assertCommandContains(t, aCommands, "ip", "ovnflow:edge_a:")
+	assertCommandContains(t, aCommands, "ip", "--comment", "ovnflow:edge_a:egress")
+	assertCommandContains(t, bCommands, "ip", "ovnflow:edge_b:")
+	assertCommandContains(t, bCommands, "ip", "--comment", "ovnflow:edge_b:egress")
 }
 
 func TestCommandNotFoundRecognizesIprouteMissingDevice(t *testing.T) {

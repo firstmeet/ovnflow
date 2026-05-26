@@ -389,6 +389,9 @@ func (b *VirtualNetworkBuilder) Reconcile(ctx context.Context) (ReconcileResult,
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	if err := b.requireExistingLogicalSwitchOwned(ctx, "VirtualNetwork", b.spec.Name, "ensure"); err != nil {
+		return ReconcileResult{}, err
+	}
 	diff, err := b.diff(ctx)
 	if err != nil {
 		return ReconcileResult{}, err
@@ -460,7 +463,20 @@ func (r *LogicalSwitchDNSRef) Delete(ctx context.Context) error {
 	if err := requireV2OwnedExternalIDs(dns.ExternalIDs, "LogicalSwitchDNS", r.name, dbOVNNorthbound, tableDNS, "delete", r.name); err != nil {
 		return err
 	}
-	return r.client.DNS(r.name).Delete().Execute(ctx)
+	refOps, err := r.client.unreferenceOps(ctx, tableDNS, dns.UUID)
+	if err != nil {
+		return err
+	}
+	ops := append(refOps, libovsdb.Operation{
+		Op:    libovsdb.OperationDelete,
+		Table: tableDNS,
+		Where: conditionUUID(dns.UUID),
+	})
+	results, err := r.client.db.transact(ctx, tableDNS, "delete", r.name, ops...)
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, []int{len(ops) - 1}, dbOVNNorthbound, tableDNS, "delete", r.name)
 }
 
 func (r *LogicalSwitchDNSRef) Apply(ctx context.Context, dns LogicalSwitchDNS) error {
@@ -582,6 +598,9 @@ func (b *LogicalSwitchDNSBuilder) Reconcile(ctx context.Context) (ReconcileResul
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	if err := b.requireExistingDNSOwned(ctx, "ensure"); err != nil {
+		return ReconcileResult{}, err
+	}
 	diff, err := b.diff(ctx)
 	if err != nil {
 		return ReconcileResult{}, err
@@ -668,7 +687,7 @@ func (r *WorkloadAttachmentRef) Delete(ctx context.Context) error {
 			return err
 		}
 	}
-	return r.client.TableLogicalSwitchPort(r.name).Delete().Execute(ctx)
+	return r.client.deleteLogicalSwitchPortByUUID(ctx, lsp.UUID, r.name)
 }
 
 func (r *WorkloadAttachmentRef) Apply(ctx context.Context, attachment WorkloadAttachment) error {
@@ -743,7 +762,7 @@ func (r *WorkloadAttachmentRef) detachLocalOVS(ctx context.Context, allowMissing
 	}
 	var ownedPort *OVSPort
 	for i := range ports {
-		if ovsResourceOwnedBy(ports[i].ExternalIDs, "WorkloadAttachment", r.name) {
+		if v2ResourceOwnedBy(ports[i].ExternalIDs, "WorkloadAttachment", r.name) {
 			ownedPort = &ports[i]
 			break
 		}
@@ -759,7 +778,7 @@ func (r *WorkloadAttachmentRef) detachLocalOVS(ctx context.Context, allowMissing
 		if err != nil {
 			return err
 		}
-		if !ovsResourceOwnedBy(iface.ExternalIDs, "WorkloadAttachment", r.name) {
+		if !v2ResourceOwnedBy(iface.ExternalIDs, "WorkloadAttachment", r.name) {
 			return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tableInterface, "detach", iface.Name, "workload port references an interface not owned by this attachment", nil)
 		}
 	}
@@ -916,6 +935,12 @@ func (b *WorkloadAttachmentBuilder) Reconcile(ctx context.Context) (ReconcileRes
 	if err := b.validateLocalOVSTarget(ctx); err != nil {
 		return ReconcileResult{}, err
 	}
+	if err := b.requireExistingLogicalSwitchOwned(ctx, b.spec.Network, "ensure"); err != nil {
+		return ReconcileResult{}, err
+	}
+	if err := b.requireExistingLogicalSwitchPortOwned(ctx, "ensure"); err != nil {
+		return ReconcileResult{}, err
+	}
 	diff, err := b.diff(ctx)
 	if err != nil {
 		return ReconcileResult{}, err
@@ -1029,10 +1054,11 @@ func (r *ProviderNetworkRef) Patch(ctx context.Context, patch ProviderNetworkPat
 		}
 	}
 	if current.LocalnetPort != "" && current.LocalnetPort != next.LocalnetPort {
-		if err := r.requireOwnedLocalnetPort(ctx, current.LocalnetPort, "delete"); err != nil {
+		port, err := r.requireOwnedLocalnetPort(ctx, current.LocalnetPort, "delete")
+		if err != nil {
 			return nil, err
 		}
-		if err := r.client.TableLogicalSwitchPort(current.LocalnetPort).Delete().Execute(ctx); err != nil && !IsKind(err, ErrorNotFound) {
+		if err := r.client.deleteLogicalSwitchPortByUUID(ctx, port.UUID, current.LocalnetPort); err != nil && !IsKind(err, ErrorNotFound) {
 			return nil, err
 		}
 	}
@@ -1058,13 +1084,14 @@ func (r *ProviderNetworkRef) Delete(ctx context.Context) error {
 	if network.Name == "" {
 		network.Name = r.name
 	}
-	if err := r.requireOwnedLocalnetPort(ctx, network.LocalnetPort, "delete"); err != nil {
+	port, err := r.requireOwnedLocalnetPort(ctx, network.LocalnetPort, "delete")
+	if err != nil {
 		return err
 	}
 	if err := r.detachBridgeMapping(ctx, *network); err != nil && !IsKind(err, ErrorNotFound) {
 		return err
 	}
-	return r.client.TableLogicalSwitchPort(network.LocalnetPort).Delete().Execute(ctx)
+	return r.client.deleteLogicalSwitchPortByUUID(ctx, port.UUID, network.LocalnetPort)
 }
 
 func (r *ProviderNetworkRef) providerLocalnetPort(ctx context.Context) (*LogicalSwitchPort, error) {
@@ -1080,18 +1107,21 @@ func (r *ProviderNetworkRef) providerLocalnetPort(ctx context.Context) (*Logical
 	return nil, wrap(ErrorNotFound, dbOVNNorthbound, tableLogicalSwitchPort, "get", r.name, "provider localnet port not found", nil)
 }
 
-func (r *ProviderNetworkRef) requireOwnedLocalnetPort(ctx context.Context, name, op string) error {
+func (r *ProviderNetworkRef) requireOwnedLocalnetPort(ctx context.Context, name, op string) (*LogicalSwitchPort, error) {
 	if strings.TrimSpace(name) == "" {
-		return wrap(ErrorValidation, dbOVNNorthbound, tableLogicalSwitchPort, op, r.name, "provider localnet port is required", nil)
+		return nil, wrap(ErrorValidation, dbOVNNorthbound, tableLogicalSwitchPort, op, r.name, "provider localnet port is required", nil)
 	}
 	port, err := r.client.GetLogicalSwitchPort(ctx, name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if port.Type != "localnet" {
-		return wrap(ErrorOwnershipViolation, dbOVNNorthbound, tableLogicalSwitchPort, op, name, "provider port is not a localnet port", nil)
+		return nil, wrap(ErrorOwnershipViolation, dbOVNNorthbound, tableLogicalSwitchPort, op, name, "provider port is not a localnet port", nil)
 	}
-	return requireV2OwnedExternalIDs(port.ExternalIDs, "ProviderNetwork", r.name, dbOVNNorthbound, tableLogicalSwitchPort, op, name)
+	if err := requireV2OwnedExternalIDs(port.ExternalIDs, "ProviderNetwork", r.name, dbOVNNorthbound, tableLogicalSwitchPort, op, name); err != nil {
+		return nil, err
+	}
+	return port, nil
 }
 
 func (r *ProviderNetworkRef) detachBridgeMapping(ctx context.Context, network ProviderNetwork) error {
@@ -1446,6 +1476,9 @@ func (b *SecurityPolicyBuilder) Reconcile(ctx context.Context) (ReconcileResult,
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	if err := b.requireExistingPortGroupOwned(ctx, "ensure"); err != nil {
+		return ReconcileResult{}, err
+	}
 	diff, err := b.diff(ctx)
 	if err != nil {
 		return ReconcileResult{}, err
@@ -1616,19 +1649,14 @@ func (p SecurityPolicy) Validate() error {
 }
 
 func (b *VirtualNetworkBuilder) reconcileOVSDB(ctx context.Context) error {
+	if err := b.requireExistingLogicalSwitchOwned(ctx, "VirtualNetwork", b.spec.Name, "ensure"); err != nil {
+		return err
+	}
 	externalIDs, err := intentExternalIDs("VirtualNetwork", b.spec.Name, b.spec.Owner, b.spec.Labels)
 	if err != nil {
 		return err
 	}
-	builder := b.ref.client.LogicalSwitch(b.spec.Name).Ensure()
-	for _, cidr := range b.spec.CIDRs {
-		builder.WithSubnet(cidr)
-		break
-	}
-	for key, value := range externalIDs {
-		builder.WithExternalID(key, value)
-	}
-	if err := builder.Execute(ctx); err != nil {
+	if err := b.ensureLogicalSwitchIntent(ctx, b.spec.Name, externalIDs, b.spec.CIDRs); err != nil {
 		return err
 	}
 	if len(b.spec.DNS.Records) > 0 {
@@ -1657,6 +1685,66 @@ func (b *VirtualNetworkBuilder) reconcileOVSDB(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (b *VirtualNetworkBuilder) ensureLogicalSwitchIntent(ctx context.Context, name string, externalIDs map[string]string, cidrs []string) error {
+	switches, err := b.ref.client.selectLogicalSwitches(ctx, name)
+	if err != nil {
+		return err
+	}
+	otherConfig := map[string]string{}
+	for _, cidr := range cidrs {
+		otherConfig["subnet"] = cidr
+		break
+	}
+	if len(switches) == 0 {
+		row := libovsdb.Row{colName: name}
+		setRowMap(row, colExternalIDs, externalIDs)
+		setRowMap(row, colOtherConfig, otherConfig)
+		results, err := b.ref.client.db.transact(ctx, tableLogicalSwitch, "ensure", name, libovsdb.Operation{
+			Op:    libovsdb.OperationInsert,
+			Table: tableLogicalSwitch,
+			Row:   row,
+		})
+		if err != nil {
+			return err
+		}
+		return checkOperationResults(results, dbOVNNorthbound, tableLogicalSwitch, "ensure", name)
+	}
+	var mutations []libovsdb.Mutation
+	if len(externalIDs) > 0 {
+		mutations = append(mutations, *libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationInsert, ovsMap(externalIDs)))
+	}
+	if len(otherConfig) > 0 {
+		mutations = append(mutations, *libovsdb.NewMutation(colOtherConfig, libovsdb.MutateOperationInsert, ovsMap(otherConfig)))
+	}
+	if len(mutations) == 0 {
+		return nil
+	}
+	results, err := b.ref.client.db.transact(ctx, tableLogicalSwitch, "ensure", name, libovsdb.Operation{
+		Op:        libovsdb.OperationMutate,
+		Table:     tableLogicalSwitch,
+		Where:     conditionUUID(switches[0].UUID),
+		Mutations: mutations,
+	})
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, []int{0}, dbOVNNorthbound, tableLogicalSwitch, "ensure", name)
+}
+
+func (b *VirtualNetworkBuilder) requireExistingLogicalSwitchOwned(ctx context.Context, kind, name, op string) error {
+	if b == nil || b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
+		return nil
+	}
+	switches, err := b.ref.client.selectLogicalSwitches(ctx, name)
+	if err != nil {
+		return err
+	}
+	if len(switches) == 0 {
+		return nil
+	}
+	return requireV2OwnedExternalIDs(switches[0].ExternalIDs, kind, name, dbOVNNorthbound, tableLogicalSwitch, op, name)
 }
 
 func (b *VirtualNetworkBuilder) logicalSwitchPatchOps(ctx context.Context, gateway string, removeOtherConfig []string, removeExternalIDs []string) ([]libovsdb.Operation, error) {
@@ -1761,18 +1849,67 @@ func (b *LogicalSwitchDNSBuilder) reconcileOVSDB(ctx context.Context) error {
 }
 
 func (b *LogicalSwitchDNSBuilder) reconcileOVSDBWithOwner(ctx context.Context, owner OwnerRef, labels Labels) error {
+	if err := b.requireExistingDNSOwned(ctx, "ensure"); err != nil {
+		return err
+	}
 	externalIDs, err := intentExternalIDs("LogicalSwitchDNS", b.spec.Name, owner, labels)
 	if err != nil {
 		return err
 	}
-	dns := b.ref.client.DNS(b.spec.Name).Ensure()
+	records := map[string]string{}
 	for domain, ips := range b.spec.RecordMap() {
-		dns.WithRecord(domain, strings.Join(ips, " "))
+		records[domain] = strings.Join(ips, " ")
 	}
-	for key, value := range externalIDs {
-		dns.WithExternalID(key, value)
+	externalIDs[dnsNameExternalID] = b.spec.Name
+	rows, err := b.ref.client.selectRows(ctx, tableDNS, nbExternalIDCondition(dnsNameExternalID, b.spec.Name), []string{colUUID}, b.spec.Name)
+	if err != nil {
+		return err
 	}
-	return dns.Execute(ctx)
+	if len(rows) == 0 {
+		row := libovsdb.Row{}
+		setRowMap(row, colRecords, records)
+		setRowMap(row, colExternalIDs, externalIDs)
+		results, err := b.ref.client.db.transact(ctx, tableDNS, "ensure", b.spec.Name, libovsdb.Operation{
+			Op:       libovsdb.OperationInsert,
+			Table:    tableDNS,
+			UUIDName: namedUUID(tableUUIDPrefix(tableDNS)),
+			Row:      row,
+		})
+		if err != nil {
+			return err
+		}
+		return checkOperationResults(results, dbOVNNorthbound, tableDNS, "ensure", b.spec.Name)
+	}
+	var mutations []libovsdb.Mutation
+	nbAppendMapMutation(&mutations, colRecords, records)
+	nbAppendMapMutation(&mutations, colExternalIDs, externalIDs)
+	if len(mutations) == 0 {
+		return nil
+	}
+	results, err := b.ref.client.db.transact(ctx, tableDNS, "ensure", b.spec.Name, libovsdb.Operation{
+		Op:        libovsdb.OperationMutate,
+		Table:     tableDNS,
+		Where:     conditionUUID(rowUUIDValue(rows[0])),
+		Mutations: mutations,
+	})
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, []int{0}, dbOVNNorthbound, tableDNS, "ensure", b.spec.Name)
+}
+
+func (b *LogicalSwitchDNSBuilder) requireExistingDNSOwned(ctx context.Context, op string) error {
+	if b == nil || b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
+		return nil
+	}
+	rows, err := b.ref.client.selectRows(ctx, tableDNS, nbExternalIDCondition(dnsNameExternalID, b.spec.Name), nbDNSColumns(), b.spec.Name)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	return requireV2OwnedExternalIDs(rowStringMapValue(rows[0], colExternalIDs), "LogicalSwitchDNS", b.spec.Name, dbOVNNorthbound, tableDNS, op, b.spec.Name)
 }
 
 func (b *LogicalSwitchDNSBuilder) diff(ctx context.Context) (Diff, error) {
@@ -1807,6 +1944,12 @@ func (b *LogicalSwitchDNSBuilder) current(ctx context.Context) (LogicalSwitchDNS
 }
 
 func (b *WorkloadAttachmentBuilder) reconcileOVSDB(ctx context.Context) error {
+	if err := b.requireExistingLogicalSwitchOwned(ctx, b.spec.Network, "ensure"); err != nil {
+		return err
+	}
+	if err := b.requireExistingLogicalSwitchPortOwned(ctx, "ensure"); err != nil {
+		return err
+	}
 	externalIDs, err := intentExternalIDs("WorkloadAttachment", b.spec.Name, b.spec.Owner, b.spec.Labels)
 	if err != nil {
 		return err
@@ -1820,23 +1963,148 @@ func (b *WorkloadAttachmentBuilder) reconcileOVSDB(ctx context.Context) error {
 	if b.spec.Network != "" {
 		externalIDs[ExternalIDPrefix+"network"] = b.spec.Network
 	}
-	port := b.ref.client.LogicalSwitch(b.spec.Network).Ensure().AddPort(b.spec.Name)
-	if b.spec.MAC != "" && len(b.spec.IPs) == 1 {
-		port.WithAddress(b.spec.MAC, b.spec.IPs[0])
-	} else {
-		if b.spec.MAC != "" {
-			port.WithMac(b.spec.MAC)
-		}
-		for _, ip := range b.spec.IPs {
-			if b.spec.MAC != "" {
-				port.WithAddress(b.spec.MAC, ip)
-			}
-		}
+	return b.ensureLogicalSwitchPortIntent(ctx, b.spec.Network, b.spec.Name, workloadAddresses(b.spec.MAC, b.spec.IPs), "", nil, externalIDs)
+}
+
+func (b *WorkloadAttachmentBuilder) ensureLogicalSwitchPortIntent(ctx context.Context, switchName, portName string, addresses []string, portType string, options map[string]string, externalIDs map[string]string) error {
+	switches, err := b.ref.client.selectLogicalSwitches(ctx, switchName)
+	if err != nil {
+		return err
 	}
-	for key, value := range externalIDs {
-		port.WithExternalID(key, value)
+	if len(switches) == 0 {
+		return wrap(ErrorNotFound, dbOVNNorthbound, tableLogicalSwitch, "ensure", switchName, "logical switch not found", nil)
 	}
-	return port.Execute(ctx)
+	ports, err := b.ref.client.selectLogicalSwitchPorts(ctx, portName)
+	if err != nil {
+		return err
+	}
+	if len(ports) == 0 {
+		portUUID := namedUUID("lsp")
+		row := libovsdb.Row{colName: portName}
+		setRowMap(row, colExternalIDs, externalIDs)
+		setRowMap(row, colOptions, options)
+		if portType != "" {
+			row[colType] = portType
+		}
+		if len(addresses) > 0 {
+			row[colAddresses] = stringSet(addresses)
+		}
+		ops := []libovsdb.Operation{{
+			Op:       libovsdb.OperationInsert,
+			Table:    tableLogicalSwitchPort,
+			UUIDName: portUUID,
+			Row:      row,
+		}, {
+			Op:    libovsdb.OperationMutate,
+			Table: tableLogicalSwitch,
+			Where: conditionUUID(switches[0].UUID),
+			Mutations: []libovsdb.Mutation{
+				*libovsdb.NewMutation(colPorts, libovsdb.MutateOperationInsert, uuidSet(portUUID)),
+			},
+		}}
+		results, err := b.ref.client.db.transact(ctx, tableLogicalSwitchPort, "ensure", portName, ops...)
+		if err != nil {
+			return err
+		}
+		return ensureAffected(results, []int{1}, dbOVNNorthbound, tableLogicalSwitch, "ensure", switchName)
+	}
+	row := libovsdb.Row{}
+	if portType != "" {
+		row[colType] = portType
+	}
+	if len(addresses) > 0 {
+		row[colAddresses] = stringSet(addresses)
+	}
+	var ops []libovsdb.Operation
+	if len(row) > 0 {
+		ops = append(ops, libovsdb.Operation{Op: libovsdb.OperationUpdate, Table: tableLogicalSwitchPort, Where: conditionUUID(ports[0].UUID), Row: row})
+	}
+	var mutations []libovsdb.Mutation
+	nbAppendMapMutation(&mutations, colExternalIDs, externalIDs)
+	nbAppendMapMutation(&mutations, colOptions, options)
+	if len(mutations) > 0 {
+		ops = append(ops, libovsdb.Operation{Op: libovsdb.OperationMutate, Table: tableLogicalSwitchPort, Where: conditionUUID(ports[0].UUID), Mutations: mutations})
+	}
+	if !containsString(switches[0].Ports, ports[0].UUID) {
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationMutate,
+			Table: tableLogicalSwitch,
+			Where: conditionUUID(switches[0].UUID),
+			Mutations: []libovsdb.Mutation{
+				*libovsdb.NewMutation(colPorts, libovsdb.MutateOperationInsert, uuidSet(ports[0].UUID)),
+			},
+		})
+	}
+	if len(ops) == 0 {
+		return nil
+	}
+	results, err := b.ref.client.db.transact(ctx, tableLogicalSwitchPort, "ensure", portName, ops...)
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, mustAffectNonInsertOps(ops), dbOVNNorthbound, tableLogicalSwitchPort, "ensure", portName)
+}
+
+func (n *NBClient) deleteLogicalSwitchPortByUUID(ctx context.Context, uuid, object string) error {
+	if strings.TrimSpace(uuid) == "" {
+		return wrap(ErrorConflict, dbOVNNorthbound, tableLogicalSwitchPort, "delete", object, "logical switch port UUID missing", nil)
+	}
+	refOps, err := n.unreferenceOps(ctx, tableLogicalSwitchPort, uuid)
+	if err != nil {
+		return err
+	}
+	ops := append(refOps, libovsdb.Operation{
+		Op:    libovsdb.OperationDelete,
+		Table: tableLogicalSwitchPort,
+		Where: conditionUUID(uuid),
+	})
+	results, err := n.db.transact(ctx, tableLogicalSwitchPort, "delete", object, ops...)
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, []int{len(ops) - 1}, dbOVNNorthbound, tableLogicalSwitchPort, "delete", object)
+}
+
+func workloadAddresses(mac string, ips []string) []string {
+	if mac == "" {
+		return nil
+	}
+	if len(ips) == 0 {
+		return []string{mac}
+	}
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, strings.TrimSpace(mac+" "+ip))
+	}
+	return uniqueStrings(out)
+}
+
+func (b *WorkloadAttachmentBuilder) requireExistingLogicalSwitchOwned(ctx context.Context, name, op string) error {
+	if b == nil || b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
+		return nil
+	}
+	switches, err := b.ref.client.selectLogicalSwitches(ctx, name)
+	if err != nil {
+		return err
+	}
+	if len(switches) == 0 {
+		return wrap(ErrorNotFound, dbOVNNorthbound, tableLogicalSwitch, op, name, "workload attachment network not found", nil)
+	}
+	return requireV2OwnedExternalIDs(switches[0].ExternalIDs, "VirtualNetwork", name, dbOVNNorthbound, tableLogicalSwitch, op, name)
+}
+
+func (b *WorkloadAttachmentBuilder) requireExistingLogicalSwitchPortOwned(ctx context.Context, op string) error {
+	if b == nil || b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
+		return nil
+	}
+	ports, err := b.ref.client.selectLogicalSwitchPorts(ctx, b.spec.Name)
+	if err != nil {
+		return err
+	}
+	if len(ports) == 0 {
+		return nil
+	}
+	return requireV2OwnedExternalIDs(ports[0].ExternalIDs, "WorkloadAttachment", b.spec.Name, dbOVNNorthbound, tableLogicalSwitchPort, op, b.spec.Name)
 }
 
 func (b *WorkloadAttachmentBuilder) reconcileLocalOVS(ctx context.Context) error {
@@ -1928,6 +2196,15 @@ func ovsResourceOwnedBy(externalIDs map[string]string, kind, name string) bool {
 	return externalIDs[ExternalIDManagedByKey] == "ovnflow" && externalIDs[ExternalIDKindKey] == kind && externalIDs[ExternalIDNameKey] == name
 }
 
+func v2ResourceOwnedBy(externalIDs map[string]string, kind, name string) bool {
+	return externalIDs[ExternalIDManagedByKey] == "ovnflow" &&
+		externalIDs[ExternalIDAPIVersionKey] == "v2" &&
+		externalIDs[ExternalIDKindKey] == kind &&
+		externalIDs[ExternalIDNameKey] == name &&
+		externalIDs[ExternalIDOwnerKindKey] != "" &&
+		(externalIDs[ExternalIDOwnerNameKey] != "" || externalIDs[ExternalIDOwnerIDKey] != "")
+}
+
 func (b *WorkloadAttachmentBuilder) diff(ctx context.Context) (Diff, error) {
 	desired := normalizeWorkloadAttachment(b.spec)
 	diff := Diff{Resource: "WorkloadAttachment", Name: desired.Name}
@@ -2007,7 +2284,27 @@ func (b *ProviderNetworkBuilder) validateTargets(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := b.requireExistingLogicalSwitchAllowed(ctx, desired.LogicalSwitch, "ensure"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (b *ProviderNetworkBuilder) requireExistingLogicalSwitchAllowed(ctx context.Context, name, op string) error {
+	switches, err := b.ref.client.selectLogicalSwitches(ctx, name)
+	if err != nil {
+		return err
+	}
+	if len(switches) == 0 {
+		return nil
+	}
+	if v2ResourceOwnedBy(switches[0].ExternalIDs, "VirtualNetwork", name) {
+		return nil
+	}
+	if providerNetworkSwitchMarker(switches[0].ExternalIDs, b.spec.Name) {
+		return nil
+	}
+	return wrap(ErrorOwnershipViolation, dbOVNNorthbound, tableLogicalSwitch, op, name, "provider network logical switch is not owned by ovnflow v2", nil)
 }
 
 func (b *ProviderNetworkBuilder) reconcileOVSDB(ctx context.Context) error {
@@ -2016,24 +2313,20 @@ func (b *ProviderNetworkBuilder) reconcileOVSDB(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	switchExternalIDs, err := intentExternalIDs("ProviderNetworkSwitch", desired.Name, desired.Owner, desired.Labels)
+	if err != nil {
+		return err
+	}
+	switchExternalIDs[ExternalIDPrefix+"logical-switch"] = desired.LogicalSwitch
 	externalIDs[ExternalIDPrefix+"physical-network"] = desired.PhysicalNetwork
 	externalIDs[ExternalIDPrefix+"logical-switch"] = desired.LogicalSwitch
 	externalIDs[ExternalIDPrefix+"bridge"] = desired.Bridge
-	if err := b.ref.client.LogicalSwitch(desired.LogicalSwitch).Ensure().
-		AddLocalnetPort(desired.LocalnetPort, desired.PhysicalNetwork).
-		WithExternalID(ExternalIDKindKey, "ProviderNetwork").
-		WithExternalID(ExternalIDNameKey, desired.Name).
-		Execute(ctx); err != nil {
+	vnBuilder := &VirtualNetworkBuilder{ref: &VirtualNetworkRef{client: b.ref.client, name: desired.LogicalSwitch}}
+	if err := vnBuilder.ensureLogicalSwitchIntent(ctx, desired.LogicalSwitch, switchExternalIDs, nil); err != nil {
 		return err
 	}
-	port := b.ref.client.TableLogicalSwitchPort(desired.LocalnetPort).Update().
-		WithType("localnet").
-		MutateSet(colAddresses, "unknown").
-		MutateMap(colOptions, map[string]string{"network_name": desired.PhysicalNetwork})
-	for key, value := range externalIDs {
-		port.WithExternalID(key, value)
-	}
-	if err := port.Execute(ctx); err != nil {
+	portBuilder := &WorkloadAttachmentBuilder{ref: &WorkloadAttachmentRef{client: b.ref.client}, spec: WorkloadAttachment{Name: desired.LocalnetPort}}
+	if err := portBuilder.ensureLogicalSwitchPortIntent(ctx, desired.LogicalSwitch, desired.LocalnetPort, []string{"unknown"}, "localnet", map[string]string{"network_name": desired.PhysicalNetwork}, externalIDs); err != nil {
 		return err
 	}
 	return b.setOwnedBridgeMapping(ctx, desired)
@@ -2112,6 +2405,9 @@ func (b *ProviderNetworkBuilder) current(ctx context.Context) (ProviderNetwork, 
 }
 
 func (b *SecurityPolicyBuilder) reconcileOVSDB(ctx context.Context) error {
+	if err := b.requireExistingPortGroupOwned(ctx, "ensure"); err != nil {
+		return err
+	}
 	externalIDs, err := intentExternalIDs("SecurityPolicy", b.spec.Name, b.spec.Owner, b.spec.Labels)
 	if err != nil {
 		return err
@@ -2119,74 +2415,54 @@ func (b *SecurityPolicyBuilder) reconcileOVSDB(ctx context.Context) error {
 	if b.spec.Subject != "" {
 		externalIDs[ExternalIDPrefix+"subject"] = b.spec.Subject
 	}
-	if b.ref != nil && b.ref.client != nil && b.ref.client.db != nil {
-		if preOps, err := b.replaceSecurityPolicyACLOps(ctx); err != nil {
-			return err
-		} else if len(preOps) > 0 {
-			row := libovsdb.Row{colName: b.spec.Name}
-			nbSetUUIDSet(row, colACLs, nil)
-			setRowMap(row, colExternalIDs, externalIDs)
-			var mutations []libovsdb.Mutation
-			nbAppendMapMutation(&mutations, colExternalIDs, externalIDs)
-			return b.ref.client.executeNamedWithPreOps(ctx, tablePortGroup, b.spec.Name, nbModeEnsure, row, mutations, preOps)
-		}
+	preOps, aclRefs, err := b.securityPolicyACLOps(ctx)
+	if err != nil {
+		return err
 	}
-	pg := b.ref.client.PortGroup(b.spec.Name).Ensure()
-	for key, value := range externalIDs {
-		pg.WithExternalID(key, value)
-	}
-	for i, rule := range b.spec.Rules {
-		pg.WithACL(ruleDirection(rule), rulePriority(rule), ruleMatch(b.spec.Subject, rule), ruleAction(rule))
-		for key, value := range externalIDs {
-			pg.WithACLExternalID(key, value)
-		}
-		pg.WithACLExternalID(ExternalIDPrefix+"rule-index", strconv.Itoa(i))
-		if rule.Name != "" {
-			pg.WithACLExternalID(ExternalIDPrefix+"rule-name", rule.Name)
-		}
-	}
-	return pg.Execute(ctx)
+	return b.ensurePortGroupIntent(ctx, externalIDs, aclRefs, preOps)
 }
 
-func (b *SecurityPolicyBuilder) replaceSecurityPolicyACLOps(ctx context.Context) ([]libovsdb.Operation, error) {
+func (b *SecurityPolicyBuilder) securityPolicyACLOps(ctx context.Context) ([]libovsdb.Operation, []string, error) {
 	current, err := b.ref.client.GetPortGroup(ctx, b.spec.Name)
 	if err != nil {
-		if IsKind(err, ErrorNotFound) {
-			return nil, nil
+		if !IsKind(err, ErrorNotFound) {
+			return nil, nil, err
 		}
-		return nil, err
 	}
-	acls, err := b.ref.client.selectACLsByUUID(ctx, current.ACLs, b.spec.Name)
-	if err != nil {
-		return nil, err
-	}
-	var removeRefs []string
 	var ops []libovsdb.Operation
-	for _, acl := range acls {
-		if acl.ExternalIDs[ExternalIDKindKey] != "SecurityPolicy" || acl.ExternalIDs[ExternalIDNameKey] != b.spec.Name {
-			continue
+	var removeRefs []string
+	if current != nil {
+		acls, err := b.ref.client.selectACLsByUUID(ctx, current.ACLs, b.spec.Name)
+		if err != nil {
+			return nil, nil, err
 		}
-		removeRefs = append(removeRefs, acl.UUID)
-		ops = append(ops, libovsdb.Operation{
-			Op:    libovsdb.OperationDelete,
-			Table: tableACL,
-			Where: conditionUUID(acl.UUID),
-		})
+		for _, acl := range acls {
+			if acl.ExternalIDs[ExternalIDKindKey] != "SecurityPolicy" || acl.ExternalIDs[ExternalIDNameKey] != b.spec.Name {
+				continue
+			}
+			removeRefs = append(removeRefs, acl.UUID)
+			ops = append(ops, libovsdb.Operation{
+				Op:    libovsdb.OperationDelete,
+				Table: tableACL,
+				Where: conditionUUID(acl.UUID),
+			})
+		}
+		if len(removeRefs) > 0 {
+			ops = append([]libovsdb.Operation{{
+				Op:    libovsdb.OperationMutate,
+				Table: tablePortGroup,
+				Where: conditionUUID(current.UUID),
+				Mutations: []libovsdb.Mutation{
+					*libovsdb.NewMutation(colACLs, libovsdb.MutateOperationDelete, uuidSet(removeRefs...)),
+				},
+			}}, ops...)
+		}
 	}
-	if len(removeRefs) > 0 {
-		ops = append([]libovsdb.Operation{{
-			Op:    libovsdb.OperationMutate,
-			Table: tablePortGroup,
-			Where: conditionUUID(current.UUID),
-			Mutations: []libovsdb.Mutation{
-				*libovsdb.NewMutation(colACLs, libovsdb.MutateOperationDelete, uuidSet(removeRefs...)),
-			},
-		}}, ops...)
-	}
+	var aclRefs []string
 	for i, rule := range b.spec.Rules {
 		externalIDs, err := intentExternalIDs("SecurityPolicy", b.spec.Name, b.spec.Owner, b.spec.Labels)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if b.spec.Subject != "" {
 			externalIDs[ExternalIDPrefix+"subject"] = b.spec.Subject
@@ -2196,6 +2472,7 @@ func (b *SecurityPolicyBuilder) replaceSecurityPolicyACLOps(ctx context.Context)
 			externalIDs[ExternalIDPrefix+"rule-name"] = rule.Name
 		}
 		aclUUID := namedUUID("acl")
+		aclRefs = append(aclRefs, aclUUID)
 		ops = append(ops, libovsdb.Operation{
 			Op:       libovsdb.OperationInsert,
 			Table:    tableACL,
@@ -2208,16 +2485,55 @@ func (b *SecurityPolicyBuilder) replaceSecurityPolicyACLOps(ctx context.Context)
 				externalIDs: externalIDs,
 			}),
 		})
+	}
+	if current != nil && len(aclRefs) > 0 {
 		ops = append(ops, libovsdb.Operation{
 			Op:    libovsdb.OperationMutate,
 			Table: tablePortGroup,
 			Where: conditionUUID(current.UUID),
 			Mutations: []libovsdb.Mutation{
-				*libovsdb.NewMutation(colACLs, libovsdb.MutateOperationInsert, uuidSet(aclUUID)),
+				*libovsdb.NewMutation(colACLs, libovsdb.MutateOperationInsert, uuidSet(aclRefs...)),
 			},
 		})
 	}
-	return ops, nil
+	return ops, aclRefs, nil
+}
+
+func (b *SecurityPolicyBuilder) ensurePortGroupIntent(ctx context.Context, externalIDs map[string]string, aclRefs []string, preOps []libovsdb.Operation) error {
+	rows, err := b.ref.client.selectRows(ctx, tablePortGroup, conditionName(b.spec.Name), []string{colUUID}, b.spec.Name)
+	if err != nil {
+		return err
+	}
+	ops := append([]libovsdb.Operation{}, preOps...)
+	if len(rows) == 0 {
+		row := libovsdb.Row{colName: b.spec.Name}
+		setRowMap(row, colExternalIDs, externalIDs)
+		nbSetUUIDSet(row, colACLs, aclRefs)
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationInsert,
+			Table: tablePortGroup,
+			Row:   row,
+		})
+	} else {
+		mutations := []libovsdb.Mutation{}
+		nbAppendMapMutation(&mutations, colExternalIDs, externalIDs)
+		if len(mutations) > 0 {
+			ops = append(ops, libovsdb.Operation{
+				Op:        libovsdb.OperationMutate,
+				Table:     tablePortGroup,
+				Where:     conditionUUID(rowUUIDValue(rows[0])),
+				Mutations: mutations,
+			})
+		}
+	}
+	if len(ops) == 0 {
+		return nil
+	}
+	results, err := b.ref.client.db.transact(ctx, tablePortGroup, "ensure", b.spec.Name, ops...)
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, mustAffectNonInsertOps(ops), dbOVNNorthbound, tablePortGroup, "ensure", b.spec.Name)
 }
 
 func (b *SecurityPolicyBuilder) diff(ctx context.Context) (Diff, error) {
@@ -2345,6 +2661,20 @@ func securityPolicyFromPortGroup(pg *PortGroup) *SecurityPolicy {
 		Owner:   owner,
 		Labels:  labels,
 	}
+}
+
+func (b *SecurityPolicyBuilder) requireExistingPortGroupOwned(ctx context.Context, op string) error {
+	if b == nil || b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
+		return nil
+	}
+	rows, err := b.ref.client.selectRows(ctx, tablePortGroup, conditionName(b.spec.Name), nbPortGroupColumns(), b.spec.Name)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	return requireV2OwnedExternalIDs(rowStringMapValue(rows[0], colExternalIDs), "SecurityPolicy", b.spec.Name, dbOVNNorthbound, tablePortGroup, op, b.spec.Name)
 }
 
 func (n *NBClient) selectACLsByUUID(ctx context.Context, ids []string, object string) ([]ACL, error) {
@@ -2787,6 +3117,15 @@ func intentExternalIDs(kind, name string, owner OwnerRef, labels Labels) (map[st
 
 func providerNetworkLocalnetOwnedBy(externalIDs map[string]string, name string) bool {
 	return externalIDs[ExternalIDManagedByKey] == "ovnflow" && externalIDs[ExternalIDKindKey] == "ProviderNetwork" && externalIDs[ExternalIDNameKey] == name
+}
+
+func providerNetworkSwitchMarker(externalIDs map[string]string, name string) bool {
+	return externalIDs[ExternalIDManagedByKey] == "ovnflow" &&
+		externalIDs[ExternalIDAPIVersionKey] == "v2" &&
+		externalIDs[ExternalIDKindKey] == "ProviderNetworkSwitch" &&
+		externalIDs[ExternalIDNameKey] == name &&
+		externalIDs[ExternalIDOwnerKindKey] != "" &&
+		(externalIDs[ExternalIDOwnerNameKey] != "" || externalIDs[ExternalIDOwnerIDKey] != "")
 }
 
 func requireV2OwnedExternalIDs(externalIDs map[string]string, kind, name, database, table, op, object string) error {

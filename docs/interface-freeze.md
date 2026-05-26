@@ -24,6 +24,7 @@ The root package now exposes intent APIs for:
 - `VirtualNetwork`
 - `LogicalSwitchDNS`
 - `WorkloadAttachment`
+- `ProviderNetwork`
 - `SecurityPolicy`
 - `Plan`, `Diff`, `DryRunResult`, `ReconcileResult`, and `InspectResult`
 
@@ -68,16 +69,17 @@ and destination mapping. Single WAN or LAN inference is allowed only when there
 is exactly one candidate; otherwise planning returns the typed `ambiguous`
 error.
 
-The current privileged smoke gate proves namespace lifecycle, loopback
-configuration, nftables and iptables owned rule installation, and detailed
-runtime status readback under `OVNFLOW_LINUX_ROUTER_CHECKS=1`. Broader
-end-to-end checks are still tracked for later hardening: OVS port movement,
-dnsmasq process management, packet-level NAT translation, and rule cleanup
-reconciliation.
+The release-blocking privileged gate proves namespace lifecycle, loopback
+configuration, dnsmasq process/readback, multi-address DNS records, nftables and
+iptables owned NAT/firewall rule installation, detailed runtime status readback,
+and cleanup boundaries under `OVNFLOW_LINUX_ROUTER_CHECKS=1`. Broader
+end-to-end packet behavior remains v2.x hardening: realistic OVS port movement
+stress tests, DHCP client lease negotiation, packet-level NAT/firewall
+translation, and repeated dnsmasq reload/reconciliation cycles.
 
-## CI gate placeholders
+## CI gates
 
-The first freeze also reserves environment constants for later CI expansion:
+The v2 gates use these environment constants:
 
 - `OVNFLOW_V2_SCHEMA_CHECKS`
 - `OVNFLOW_V2_MUTATION_CHECKS`

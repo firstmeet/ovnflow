@@ -10,6 +10,25 @@ import (
 	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
+func testOwnedLogicalSwitchRowWithUUID(name, uuid string) libovsdb.Row {
+	return libovsdb.Row{
+		colUUID:        uuidValue(uuid),
+		colName:        name,
+		colPorts:       ovsSet(),
+		colExternalIDs: ovsMap(testOwnedExternalIDs("VirtualNetwork", name)),
+	}
+}
+
+func testOwnedDNSRowWithUUID(name, uuid string, records map[string]string) libovsdb.Row {
+	return libovsdb.Row{
+		colUUID:    uuidValue(uuid),
+		colRecords: ovsMap(records),
+		colExternalIDs: ovsMap(mergeStringMaps(testOwnedExternalIDs("LogicalSwitchDNS", name), map[string]string{
+			dnsNameExternalID: name,
+		})),
+	}
+}
+
 func TestOwnerExternalIDsEncodeReservedLabels(t *testing.T) {
 	ids, err := (OwnerRef{Kind: "project", Name: "alpha"}).ExternalIDs(Labels{"team/name": "net"})
 	if err != nil {
@@ -144,11 +163,130 @@ func TestV2IntentApplyRequiresBackend(t *testing.T) {
 	}
 }
 
+func TestVirtualNetworkRejectsForeignExistingLogicalSwitch(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID:        uuidValue("ls-uuid"),
+		colName:        "net-a",
+		colExternalIDs: ovsMap(map[string]string{"owner": "foreign"}),
+	}}}}}
+	db.executor = rec
+
+	_, err := (&NBClient{db: db}).VirtualNetwork("net-a").
+		Ensure().
+		WithCIDR("10.0.0.0/24").
+		WithOwner("project", "alpha").
+		Reconcile(context.Background())
+	if !IsKind(err, ErrorOwnershipViolation) {
+		t.Fatalf("Reconcile error = %v, want ownership violation", err)
+	}
+	assertNoMutationsAfterOwnershipFailure(t, rec.ops, tableLogicalSwitch)
+}
+
+func TestWorkloadAttachmentRejectsForeignNetworkAndPort(t *testing.T) {
+	t.Run("network", func(t *testing.T) {
+		db := testNBDBClient(t)
+		rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+			colUUID:        uuidValue("ls-uuid"),
+			colName:        "net-a",
+			colExternalIDs: ovsMap(map[string]string{"owner": "foreign"}),
+		}}}}}
+		db.executor = rec
+
+		_, err := (&NBClient{db: db}).WorkloadAttachment("att-a").
+			Ensure().
+			OnNetwork("net-a").
+			WithOwner("project", "alpha").
+			Reconcile(context.Background())
+		if !IsKind(err, ErrorOwnershipViolation) {
+			t.Fatalf("Reconcile error = %v, want ownership violation", err)
+		}
+		assertNoMutationsAfterOwnershipFailure(t, rec.ops, tableLogicalSwitchPort)
+	})
+
+	t.Run("port", func(t *testing.T) {
+		db := testNBDBClient(t)
+		rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{testOwnedLogicalSwitchRowWithUUID("net-a", "ls-uuid")}},
+			{Rows: []libovsdb.Row{{
+				colUUID:        uuidValue("lsp-uuid"),
+				colName:        "att-a",
+				colExternalIDs: ovsMap(map[string]string{"owner": "foreign"}),
+			}}},
+		}}
+		db.executor = rec
+
+		_, err := (&NBClient{db: db}).WorkloadAttachment("att-a").
+			Ensure().
+			OnNetwork("net-a").
+			WithOwner("project", "alpha").
+			Reconcile(context.Background())
+		if !IsKind(err, ErrorOwnershipViolation) {
+			t.Fatalf("Reconcile error = %v, want ownership violation", err)
+		}
+		assertNoMutationsAfterOwnershipFailure(t, rec.ops, tableLogicalSwitchPort)
+	})
+}
+
+func TestProviderNetworkRejectsForeignExistingLogicalSwitch(t *testing.T) {
+	nbDB := testNBDBClient(t)
+	nbRec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: nil},
+		{Rows: []libovsdb.Row{{
+			colUUID:        uuidValue("ls-uuid"),
+			colName:        "provider-net",
+			colExternalIDs: ovsMap(map[string]string{"owner": "foreign"}),
+		}}},
+	}}
+	nbDB.executor = nbRec
+	ovsDB := testOVSDBClient(t)
+	ovsDB.executor = &recordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("br-uuid"), colName: "br-ex", colPorts: ovsSet()}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{})}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{})}}},
+	}}
+
+	ref := &ProviderNetworkRef{client: &NBClient{db: nbDB}, ovs: &OVSClient{db: ovsDB}, name: "public"}
+	_, err := ref.Ensure().
+		WithPhysicalNetwork("physnet1").
+		OnLogicalSwitch("provider-net").
+		UseBridge("br-ex").
+		WithOwner("project", "alpha").
+		Reconcile(context.Background())
+	if !IsKind(err, ErrorOwnershipViolation) {
+		t.Fatalf("Reconcile error = %v, want ownership violation", err)
+	}
+	assertNoMutationsAfterOwnershipFailure(t, nbRec.ops, tableLogicalSwitch)
+}
+
+func TestSecurityPolicyRejectsForeignExistingPortGroup(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID:        uuidValue("pg-uuid"),
+		colName:        "allow-web",
+		colExternalIDs: ovsMap(map[string]string{"owner": "foreign"}),
+	}}}}}
+	db.executor = rec
+
+	_, err := (&NBClient{db: db}).SecurityPolicy("allow-web").
+		Ensure().
+		ForSubject("pg-web").
+		WithOwner("project", "alpha").
+		Reconcile(context.Background())
+	if !IsKind(err, ErrorOwnershipViolation) {
+		t.Fatalf("Reconcile error = %v, want ownership violation", err)
+	}
+	assertNoMutationsAfterOwnershipFailure(t, rec.ops, tablePortGroup)
+}
+
 func TestVirtualNetworkReconcileWritesLogicalSwitchAndDNS(t *testing.T) {
 	rec := &nbRecordingExecutor{
 		results: []libovsdb.OperationResult{
 			{Rows: nil},
+			{Rows: nil},
+			{Rows: nil},
 			{Count: 1},
+			{Rows: nil},
 			{Rows: nil},
 			{Count: 1},
 		},
@@ -194,11 +332,22 @@ func TestVirtualNetworkReconcileWritesLogicalSwitchAndDNS(t *testing.T) {
 }
 
 func TestWorkloadAttachmentReconcileWritesLogicalSwitchPort(t *testing.T) {
+	networkRow := libovsdb.Row{
+		colUUID:        uuidValue("ls-uuid"),
+		colName:        "net-a",
+		colPorts:       ovsSet(),
+		colExternalIDs: ovsMap(testOwnedExternalIDs("VirtualNetwork", "net-a")),
+	}
 	rec := &nbRecordingExecutor{
 		results: []libovsdb.OperationResult{
-			{Rows: []libovsdb.Row{{colUUID: uuidValue("ls-uuid"), colPorts: ovsSet()}}},
+			{Rows: []libovsdb.Row{networkRow}},
 			{Rows: nil},
-			{Count: 1},
+			{Rows: nil},
+			{Rows: []libovsdb.Row{networkRow}},
+			{Rows: nil},
+			{Rows: []libovsdb.Row{networkRow}},
+			{Rows: nil},
+			{},
 			{Count: 1},
 		},
 	}
@@ -327,16 +476,14 @@ func TestVirtualNetworkDryRunDiffsExistingState(t *testing.T) {
 
 func TestVirtualNetworkReconcileNoopDoesNotApply(t *testing.T) {
 	db := testNBDBClient(t)
-	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+	row := libovsdb.Row{
 		colUUID:        uuidValue("ls-uuid"),
 		colName:        "net-a",
 		colPorts:       ovsSet(),
 		colOtherConfig: ovsMap(map[string]string{"subnet": "10.0.0.0/24"}),
-		colExternalIDs: ovsMap(map[string]string{
-			ExternalIDOwnerKindKey: "project",
-			ExternalIDOwnerNameKey: "alpha",
-		}),
-	}}}}}
+		colExternalIDs: ovsMap(testOwnedExternalIDs("VirtualNetwork", "net-a")),
+	}
+	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{row}}, {Rows: []libovsdb.Row{row}}}}
 	result, err := (&NBClient{db: db}).VirtualNetwork("net-a").
 		Ensure().
 		WithCIDR("10.0.0.0/24").
@@ -352,37 +499,25 @@ func TestVirtualNetworkReconcileNoopDoesNotApply(t *testing.T) {
 
 func TestVirtualNetworkPatchReadsMutatesAndApplies(t *testing.T) {
 	db := testNBDBClient(t)
-	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+	row := libovsdb.Row{
 		colUUID:        uuidValue("ls-uuid"),
 		colName:        "net-a",
 		colPorts:       ovsSet(),
 		colOtherConfig: ovsMap(map[string]string{"subnet": "10.0.0.0/24"}),
-		colExternalIDs: ovsMap(map[string]string{
-			ExternalIDOwnerKindKey:    "project",
-			ExternalIDOwnerNameKey:    "alpha",
-			ExternalIDLabelKey("env"): "dev",
-		}),
-	}}}, {Rows: []libovsdb.Row{{
-		colUUID:        uuidValue("ls-uuid"),
-		colName:        "net-a",
-		colPorts:       ovsSet(),
-		colOtherConfig: ovsMap(map[string]string{"subnet": "10.0.0.0/24"}),
-		colExternalIDs: ovsMap(map[string]string{
-			ExternalIDOwnerKindKey:    "project",
-			ExternalIDOwnerNameKey:    "alpha",
-			ExternalIDLabelKey("env"): "dev",
-		}),
-	}}}, {Rows: []libovsdb.Row{{
-		colUUID:        uuidValue("ls-uuid"),
-		colName:        "net-a",
-		colPorts:       ovsSet(),
-		colOtherConfig: ovsMap(map[string]string{"subnet": "10.0.0.0/24"}),
-		colExternalIDs: ovsMap(map[string]string{
-			ExternalIDOwnerKindKey:    "project",
-			ExternalIDOwnerNameKey:    "alpha",
-			ExternalIDLabelKey("env"): "dev",
-		}),
-	}}}, {Count: 1}}}
+		colExternalIDs: ovsMap(mergeStringMaps(testOwnedExternalIDs("VirtualNetwork", "net-a"), map[string]string{ExternalIDLabelKey("env"): "dev"})),
+	}
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{row}},
+		{Rows: []libovsdb.Row{row}},
+		{Rows: []libovsdb.Row{row}},
+		{Rows: []libovsdb.Row{row}},
+		{Rows: []libovsdb.Row{row}},
+		{Count: 1},
+		{Rows: []libovsdb.Row{row}},
+		{Count: 1},
+		{Rows: []libovsdb.Row{row}},
+		{Count: 1},
+	}}
 	db.executor = rec
 	gateway := "10.0.1.1"
 	got, err := (&NBClient{db: db}).VirtualNetwork("net-a").Patch(context.Background(), VirtualNetworkPatch{
@@ -427,42 +562,20 @@ func TestLogicalSwitchDNSGetRestoresMultipleIPs(t *testing.T) {
 
 func TestLogicalSwitchDNSPatchAddsAndRemovesRecords(t *testing.T) {
 	db := testNBDBClient(t)
-	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
-		colUUID: uuidValue("dns-uuid"),
-		colRecords: ovsMap(map[string]string{
-			"api.service": "10.0.0.2",
-			"old.service": "10.0.0.9",
-		}),
-		colExternalIDs: ovsMap(map[string]string{
-			dnsNameExternalID:      "net-a-dns",
-			ExternalIDOwnerKindKey: "project",
-			ExternalIDOwnerNameKey: "alpha",
-		}),
-	}}}, {Rows: []libovsdb.Row{{
-		colUUID: uuidValue("dns-uuid"),
-		colRecords: ovsMap(map[string]string{
-			"api.service": "10.0.0.2",
-			"old.service": "10.0.0.9",
-		}),
-		colExternalIDs: ovsMap(map[string]string{
-			dnsNameExternalID:      "net-a-dns",
-			ExternalIDOwnerKindKey: "project",
-			ExternalIDOwnerNameKey: "alpha",
-		}),
-	}}}, {Rows: []libovsdb.Row{{
-		colUUID: uuidValue("dns-uuid"),
-		colRecords: ovsMap(map[string]string{
-			"api.service": "10.0.0.2",
-			"old.service": "10.0.0.9",
-		}),
-		colExternalIDs: ovsMap(map[string]string{
-			dnsNameExternalID:      "net-a-dns",
-			ExternalIDOwnerKindKey: "project",
-			ExternalIDOwnerNameKey: "alpha",
-		}),
-	}}}, {Count: 1}, {Rows: []libovsdb.Row{{
-		colUUID: uuidValue("dns-uuid"),
-	}}}, {Count: 1}}}
+	row := testOwnedDNSRowWithUUID("net-a-dns", "dns-uuid", map[string]string{
+		"api.service": "10.0.0.2",
+		"old.service": "10.0.0.9",
+	})
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{row}},
+		{Rows: []libovsdb.Row{row}},
+		{Rows: []libovsdb.Row{row}},
+		{Rows: []libovsdb.Row{row}},
+		{Rows: []libovsdb.Row{row}},
+		{Count: 1},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("dns-uuid")}}},
+		{Count: 1},
+	}}
 	db.executor = rec
 	got, err := (&NBClient{db: db}).LogicalSwitchDNS("net-a-dns").Patch(context.Background(), LogicalSwitchDNSPatch{
 		AddRecords:    []DNSRecord{{Domain: "api.service", IPs: []string{"10.0.0.3"}}, {Domain: "db.service", IPs: []string{"10.0.0.4"}}},
@@ -509,41 +622,29 @@ func TestWorkloadAttachmentGetReadsLogicalSwitchPort(t *testing.T) {
 
 func TestWorkloadAttachmentPatchUpdatesIPsAndMetadata(t *testing.T) {
 	db := testNBDBClient(t)
-	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+	lsp := libovsdb.Row{
 		colUUID:      uuidValue("lsp-uuid"),
 		colName:      "att-a",
 		colAddresses: stringSet([]string{"00:16:3e:11:22:33 10.0.0.10"}),
-		colExternalIDs: ovsMap(map[string]string{
-			ExternalIDOwnerKindKey:        "project",
-			ExternalIDOwnerNameKey:        "alpha",
+		colExternalIDs: ovsMap(mergeStringMaps(testOwnedExternalIDs("WorkloadAttachment", "att-a"), map[string]string{
 			ExternalIDPrefix + "network":  "net-a",
 			ExternalIDPrefix + "workload": "vm-a",
-		}),
-	}}}, {Rows: []libovsdb.Row{{
-		colUUID:      uuidValue("lsp-uuid"),
-		colName:      "att-a",
-		colAddresses: stringSet([]string{"00:16:3e:11:22:33 10.0.0.10"}),
-		colExternalIDs: ovsMap(map[string]string{
-			ExternalIDOwnerKindKey:        "project",
-			ExternalIDOwnerNameKey:        "alpha",
-			ExternalIDPrefix + "network":  "net-a",
-			ExternalIDPrefix + "workload": "vm-a",
-		}),
-	}}}, {Rows: []libovsdb.Row{{
-		colUUID:  uuidValue("ls-uuid"),
-		colName:  "net-a",
-		colPorts: ovsSet(),
-	}}}, {Rows: []libovsdb.Row{{
-		colUUID:      uuidValue("lsp-uuid"),
-		colName:      "att-a",
-		colAddresses: stringSet([]string{"00:16:3e:11:22:33 10.0.0.10"}),
-		colExternalIDs: ovsMap(map[string]string{
-			ExternalIDOwnerKindKey:        "project",
-			ExternalIDOwnerNameKey:        "alpha",
-			ExternalIDPrefix + "network":  "net-a",
-			ExternalIDPrefix + "workload": "vm-a",
-		}),
-	}}}, {Count: 1}}}
+		})),
+	}
+	network := testOwnedLogicalSwitchRowWithUUID("net-a", "ls-uuid")
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{lsp}},
+		{Rows: []libovsdb.Row{network}},
+		{Rows: []libovsdb.Row{lsp}},
+		{Rows: []libovsdb.Row{lsp}},
+		{Rows: []libovsdb.Row{network}},
+		{Rows: []libovsdb.Row{lsp}},
+		{Rows: []libovsdb.Row{network}},
+		{Rows: []libovsdb.Row{lsp}},
+		{Count: 1},
+		{Count: 1},
+		{Count: 1},
+	}}
 	db.executor = rec
 	iface := "eth1"
 	got, err := (&NBClient{db: db}).WorkloadAttachment("att-a").Patch(context.Background(), WorkloadAttachmentPatch{
@@ -564,11 +665,16 @@ func TestWorkloadAttachmentPatchUpdatesIPsAndMetadata(t *testing.T) {
 
 func TestWorkloadAttachmentSyncLocalOVSWritesPortInterfaceMetadata(t *testing.T) {
 	nbDB := testNBDBClient(t)
+	network := testOwnedLogicalSwitchRowWithUUID("net-a", "ls-uuid")
 	nbRec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{network}},
 		{Rows: nil},
-		{Rows: []libovsdb.Row{{colUUID: uuidValue("ls-uuid"), colPorts: ovsSet()}}},
 		{Rows: nil},
-		{Count: 1},
+		{Rows: []libovsdb.Row{network}},
+		{Rows: nil},
+		{Rows: []libovsdb.Row{network}},
+		{Rows: nil},
+		{},
 		{Count: 1},
 	}}
 	nbDB.executor = nbRec
@@ -824,6 +930,32 @@ func TestWorkloadAttachmentDetachRejectsUnownedInterface(t *testing.T) {
 	}
 }
 
+func TestWorkloadAttachmentDetachRejectsWeakLegacyOwnershipMarker(t *testing.T) {
+	legacyIDs := map[string]string{
+		ExternalIDManagedByKey: "ovnflow",
+		ExternalIDKindKey:      "WorkloadAttachment",
+		ExternalIDNameKey:      "att-a",
+	}
+	ovsDB := testOVSDBClient(t)
+	ovsRec := &recordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{{
+			colUUID:        uuidValue("port-uuid"),
+			colName:        "vnet0",
+			colInterfaces:  []string{"iface-uuid"},
+			colExternalIDs: ovsMap(legacyIDs),
+		}}},
+	}}
+	ovsDB.executor = ovsRec
+
+	err := (&WorkloadAttachmentRef{ovs: &OVSClient{db: ovsDB}, name: "att-a"}).DetachLocalOVS(context.Background())
+	if !IsKind(err, ErrorNotFound) {
+		t.Fatalf("DetachLocalOVS error = %v, want not found because legacy marker is ignored", err)
+	}
+	if op := findRecordedOp(ovsRec.ops, libovsdb.OperationDelete, tablePort); op != nil {
+		t.Fatalf("should not delete weak legacy-owned port: %#v", op)
+	}
+}
+
 func TestLogicalSwitchAddLocalnetPortWritesTypeOptionsAndUnknownAddress(t *testing.T) {
 	db := testNBDBClient(t)
 	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
@@ -885,11 +1017,12 @@ func TestProviderNetworkReconcileWritesLocalnetAndBridgeMapping(t *testing.T) {
 	nbRec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
 		{Rows: nil},
 		{Rows: nil},
-		{Rows: []libovsdb.Row{{colUUID: uuidValue("ls-uuid"), colPorts: ovsSet()}}},
 		{Rows: nil},
-		{Count: 1},
-		{Count: 1},
-		{Count: 1},
+		{Rows: nil},
+		{},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ls-uuid"), colName: "provider-net", colPorts: ovsSet(), colExternalIDs: ovsMap(mergeStringMaps(testOwnedExternalIDs("ProviderNetworkSwitch", "public"), map[string]string{ExternalIDPrefix + "logical-switch": "provider-net"}))}}},
+		{Rows: nil},
+		{},
 		{Count: 1},
 	}}
 	nbDB.executor = nbRec
@@ -926,20 +1059,15 @@ func TestProviderNetworkReconcileWritesLocalnetAndBridgeMapping(t *testing.T) {
 	if lspOp.Row[colType] != "localnet" {
 		t.Fatalf("localnet row = %#v", lspOp.Row)
 	}
-	if lsOp := findRecordedOp(nbRec.ops, libovsdb.OperationMutate, tableLogicalSwitch); lsOp != nil {
-		for _, mutation := range lsOp.Mutations {
-			if mutation.Column != colExternalIDs || mutation.Mutator != libovsdb.MutateOperationInsert {
-				continue
-			}
-			values := ovsMapStrings(t, mutation.Value)
-			if values[ExternalIDManagedByKey] == "ovnflow" {
-				t.Fatalf("provider logical switch must not be marked SDK-owned: %#v", lsOp)
-			}
-		}
+	if !recordedLogicalSwitchHasProviderMarker(t, nbRec.ops, "public") {
+		t.Fatalf("provider logical switch missing provider switch marker: %#v", nbRec.ops)
 	}
-	updateOp := findRecordedOp(nbRec.ops, libovsdb.OperationMutate, tableLogicalSwitchPort)
-	if updateOp == nil || !hasMutation(updateOp.Mutations, colExternalIDs, libovsdb.MutateOperationInsert) {
-		t.Fatalf("missing provider localnet metadata mutate: %#v", nbRec.ops)
+	localnetIDs := ovsMapStrings(t, lspOp.Row[colExternalIDs])
+	if localnetIDs[ExternalIDKindKey] != "ProviderNetwork" ||
+		localnetIDs[ExternalIDNameKey] != "public" ||
+		localnetIDs[ExternalIDPrefix+"physical-network"] != "physnet1" ||
+		localnetIDs[ExternalIDPrefix+"bridge"] != "br-ex" {
+		t.Fatalf("provider localnet external_ids = %#v", localnetIDs)
 	}
 	var mappingValue string
 	for _, op := range ovsRec.ops {
@@ -1016,7 +1144,6 @@ func TestProviderNetworkDeleteRemovesOwnedMappingAndLocalnetOnly(t *testing.T) {
 				ExternalIDPrefix + "physical-network": "physnet1",
 			})),
 		}}},
-		{Rows: []libovsdb.Row{{colUUID: uuidValue("lsp-uuid")}}},
 		{Count: 1},
 	}}
 	nbDB.executor = nbRec
@@ -1034,6 +1161,8 @@ func TestProviderNetworkDeleteRemovesOwnedMappingAndLocalnetOnly(t *testing.T) {
 	}
 	if op := findRecordedOp(nbRec.ops, libovsdb.OperationDelete, tableLogicalSwitchPort); op == nil {
 		t.Fatalf("missing localnet port delete: %#v", nbRec.ops)
+	} else if len(op.Where) != 1 || op.Where[0].Value != uuidValue("lsp-uuid") {
+		t.Fatalf("localnet delete must target verified UUID: %#v", op)
 	}
 	var formatted string
 	for _, op := range ovsRec.ops {
@@ -1151,36 +1280,23 @@ func TestSecurityPolicyGetReadsPortGroupMetadata(t *testing.T) {
 
 func TestSecurityPolicyPatchAddsAndRemovesRules(t *testing.T) {
 	db := testNBDBClient(t)
-	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+	pg := libovsdb.Row{
 		colUUID: uuidValue("pg-uuid"),
 		colName: "allow-web",
 		colACLs: ovsSet(),
-		colExternalIDs: ovsMap(map[string]string{
-			ExternalIDOwnerKindKey:       "project",
-			ExternalIDOwnerNameKey:       "alpha",
+		colExternalIDs: ovsMap(mergeStringMaps(testOwnedExternalIDs("SecurityPolicy", "allow-web"), map[string]string{
 			ExternalIDPrefix + "subject": "pg-web",
-		}),
-	}}}, {Rows: []libovsdb.Row{{
-		colUUID: uuidValue("pg-uuid"),
-		colName: "allow-web",
-		colACLs: ovsSet(),
-		colExternalIDs: ovsMap(map[string]string{
-			ExternalIDOwnerKindKey:       "project",
-			ExternalIDOwnerNameKey:       "alpha",
-			ExternalIDPrefix + "subject": "pg-web",
-		}),
-	}}}, {Rows: []libovsdb.Row{{
-		colUUID: uuidValue("pg-uuid"),
-		colName: "allow-web",
-		colACLs: ovsSet(),
-		colExternalIDs: ovsMap(map[string]string{
-			ExternalIDOwnerKindKey:       "project",
-			ExternalIDOwnerNameKey:       "alpha",
-			ExternalIDPrefix + "subject": "pg-web",
-		}),
-	}}}, {Rows: []libovsdb.Row{{
-		colUUID: uuidValue("pg-uuid"),
-	}}}, {Count: 1}, {Count: 1}}}
+		})),
+	}
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{pg}},
+		{Rows: []libovsdb.Row{pg}},
+		{Rows: []libovsdb.Row{pg}},
+		{Rows: []libovsdb.Row{pg}},
+		{Rows: []libovsdb.Row{pg}},
+		{Count: 1},
+		{Count: 1},
+	}}
 	db.executor = rec
 	got, err := (&NBClient{db: db}).SecurityPolicy("allow-web").Patch(context.Background(), SecurityPolicyPatch{
 		AddRules: []SecurityRule{{Name: "ssh", Action: "allow", Protocol: "tcp", CIDRs: []string{"10.0.0.0/24"}, Ports: []int{22}}},
@@ -1263,6 +1379,30 @@ func TestLogicalSwitchDNSDeleteRequiresV2Ownership(t *testing.T) {
 	}
 }
 
+func TestLogicalSwitchDNSDeleteOnlyDeletesVerifiedUUID(t *testing.T) {
+	owned := testOwnedDNSRowWithUUID("dns-a", "dns-owned", map[string]string{"api.service": "10.0.0.2"})
+	other := testOwnedDNSRowWithUUID("dns-a", "dns-other", map[string]string{"api.service": "10.0.0.3"})
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{owned, other}},
+		{Count: 1},
+	}}
+	db := testNBDBClient(t)
+	db.executor = rec
+
+	if err := (&NBClient{db: db}).LogicalSwitchDNS("dns-a").Delete(context.Background()); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	var deletes []libovsdb.Operation
+	for _, op := range rec.ops {
+		if op.Op == libovsdb.OperationDelete && op.Table == tableDNS {
+			deletes = append(deletes, op)
+		}
+	}
+	if len(deletes) != 1 || len(deletes[0].Where) != 1 || deletes[0].Where[0].Value != uuidValue("dns-owned") {
+		t.Fatalf("DNS delete ops = %#v, want only verified uuid", deletes)
+	}
+}
+
 func TestWorkloadAttachmentDeleteRemovesOwnedLogicalSwitchPort(t *testing.T) {
 	ownedRow := libovsdb.Row{
 		colUUID: uuidValue("lsp-uuid"),
@@ -1278,7 +1418,6 @@ func TestWorkloadAttachmentDeleteRemovesOwnedLogicalSwitchPort(t *testing.T) {
 	}
 	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
 		{Rows: []libovsdb.Row{ownedRow}},
-		{Rows: []libovsdb.Row{ownedRow}},
 		{Count: 1},
 	}}
 	db := testNBDBClient(t)
@@ -1288,6 +1427,8 @@ func TestWorkloadAttachmentDeleteRemovesOwnedLogicalSwitchPort(t *testing.T) {
 	}
 	if op := findRecordedOp(rec.ops, libovsdb.OperationDelete, tableLogicalSwitchPort); op == nil {
 		t.Fatalf("missing Logical_Switch_Port delete: %#v", rec.ops)
+	} else if len(op.Where) != 1 || op.Where[0].Value != uuidValue("lsp-uuid") {
+		t.Fatalf("attachment delete must target verified UUID: %#v", op)
 	}
 }
 
@@ -1364,6 +1505,52 @@ func ovsMapStrings(t *testing.T, value any) map[string]string {
 	default:
 		t.Fatalf("value %T is not ovs map: %#v", value, value)
 		return nil
+	}
+}
+
+func recordedLogicalSwitchHasProviderMarker(t *testing.T, ops []libovsdb.Operation, name string) bool {
+	t.Helper()
+	for _, op := range ops {
+		if op.Table != tableLogicalSwitch {
+			continue
+		}
+		if op.Op == libovsdb.OperationInsert {
+			if providerMarkerMapMatches(rowStringMapValue(op.Row, colExternalIDs), name) {
+				return true
+			}
+		}
+		if op.Op != libovsdb.OperationMutate {
+			continue
+		}
+		for _, mutation := range op.Mutations {
+			if mutation.Column != colExternalIDs || mutation.Mutator != libovsdb.MutateOperationInsert {
+				continue
+			}
+			if providerMarkerMapMatches(ovsMapStrings(t, mutation.Value), name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func providerMarkerMapMatches(values map[string]string, name string) bool {
+	return values[ExternalIDKindKey] == "ProviderNetworkSwitch" &&
+		values[ExternalIDNameKey] == name &&
+		values[ExternalIDManagedByKey] == "ovnflow" &&
+		values[ExternalIDAPIVersionKey] == "v2"
+}
+
+func assertNoMutationsAfterOwnershipFailure(t *testing.T, ops []libovsdb.Operation, table string) {
+	t.Helper()
+	for _, op := range ops {
+		if op.Table != table {
+			continue
+		}
+		switch op.Op {
+		case libovsdb.OperationInsert, libovsdb.OperationUpdate, libovsdb.OperationMutate, libovsdb.OperationDelete:
+			t.Fatalf("unexpected mutating op after ownership failure: %#v; all ops=%#v", op, ops)
+		}
 	}
 }
 

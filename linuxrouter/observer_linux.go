@@ -23,7 +23,7 @@ type LinuxObserver struct {
 	NATBackend string
 }
 
-var ownedCommentPattern = regexp.MustCompile(`ovnflow:([A-Za-z0-9._/@:+-]+)`)
+var scopedOwnedCommentPattern = regexp.MustCompile(`ovnflow:([A-Za-z0-9_]+):([A-Za-z0-9._/@:+-]+)`)
 
 func (o LinuxObserver) Observe(ctx context.Context, router Router) (Status, error) {
 	ns := router.Spec.namespaceOrDefault(router.Name)
@@ -55,7 +55,7 @@ func (o LinuxObserver) Observe(ctx context.Context, router Router) (Status, erro
 	}
 	status.DNSMasq = dnsmasq
 
-	backend, installedNAT, installedFirewall, err := o.observeOwnedRules(ctx, ns)
+	backend, installedNAT, installedFirewall, err := o.observeOwnedRules(ctx, ns, routerRuleScope(router.Name, ns))
 	if err != nil {
 		return status, err
 	}
@@ -122,20 +122,20 @@ func observeDNSMasq(spec DNSMasq, ns string) (DNSMasqStatus, error) {
 	return DNSMasqStatus{Running: true, PID: pid}, nil
 }
 
-func (o LinuxObserver) observeOwnedRules(ctx context.Context, ns string) (string, []string, []string, error) {
+func (o LinuxObserver) observeOwnedRules(ctx context.Context, ns, scope string) (string, []string, []string, error) {
 	backend := normalizedNATBackend(o.NATBackend)
 	if backend == ovnflow.NATBackendIPTables {
-		nat, firewall, err := observeIPTablesRules(ctx, ns)
+		nat, firewall, err := observeIPTablesRules(ctx, ns, scope)
 		return ovnflow.NATBackendIPTables, nat, firewall, err
 	}
-	nftNAT, nftFirewall, nftErr := observeNFTRules(ctx, ns)
+	nftNAT, nftFirewall, nftErr := observeNFTRules(ctx, ns, scope)
 	if backend == ovnflow.NATBackendNFTables {
 		return ovnflow.NATBackendNFTables, nftNAT, nftFirewall, nftErr
 	}
 	if nftErr == nil && (len(nftNAT) > 0 || len(nftFirewall) > 0) {
 		return ovnflow.NATBackendNFTables, nftNAT, nftFirewall, nil
 	}
-	iptNAT, iptFirewall, iptErr := observeIPTablesRules(ctx, ns)
+	iptNAT, iptFirewall, iptErr := observeIPTablesRules(ctx, ns, scope)
 	if iptErr == nil && (len(iptNAT) > 0 || len(iptFirewall) > 0) {
 		return ovnflow.NATBackendIPTables, iptNAT, iptFirewall, nil
 	}
@@ -148,19 +148,19 @@ func (o LinuxObserver) observeOwnedRules(ctx context.Context, ns string) (string
 	return ovnflow.NATBackendAuto, nil, nil, nftErr
 }
 
-func observeNFTRules(ctx context.Context, ns string) ([]string, []string, error) {
-	natOut, natErr := commandOutput(ctx, "ip", "netns", "exec", ns, "nft", "-j", "list", "table", "ip", "ovnflow_nat")
+func observeNFTRules(ctx context.Context, ns, scope string) ([]string, []string, error) {
+	natOut, natErr := commandOutput(ctx, "ip", "netns", "exec", ns, "nft", "-j", "list", "table", "ip", nftNATTable(scope))
 	if natErr != nil && !commandMissingTable(natErr) {
 		return nil, nil, natErr
 	}
-	firewallOut, firewallErr := commandOutput(ctx, "ip", "netns", "exec", ns, "nft", "-j", "list", "table", "inet", "ovnflow_filter")
+	firewallOut, firewallErr := commandOutput(ctx, "ip", "netns", "exec", ns, "nft", "-j", "list", "table", "inet", nftFilterTable(scope))
 	if firewallErr != nil && !commandMissingTable(firewallErr) {
 		return nil, nil, firewallErr
 	}
-	return parseOwnedComments(natOut), parseOwnedComments(firewallOut), nil
+	return parseScopedOwnedComments(natOut, scope), parseScopedOwnedComments(firewallOut, scope), nil
 }
 
-func observeIPTablesRules(ctx context.Context, ns string) ([]string, []string, error) {
+func observeIPTablesRules(ctx context.Context, ns, scope string) ([]string, []string, error) {
 	natOut, natErr := commandOutput(ctx, "ip", "netns", "exec", ns, "iptables-save", "-t", "nat")
 	if natErr != nil && !commandMissingTable(natErr) {
 		return nil, nil, natErr
@@ -169,7 +169,7 @@ func observeIPTablesRules(ctx context.Context, ns string) ([]string, []string, e
 	if firewallErr != nil && !commandMissingTable(firewallErr) {
 		return nil, nil, firewallErr
 	}
-	return parseIPTablesTableComments(natOut, "nat"), parseIPTablesTableComments(firewallOut, "filter"), nil
+	return parseIPTablesTableComments(natOut, "nat", scope), parseIPTablesTableComments(firewallOut, "filter", scope), nil
 }
 
 func parseIPAddrJSON(data []byte, roles map[string]InterfaceRole) ([]InterfaceStatus, error) {
@@ -224,21 +224,22 @@ func parseIPRouteJSON(data []byte) ([]RouteStatus, error) {
 	return routes, nil
 }
 
-func parseOwnedComments(data []byte) []string {
+func parseScopedOwnedComments(data []byte, scope string) []string {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil
 	}
-	matches := ownedCommentPattern.FindAllStringSubmatch(string(data), -1)
+	scope = strings.TrimSpace(scope)
+	matches := scopedOwnedCommentPattern.FindAllStringSubmatch(string(data), -1)
 	var names []string
 	for _, match := range matches {
-		if len(match) == 2 {
-			names = append(names, match[1])
+		if len(match) == 3 && match[1] == scope {
+			names = append(names, match[2])
 		}
 	}
 	return uniqueSortedStrings(names)
 }
 
-func parseIPTablesTableComments(data []byte, table string) []string {
+func parseIPTablesTableComments(data []byte, table, scope string) []string {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil
 	}
@@ -258,7 +259,7 @@ func parseIPTablesTableComments(data []byte, table string) []string {
 		if !inTable {
 			continue
 		}
-		names = append(names, parseOwnedComments([]byte(line))...)
+		names = append(names, parseScopedOwnedComments([]byte(line), scope)...)
 	}
 	return uniqueSortedStrings(names)
 }

@@ -2,7 +2,7 @@
 
 All notable changes to `ovnflow` are tracked here.
 
-## v2.0.0 - pending release
+## v2.0.0 - 2026-05-27
 
 ### Added
 
