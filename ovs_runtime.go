@@ -2,9 +2,13 @@ package ovnflow
 
 import (
 	"context"
+	"sort"
+	"strings"
 
 	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
+
+const ovsBridgeMappingsKey = "ovn-bridge-mappings"
 
 // Table exposes the full runtime Open_vSwitch schema through the fluent API.
 func (o *OVSClient) Table(table string) *TableRef {
@@ -87,6 +91,168 @@ func (o *OVSClient) GetBridge(ctx context.Context, name string) (*OVSBridge, err
 		return nil, wrap(ErrorNotFound, dbOpenVSwitch, tableBridge, "get", name, "bridge not found", nil)
 	}
 	return &rows[0], nil
+}
+
+func (o *OVSClient) GetOpenVSwitch(ctx context.Context) (*OpenVSwitch, error) {
+	if o == nil || o.db == nil {
+		return nil, ErrBackendUnavailable
+	}
+	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+		Op:      libovsdb.OperationSelect,
+		Table:   tableOpenVSwitch,
+		Where:   []libovsdb.Condition{},
+		Columns: o.db.schema.existingColumns(tableOpenVSwitch, colUUID, colBridges, colManagerOptions, colSSL, colExternalIDs, colOtherConfig),
+	})
+	if err != nil {
+		return nil, classifyTransactError(err, dbOpenVSwitch, tableOpenVSwitch, "get", "")
+	}
+	if err := checkOperationResults(results, dbOpenVSwitch, tableOpenVSwitch, "get", ""); err != nil {
+		return nil, err
+	}
+	if len(results) == 0 || len(results[0].Rows) == 0 {
+		return nil, wrap(ErrorNotFound, dbOpenVSwitch, tableOpenVSwitch, "get", "", "Open_vSwitch root row not found", nil)
+	}
+	row := results[0].Rows[0]
+	return &OpenVSwitch{
+		UUID:        rowUUIDValue(row),
+		Bridges:     rowUUIDSliceValue(row, colBridges),
+		Managers:    rowUUIDSliceValue(row, colManagerOptions),
+		SSL:         rowOptionalUUIDValue(row, colSSL),
+		ExternalIDs: rowStringMapValue(row, colExternalIDs),
+		OtherConfig: rowStringMapValue(row, colOtherConfig),
+	}, nil
+}
+
+func (o *OVSClient) GetBridgeMappings(ctx context.Context) (map[string]string, error) {
+	root, err := o.GetOpenVSwitch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ParseBridgeMappings(root.ExternalIDs[ovsBridgeMappingsKey])
+}
+
+func (o *OVSClient) EnsureBridgeMapping(ctx context.Context, physicalNetwork, bridge string) error {
+	if err := validateBridgeMappingPair(physicalNetwork, bridge); err != nil {
+		return err
+	}
+	root, err := o.GetOpenVSwitch(ctx)
+	if err != nil {
+		return err
+	}
+	mappings, err := ParseBridgeMappings(root.ExternalIDs[ovsBridgeMappingsKey])
+	if err != nil {
+		return err
+	}
+	if current := mappings[physicalNetwork]; current != "" && current != bridge {
+		return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tableOpenVSwitch, "ensure", physicalNetwork, "bridge mapping already points at another bridge", nil)
+	}
+	mappings[physicalNetwork] = bridge
+	return o.replaceBridgeMappings(ctx, root.UUID, mappings)
+}
+
+func (o *OVSClient) DeleteBridgeMapping(ctx context.Context, physicalNetwork, bridge string) error {
+	if err := validateName("physical network", physicalNetwork); err != nil {
+		return err
+	}
+	root, err := o.GetOpenVSwitch(ctx)
+	if err != nil {
+		return err
+	}
+	mappings, err := ParseBridgeMappings(root.ExternalIDs[ovsBridgeMappingsKey])
+	if err != nil {
+		return err
+	}
+	current := mappings[physicalNetwork]
+	if current == "" {
+		return wrap(ErrorNotFound, dbOpenVSwitch, tableOpenVSwitch, "delete", physicalNetwork, "bridge mapping not found", nil)
+	}
+	if bridge != "" && current != bridge {
+		return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tableOpenVSwitch, "delete", physicalNetwork, "bridge mapping points at another bridge", nil)
+	}
+	delete(mappings, physicalNetwork)
+	return o.replaceBridgeMappings(ctx, root.UUID, mappings)
+}
+
+func (o *OVSClient) replaceBridgeMappings(ctx context.Context, rootUUID string, mappings map[string]string) error {
+	if rootUUID == "" {
+		return wrap(ErrorConflict, dbOpenVSwitch, tableOpenVSwitch, "update", "", "Open_vSwitch root UUID missing", nil)
+	}
+	formatted := FormatBridgeMappings(mappings)
+	var mutations []libovsdb.Mutation
+	mutations = append(mutations, *libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationDelete, ovsMapKeys([]string{ovsBridgeMappingsKey})))
+	if formatted != "" {
+		mutations = append(mutations, *libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationInsert, ovsMap(map[string]string{ovsBridgeMappingsKey: formatted})))
+	}
+	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+		Op:        libovsdb.OperationMutate,
+		Table:     tableOpenVSwitch,
+		Where:     conditionUUID(rootUUID),
+		Mutations: mutations,
+	})
+	if err != nil {
+		return classifyTransactError(err, dbOpenVSwitch, tableOpenVSwitch, "update", rootUUID)
+	}
+	return ensureAffected(results, []int{0}, dbOpenVSwitch, tableOpenVSwitch, "update", rootUUID)
+}
+
+func ParseBridgeMappings(raw string) (map[string]string, error) {
+	out := map[string]string{}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return out, nil
+	}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		fields := strings.Split(part, ":")
+		if len(fields) != 2 || strings.TrimSpace(fields[0]) == "" || strings.TrimSpace(fields[1]) == "" {
+			return nil, wrap(ErrorConflict, dbOpenVSwitch, tableOpenVSwitch, "parse", ovsBridgeMappingsKey, "invalid ovn bridge mapping", nil)
+		}
+		physicalNetwork := strings.TrimSpace(fields[0])
+		bridge := strings.TrimSpace(fields[1])
+		if _, exists := out[physicalNetwork]; exists {
+			return nil, wrap(ErrorConflict, dbOpenVSwitch, tableOpenVSwitch, "parse", ovsBridgeMappingsKey, "duplicate physical network bridge mapping", nil)
+		}
+		if err := validateBridgeMappingPair(physicalNetwork, bridge); err != nil {
+			return nil, err
+		}
+		out[physicalNetwork] = bridge
+	}
+	return out, nil
+}
+
+func FormatBridgeMappings(mappings map[string]string) string {
+	if len(mappings) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(mappings))
+	for key, value := range mappings {
+		if key == "" || value == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+":"+mappings[key])
+	}
+	return strings.Join(parts, ",")
+}
+
+func validateBridgeMappingPair(physicalNetwork, bridge string) error {
+	if err := validateName("physical network", physicalNetwork); err != nil {
+		return err
+	}
+	if err := validateName("bridge", bridge); err != nil {
+		return err
+	}
+	if strings.ContainsAny(physicalNetwork, ",:") || strings.ContainsAny(bridge, ",:") {
+		return wrap(ErrorValidation, dbOpenVSwitch, tableOpenVSwitch, "validate", physicalNetwork, "bridge mapping values must not contain comma or colon", nil)
+	}
+	return nil
 }
 
 func (o *OVSClient) ListBridges(ctx context.Context) ([]OVSBridge, error) {

@@ -790,6 +790,223 @@ func TestWorkloadAttachmentDetachLocalOVSFindsOwnedCustomPort(t *testing.T) {
 	}
 }
 
+func TestLogicalSwitchAddLocalnetPortWritesTypeOptionsAndUnknownAddress(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: nil},
+		{Rows: nil},
+		{Count: 1},
+	}}
+	db.executor = rec
+
+	if err := (&NBClient{db: db}).LogicalSwitch("provider-net").
+		Ensure().
+		AddLocalnetPort("ln-provider", "physnet1").
+		Execute(context.Background()); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	lspOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableLogicalSwitchPort)
+	if lspOp == nil {
+		t.Fatalf("missing Logical_Switch_Port insert: %#v", rec.ops)
+	}
+	if lspOp.Row[colType] != "localnet" {
+		t.Fatalf("localnet port row = %#v", lspOp.Row)
+	}
+	options := ovsMapStrings(t, lspOp.Row[colOptions])
+	if options["network_name"] != "physnet1" {
+		t.Fatalf("localnet options = %#v", options)
+	}
+	if got := rowStringSliceValue(lspOp.Row, colAddresses); !reflect.DeepEqual(got, []string{"unknown"}) {
+		t.Fatalf("localnet addresses = %#v, want unknown", got)
+	}
+}
+
+func TestBridgeMappingsParseFormatAndRejectInvalid(t *testing.T) {
+	mappings, err := ParseBridgeMappings("physnet-b:br-b,physnet-a:br-a")
+	if err != nil {
+		t.Fatalf("ParseBridgeMappings returned error: %v", err)
+	}
+	if got := FormatBridgeMappings(mappings); got != "physnet-a:br-a,physnet-b:br-b" {
+		t.Fatalf("FormatBridgeMappings = %q", got)
+	}
+	if _, err := ParseBridgeMappings("bad-entry"); !IsKind(err, ErrorConflict) {
+		t.Fatalf("ParseBridgeMappings error = %v, want conflict", err)
+	}
+}
+
+func TestProviderNetworkRequiresBackendsBeforeMutation(t *testing.T) {
+	_, err := (&ProviderNetworkRef{name: "public"}).Ensure().
+		WithPhysicalNetwork("physnet1").
+		OnLogicalSwitch("provider-net").
+		UseBridge("br-ex").
+		WithOwner("project", "alpha").
+		Reconcile(context.Background())
+	if !IsKind(err, ErrorBackendUnavailable) {
+		t.Fatalf("Reconcile error = %v, want backend unavailable", err)
+	}
+}
+
+func TestProviderNetworkReconcileWritesLocalnetAndBridgeMapping(t *testing.T) {
+	nbDB := testNBDBClient(t)
+	nbRec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: nil},
+		{Rows: nil},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ls-uuid"), colPorts: ovsSet()}}},
+		{Rows: nil},
+		{Count: 1},
+		{Count: 1},
+		{Count: 1},
+		{Count: 1},
+	}}
+	nbDB.executor = nbRec
+	ovsDB := testOVSDBClient(t)
+	ovsRec := &recordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("br-uuid"), colName: "br-ex", colPorts: ovsSet()}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colBridges: uuidSet("br-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other"})}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other"})}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other"})}}},
+		{Count: 1},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other,physnet1:br-ex"})}}},
+		{Count: 1},
+	}}
+	ovsDB.executor = ovsRec
+
+	ref := &ProviderNetworkRef{client: &NBClient{db: nbDB}, ovs: &OVSClient{db: ovsDB}, name: "public"}
+	result, err := ref.Ensure().
+		WithPhysicalNetwork("physnet1").
+		OnLogicalSwitch("provider-net").
+		WithLocalnetPort("ln-provider").
+		UseBridge("br-ex").
+		WithOwner("project", "alpha").
+		WithLabel("env", "test").
+		Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	if !result.Applied {
+		t.Fatalf("Reconcile did not report applied")
+	}
+	lspOp := findRecordedOp(nbRec.ops, libovsdb.OperationInsert, tableLogicalSwitchPort)
+	if lspOp == nil {
+		t.Fatalf("missing provider localnet insert: %#v", nbRec.ops)
+	}
+	if lspOp.Row[colType] != "localnet" {
+		t.Fatalf("localnet row = %#v", lspOp.Row)
+	}
+	updateOp := findRecordedOp(nbRec.ops, libovsdb.OperationMutate, tableLogicalSwitchPort)
+	if updateOp == nil || !hasMutation(updateOp.Mutations, colExternalIDs, libovsdb.MutateOperationInsert) {
+		t.Fatalf("missing provider localnet metadata mutate: %#v", nbRec.ops)
+	}
+	var mappingValue string
+	for _, op := range ovsRec.ops {
+		if op.Op != libovsdb.OperationMutate || op.Table != tableOpenVSwitch {
+			continue
+		}
+		for _, mutation := range op.Mutations {
+			if mutation.Column != colExternalIDs || mutation.Mutator != libovsdb.MutateOperationInsert {
+				continue
+			}
+			values := ovsMapStrings(t, mutation.Value)
+			if values[ovsBridgeMappingsKey] != "" {
+				mappingValue = values[ovsBridgeMappingsKey]
+			}
+		}
+	}
+	if mappingValue != "other:br-other,physnet1:br-ex" {
+		t.Fatalf("bridge mapping value = %q", mappingValue)
+	}
+}
+
+func TestProviderNetworkRejectsForeignMappingBeforeNBWrite(t *testing.T) {
+	nbDB := testNBDBClient(t)
+	nbRec := &nbRecordingExecutor{}
+	nbDB.executor = nbRec
+	ovsDB := testOVSDBClient(t)
+	ovsRec := &recordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("br-uuid"), colName: "br-ex", colPorts: ovsSet()}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "physnet1:br-other"})}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "physnet1:br-other"})}}},
+	}}
+	ovsDB.executor = ovsRec
+	ref := &ProviderNetworkRef{client: &NBClient{db: nbDB}, ovs: &OVSClient{db: ovsDB}, name: "public"}
+
+	_, err := ref.Ensure().
+		WithPhysicalNetwork("physnet1").
+		OnLogicalSwitch("provider-net").
+		UseBridge("br-ex").
+		WithOwner("project", "alpha").
+		Reconcile(context.Background())
+	if !IsKind(err, ErrorOwnershipViolation) {
+		t.Fatalf("Reconcile error = %v, want ownership violation", err)
+	}
+	if len(nbRec.ops) != 0 {
+		t.Fatalf("NB ops = %#v, want none before target validation passes", nbRec.ops)
+	}
+}
+
+func TestProviderNetworkDeleteRemovesOwnedMappingAndLocalnetOnly(t *testing.T) {
+	markerKey := providerNetworkMappingOwnerKey("physnet1")
+	nbDB := testNBDBClient(t)
+	nbRec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{{
+			colUUID:    uuidValue("lsp-uuid"),
+			colName:    "ln-provider",
+			colType:    "localnet",
+			colOptions: ovsMap(map[string]string{"network_name": "physnet1"}),
+			colExternalIDs: ovsMap(map[string]string{
+				ExternalIDManagedByKey:                "ovnflow",
+				ExternalIDKindKey:                     "ProviderNetwork",
+				ExternalIDNameKey:                     "public",
+				ExternalIDPrefix + "logical-switch":   "provider-net",
+				ExternalIDPrefix + "bridge":           "br-ex",
+				ExternalIDPrefix + "physical-network": "physnet1",
+			}),
+		}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("lsp-uuid")}}},
+		{Count: 1},
+	}}
+	nbDB.executor = nbRec
+	ovsDB := testOVSDBClient(t)
+	ovsRec := &recordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other,physnet1:br-ex", markerKey: "public"})}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other,physnet1:br-ex", markerKey: "public"})}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other,physnet1:br-ex", markerKey: "public"})}}},
+		{Count: 1},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other", markerKey: "public"})}}},
+		{Count: 1},
+	}}
+	ovsDB.executor = ovsRec
+	ref := &ProviderNetworkRef{client: &NBClient{db: nbDB}, ovs: &OVSClient{db: ovsDB}, name: "public"}
+
+	if err := ref.Delete(context.Background()); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	if op := findRecordedOp(nbRec.ops, libovsdb.OperationDelete, tableLogicalSwitchPort); op == nil {
+		t.Fatalf("missing localnet port delete: %#v", nbRec.ops)
+	}
+	var formatted string
+	for _, op := range ovsRec.ops {
+		if op.Op != libovsdb.OperationMutate || op.Table != tableOpenVSwitch {
+			continue
+		}
+		for _, mutation := range op.Mutations {
+			if mutation.Column != colExternalIDs || mutation.Mutator != libovsdb.MutateOperationInsert {
+				continue
+			}
+			values := ovsMapStrings(t, mutation.Value)
+			if values[ovsBridgeMappingsKey] != "" {
+				formatted = values[ovsBridgeMappingsKey]
+			}
+		}
+	}
+	if formatted != "other:br-other" {
+		t.Fatalf("bridge mappings after delete = %q", formatted)
+	}
+	if op := findRecordedOp(ovsRec.ops, libovsdb.OperationDelete, tableBridge); op != nil {
+		t.Fatalf("provider network delete must not delete physical bridge: %#v", op)
+	}
+}
+
 func TestSecurityPolicyGetReadsPortGroupMetadata(t *testing.T) {
 	db := testNBDBClient(t)
 	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{

@@ -71,6 +71,8 @@ type logicalPortSpec struct {
 	mac         string
 	ip          string
 	addresses   []string
+	kind        string
+	options     map[string]string
 	externalIDs map[string]string
 }
 
@@ -97,9 +99,13 @@ func (b *LogicalSwitchBuilder) WithExternalID(key, value string) *LogicalSwitchB
 }
 
 func (b *LogicalSwitchBuilder) AddPort(name string) *LogicalSwitchPortBuilder {
-	spec := &logicalPortSpec{name: name, externalIDs: map[string]string{}}
+	spec := &logicalPortSpec{name: name, externalIDs: map[string]string{}, options: map[string]string{}}
 	b.ports = append(b.ports, spec)
 	return &LogicalSwitchPortBuilder{parent: b, spec: spec}
+}
+
+func (b *LogicalSwitchBuilder) AddLocalnetPort(name, networkName string) *LogicalSwitchPortBuilder {
+	return b.AddPort(name).AsLocalnet(networkName)
 }
 
 // Execute commits the logical switch operation.
@@ -149,6 +155,11 @@ func (b *LogicalSwitchBuilder) validate() error {
 			return wrap(ErrorValidation, dbOVNNorthbound, tableLogicalSwitchPort, string(b.mode), port.name, "invalid ip", nil)
 		}
 		for key := range port.externalIDs {
+			if err := validateExternalID(key); err != nil {
+				return err
+			}
+		}
+		for key := range port.options {
 			if err := validateExternalID(key); err != nil {
 				return err
 			}
@@ -215,6 +226,9 @@ func (b *LogicalSwitchBuilder) executeCreateOnce(ctx context.Context, ensure boo
 				if len(addresses) > 0 {
 					updateRow[colAddresses] = stringSet(addresses)
 				}
+				if port.kind != "" {
+					updateRow[colType] = port.kind
+				}
 				if len(updateRow) > 0 {
 					ops = append(ops, libovsdb.Operation{
 						Op:    libovsdb.OperationUpdate,
@@ -230,6 +244,16 @@ func (b *LogicalSwitchBuilder) executeCreateOnce(ctx context.Context, ensure boo
 						Where: conditionUUID(existingPorts[0].UUID),
 						Mutations: []libovsdb.Mutation{
 							*libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationInsert, ovsMap(port.externalIDs)),
+						},
+					})
+				}
+				if len(port.options) > 0 {
+					ops = append(ops, libovsdb.Operation{
+						Op:    libovsdb.OperationMutate,
+						Table: tableLogicalSwitchPort,
+						Where: conditionUUID(existingPorts[0].UUID),
+						Mutations: []libovsdb.Mutation{
+							*libovsdb.NewMutation(colOptions, libovsdb.MutateOperationInsert, ovsMap(port.options)),
 						},
 					})
 				}
@@ -250,6 +274,10 @@ func (b *LogicalSwitchBuilder) executeCreateOnce(ctx context.Context, ensure boo
 			colName: port.name,
 		}
 		setRowMap(row, colExternalIDs, port.externalIDs)
+		setRowMap(row, colOptions, port.options)
+		if port.kind != "" {
+			row[colType] = port.kind
+		}
 		if len(addresses) > 0 {
 			row[colAddresses] = stringSet(addresses)
 		}
@@ -449,6 +477,28 @@ func (p *LogicalSwitchPortBuilder) WithAddress(mac, ip string) *LogicalSwitchPor
 	}
 	p.spec.addresses = append(p.spec.addresses, addr)
 	return p
+}
+
+func (p *LogicalSwitchPortBuilder) WithAddresses(addresses ...string) *LogicalSwitchPortBuilder {
+	p.spec.addresses = append(p.spec.addresses, addresses...)
+	return p
+}
+
+func (p *LogicalSwitchPortBuilder) WithType(kind string) *LogicalSwitchPortBuilder {
+	p.spec.kind = kind
+	return p
+}
+
+func (p *LogicalSwitchPortBuilder) WithOption(key, value string) *LogicalSwitchPortBuilder {
+	if p.spec.options == nil {
+		p.spec.options = map[string]string{}
+	}
+	p.spec.options[key] = value
+	return p
+}
+
+func (p *LogicalSwitchPortBuilder) AsLocalnet(networkName string) *LogicalSwitchPortBuilder {
+	return p.WithType("localnet").WithOption("network_name", networkName).WithAddresses("unknown")
 }
 
 func (p *LogicalSwitchPortBuilder) WithExternalID(key, value string) *LogicalSwitchPortBuilder {

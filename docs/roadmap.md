@@ -74,6 +74,9 @@ of private platform workflows:
   addresses.
 - `WorkloadAttachment`: attach a VM, pod, host, or other workload by keeping
   OVN logical switch ports and local OVS interfaces in sync.
+- `ProviderNetwork`: manage OVN localnet ports and OVS bridge mappings for
+  reusable physical-network access without embedding platform-specific network
+  ownership models.
 - `LinuxRouter`: provide the Linux namespace router primitive described below.
 - `NAT`: reusable outbound SNAT/masquerade, inbound DNAT/port-forward, and
   destination-address mapping primitives.
@@ -81,8 +84,6 @@ of private platform workflows:
   records.
 - `Firewall`: allow/drop rules, CIDR rules, port rules, and
   established/related connection handling.
-- `ProviderNetwork`: localnet ports, bridge mappings, `br-ex` validation, and
-  physical-network attachment checks.
 - `SecurityPolicy`: a platform-neutral wrapper over ACL, Port Group, and
   Address Set primitives.
 - `IPAM helpers`: CIDR validation, reserved addresses, basic allocation, and

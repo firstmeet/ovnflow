@@ -15,7 +15,7 @@ The current SDK surface covers:
 | OVN Northbound | logical switch/port plus router, router port, ACL, NAT, load balancer, DHCP, DNS, QoS, meter, port group, address set, gateway/HA/BFD builders |
 | OVN Southbound | typed list/get/watch for chassis, port binding, datapath, logical flow, MAC/FDB, multicast, service monitor, RBAC, meter, DNS, and BFD |
 | Open_vSwitch | bridge/port/interface lifecycle plus controller, manager, mirror, QoS, queue, flow table, NetFlow, sFlow, IPFIX, SSL, and AutoAttach fluent table APIs |
-| v2 intent | platform-neutral `VirtualNetwork`, `LogicalSwitchDNS`, `WorkloadAttachment`, and `SecurityPolicy` with owner/label metadata, dry-run/reconcile, typed get/inspect, and delete helpers |
+| v2 intent | platform-neutral `VirtualNetwork`, `LogicalSwitchDNS`, `WorkloadAttachment`, `ProviderNetwork`, and `SecurityPolicy` with owner/label metadata, dry-run/reconcile, typed get/inspect, and delete helpers |
 | LinuxRouter | optional Linux-only namespace router model with DNSMasq, SNAT/MASQUERADE/DNAT/port-forward/destination-map, firewall rules, fake executor tests, and a Linux command backend |
 | Runtime | schema-aware `TableRef` create/ensure/update/delete/get/list/watch with optional columns and map/set mutations |
 
@@ -86,6 +86,18 @@ if err != nil {
     return err
 }
 _ = network
+
+err = client.ProviderNetwork("public-uplink").
+    Ensure().
+    WithPhysicalNetwork("physnet-public").
+    OnLogicalSwitch("ls-public").
+    WithLocalnetPort("ln-public").
+    UseBridge("br-ex").
+    WithOwner("project", "alpha").
+    Execute(ctx)
+if err != nil {
+    return err
+}
 ```
 
 Normal tests are local and dependency-free:
