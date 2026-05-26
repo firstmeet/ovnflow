@@ -40,6 +40,7 @@ func TestLinuxRendererRendersNamespaceInterfacesDNSMasqAndNFTables(t *testing.T)
 	if err != nil {
 		t.Fatalf("RenderApply returned error: %v", err)
 	}
+	scope := routerRuleScope(router.Name, router.Spec.Namespace)
 	assertCommand(t, commands, "ip", "netns", "add", "ovnflow-edge")
 	if !commands[0].IgnoreAlreadyExists {
 		t.Fatalf("namespace ensure command should ignore already-exists: %#v", commands[0])
@@ -48,14 +49,14 @@ func TestLinuxRendererRendersNamespaceInterfacesDNSMasqAndNFTables(t *testing.T)
 	assertCommandContains(t, commands, "ovs-vsctl", "external_ids:ovnflow.io/linux-router-ns=ovnflow-edge")
 	assertCommandContains(t, commands, "ip", "dhclient", "-v", "wan0")
 	assertCommandContains(t, commands, "ip", "dnsmasq", "--conf-file=/run/ovnflow/edge/dnsmasq.conf", "--host-record=api.service,172.16.100.6")
-	assertCommandContains(t, commands, "ip", "nft", "delete", "table", "ip", "ovnflow_nat_edge")
-	assertCommandContains(t, commands, "ip", "nft", "add", "table", "ip", "ovnflow_nat_edge")
-	assertCommandContains(t, commands, "ip", "masquerade", "comment", `"ovnflow:edge:masq-lan"`)
+	assertCommandContains(t, commands, "ip", "nft", "delete", "table", "ip", nftNATTable(scope))
+	assertCommandContains(t, commands, "ip", "nft", "add", "table", "ip", nftNATTable(scope))
+	assertCommandContains(t, commands, "ip", "masquerade", "comment", scopedNftComment(scope, "masq-lan"))
 	assertCommandContains(t, commands, "ip", "snat", "to", "172.17.100.29")
 	assertCommandContains(t, commands, "ip", "tcp", "dport", "8080", "dnat", "to", "172.16.100.6:80")
 	assertCommandContains(t, commands, "ip", "saddr", "172.16.100.0/24", "iifname", "lan0", "ip", "daddr", "192.168.9.2", "dnat", "to", "192.168.0.1")
-	assertCommandContains(t, commands, "ip", "table", "inet", "ovnflow_filter_edge")
-	assertCommandContains(t, commands, "ip", "accept", "comment", `"ovnflow:edge:allow-web"`)
+	assertCommandContains(t, commands, "ip", "table", "inet", nftFilterTable(scope))
+	assertCommandContains(t, commands, "ip", "accept", "comment", scopedNftComment(scope, "allow-web"))
 }
 
 func TestLinuxRendererRendersIPTablesBackend(t *testing.T) {
@@ -118,11 +119,49 @@ func TestLinuxRendererScopesNATCleanupPerRouter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderApply edge-b returned error: %v", err)
 	}
+	aScope := routerRuleScope(a.Name, a.Spec.namespaceOrDefault(a.Name))
+	bScope := routerRuleScope(b.Name, b.Spec.namespaceOrDefault(b.Name))
 	assertCommandContains(t, aCommands, "ip", "sh", "-c")
-	assertCommandContains(t, aCommands, "ip", "ovnflow:edge_a:")
-	assertCommandContains(t, aCommands, "ip", "--comment", "ovnflow:edge_a:egress")
-	assertCommandContains(t, bCommands, "ip", "ovnflow:edge_b:")
-	assertCommandContains(t, bCommands, "ip", "--comment", "ovnflow:edge_b:egress")
+	assertCommandContains(t, aCommands, "ip", scopedRulePrefix(aScope))
+	assertCommandContains(t, aCommands, "ip", "--comment", scopedIPTablesComment(aScope, "egress"))
+	assertCommandContains(t, bCommands, "ip", scopedRulePrefix(bScope))
+	assertCommandContains(t, bCommands, "ip", "--comment", scopedIPTablesComment(bScope, "egress"))
+}
+
+func TestLinuxRendererCreatesNFTFirewallChainsForRuleDirections(t *testing.T) {
+	router := Router{
+		Name: "edge",
+		Spec: Spec{
+			Firewall: Firewall{Rules: []FirewallRule{
+				{Name: "allow-in", Action: "allow", Direction: "ingress"},
+				{Name: "allow-out", Action: "allow", Direction: "egress"},
+				{Name: "allow-forward", Action: "allow", Direction: "forward"},
+			}},
+		},
+	}
+	commands, err := (LinuxRenderer{}).RenderApply(router)
+	if err != nil {
+		t.Fatalf("RenderApply returned error: %v", err)
+	}
+	scope := routerRuleScope(router.Name, router.Spec.namespaceOrDefault(router.Name))
+	table := nftFilterTable(scope)
+	assertCommandContains(t, commands, "ip", "nft", "add", "chain", "inet", table, "input", "{", "type", "filter", "hook", "input")
+	assertCommandContains(t, commands, "ip", "nft", "add", "chain", "inet", table, "output", "{", "type", "filter", "hook", "output")
+	assertCommandContains(t, commands, "ip", "nft", "add", "chain", "inet", table, "forward", "{", "type", "filter", "hook", "forward")
+	assertCommandContains(t, commands, "ip", "nft", "add", "rule", "inet", table, "input", "accept", "comment", scopedNftComment(scope, "allow-in"))
+	assertCommandContains(t, commands, "ip", "nft", "add", "rule", "inet", table, "output", "accept", "comment", scopedNftComment(scope, "allow-out"))
+	assertCommandContains(t, commands, "ip", "nft", "add", "rule", "inet", table, "forward", "accept", "comment", scopedNftComment(scope, "allow-forward"))
+}
+
+func TestRouterRuleScopeIncludesHashToAvoidSanitizedNameCollisions(t *testing.T) {
+	a := routerRuleScope("edge-a", "shared")
+	b := routerRuleScope("edge_a", "shared")
+	if a == b {
+		t.Fatalf("router scopes collided: %q", a)
+	}
+	if len(a) > 48 || len(b) > 48 {
+		t.Fatalf("router scopes should fit table/comment budget: %q %q", a, b)
+	}
 }
 
 func TestCommandNotFoundRecognizesIprouteMissingDevice(t *testing.T) {

@@ -2441,11 +2441,13 @@ func (b *SecurityPolicyBuilder) securityPolicyACLOps(ctx context.Context) ([]lib
 				continue
 			}
 			removeRefs = append(removeRefs, acl.UUID)
-			ops = append(ops, libovsdb.Operation{
-				Op:    libovsdb.OperationDelete,
-				Table: tableACL,
-				Where: conditionUUID(acl.UUID),
-			})
+			if err := requireV2OwnedExternalIDs(acl.ExternalIDs, "SecurityPolicy", b.spec.Name, dbOVNNorthbound, tableACL, "ensure", acl.UUID); err == nil {
+				ops = append(ops, libovsdb.Operation{
+					Op:    libovsdb.OperationDelete,
+					Table: tableACL,
+					Where: conditionUUID(acl.UUID),
+				})
+			}
 		}
 		if len(removeRefs) > 0 {
 			ops = append([]libovsdb.Operation{{

@@ -424,6 +424,81 @@ func TestSecurityPolicyReconcileWritesPortGroupAndInlineACL(t *testing.T) {
 	}
 }
 
+func TestSecurityPolicyReconcileDetachesButDoesNotDeleteUnownedOldACL(t *testing.T) {
+	pg := libovsdb.Row{
+		colUUID: uuidValue("pg-uuid"),
+		colName: "allow-web",
+		colACLs: uuidSet("owned-acl", "weak-acl"),
+		colExternalIDs: ovsMap(mergeStringMaps(testOwnedExternalIDs("SecurityPolicy", "allow-web"), map[string]string{
+			ExternalIDPrefix + "subject": "pg-web",
+		})),
+	}
+	ownedACL := libovsdb.Row{
+		colUUID: uuidValue("owned-acl"),
+		colExternalIDs: ovsMap(mergeStringMaps(testOwnedExternalIDs("SecurityPolicy", "allow-web"), map[string]string{
+			ExternalIDPrefix + "rule-name": "old-owned",
+		})),
+	}
+	weakACL := libovsdb.Row{
+		colUUID: uuidValue("weak-acl"),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDKindKey: "SecurityPolicy",
+			ExternalIDNameKey: "allow-web",
+		}),
+	}
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{pg}},
+		{Rows: []libovsdb.Row{ownedACL}},
+		{Rows: []libovsdb.Row{weakACL}},
+	}}
+	db := testNBDBClient(t)
+	db.executor = rec
+
+	builder := (&NBClient{db: db}).SecurityPolicy("allow-web").
+		Ensure().
+		ForSubject("pg-web").
+		WithOwner("project", "alpha").
+		AddRule(SecurityRule{Name: "new", Action: "allow", Protocol: "tcp", CIDRs: []string{"10.0.0.0/24"}, Ports: []int{443}})
+	ops, aclRefs, err := builder.securityPolicyACLOps(context.Background())
+	if err != nil {
+		t.Fatalf("securityPolicyACLOps returned error: %v", err)
+	}
+	if len(aclRefs) != 1 {
+		t.Fatalf("ACL refs = %#v, want one new named UUID", aclRefs)
+	}
+	var detached, deletedOwned, deletedWeak bool
+	for _, op := range ops {
+		if op.Op == libovsdb.OperationMutate && op.Table == tablePortGroup {
+			for _, mutation := range op.Mutations {
+				if mutation.Column == colACLs && mutation.Mutator == libovsdb.MutateOperationDelete {
+					values := ovsSetStrings(t, mutation.Value)
+					if containsString(values, "owned-acl") && containsString(values, "weak-acl") {
+						detached = true
+					}
+				}
+			}
+		}
+		if op.Op != libovsdb.OperationDelete || op.Table != tableACL || len(op.Where) != 1 {
+			continue
+		}
+		if op.Where[0].Value == uuidValue("owned-acl") {
+			deletedOwned = true
+		}
+		if op.Where[0].Value == uuidValue("weak-acl") {
+			deletedWeak = true
+		}
+	}
+	if !detached {
+		t.Fatalf("expected both old ACL refs to be detached from Port_Group: %#v", ops)
+	}
+	if !deletedOwned {
+		t.Fatalf("expected owned old ACL to be deleted: %#v", ops)
+	}
+	if deletedWeak {
+		t.Fatalf("weakly marked ACL must not be deleted: %#v", ops)
+	}
+}
+
 func TestVirtualNetworkGetReadsLogicalSwitchIntentMetadata(t *testing.T) {
 	db := testNBDBClient(t)
 	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{

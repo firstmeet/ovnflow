@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -246,8 +247,10 @@ func renderFirewallCommands(ns, scope, backend string, firewall Firewall) []Comm
 	}
 	commands = append(commands,
 		Command{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "table", "inet", table}},
-		Command{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "inet", table, "forward", "{", "type", "filter", "hook", "forward", "priority", "filter", ";", "}"}},
 	)
+	for _, chain := range firewallChains(firewall) {
+		commands = append(commands, Command{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "inet", table, chain, "{", "type", "filter", "hook", chain, "priority", "filter", ";", "}"}})
+	}
 	for _, rule := range firewall.Rules {
 		commands = append(commands, nftFirewallRule(ns, table, scope, rule))
 	}
@@ -372,6 +375,20 @@ func firewallChain(rule FirewallRule) string {
 	}
 }
 
+func firewallChains(firewall Firewall) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, rule := range firewall.Rules {
+		chain := firewallChain(rule)
+		if seen[chain] {
+			continue
+		}
+		seen[chain] = true
+		out = append(out, chain)
+	}
+	return out
+}
+
 func firewallVerdict(rule FirewallRule) string {
 	switch strings.ToLower(strings.TrimSpace(rule.Action)) {
 	case "", "allow":
@@ -411,7 +428,15 @@ func routerRuleScope(routerName, ns string) string {
 	if scope == "" {
 		scope = "router"
 	}
-	return scope
+	hash := shortScopeHash(routerName + "\x00" + ns)
+	maxPrefix := 48 - len(hash) - 1
+	if len(scope) > maxPrefix {
+		scope = strings.TrimRight(scope[:maxPrefix], "_")
+	}
+	if scope == "" {
+		scope = "router"
+	}
+	return scope + "_" + hash
 }
 
 func sanitizeRuleScope(value string) string {
@@ -431,11 +456,13 @@ func sanitizeRuleScope(value string) string {
 		}
 	}
 	out := strings.Trim(b.String(), "_")
-	if len(out) > 48 {
-		out = out[:48]
-		out = strings.TrimRight(out, "_")
-	}
 	return out
+}
+
+func shortScopeHash(value string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(value))
+	return fmt.Sprintf("%08x", h.Sum32())
 }
 
 func commandNotFound(message string) bool {
