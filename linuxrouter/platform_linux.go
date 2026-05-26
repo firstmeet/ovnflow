@@ -2,6 +2,12 @@
 
 package linuxrouter
 
+import (
+	"os"
+
+	"github.com/firstmeet/ovnflow"
+)
+
 func NewPlatformClient() PlatformClient {
-	return NewClient(nil, nil)
+	return NewClient(SystemExecutor{}, LinuxRenderer{NATBackend: os.Getenv(ovnflow.EnvLinuxRouterNATBackend)})
 }

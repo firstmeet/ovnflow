@@ -1,0 +1,334 @@
+//go:build linux
+
+package linuxrouter
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os/exec"
+	"strings"
+
+	"github.com/firstmeet/ovnflow"
+)
+
+type SystemExecutor struct{}
+
+func (SystemExecutor) Run(ctx context.Context, cmd Command) error {
+	if strings.TrimSpace(cmd.Program) == "" {
+		return &ovnflow.Error{Kind: ovnflow.ErrorValidation, Operation: "exec", Object: cmd.Program, Message: "program must not be empty"}
+	}
+	execCmd := exec.CommandContext(ctx, cmd.Program, cmd.Args...)
+	var stderr bytes.Buffer
+	execCmd.Stderr = &stderr
+	if err := execCmd.Run(); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if cmd.IgnoreNotFound && commandNotFound(message) {
+			return nil
+		}
+		if cmd.IgnoreAlreadyExists && commandAlreadyExists(message) {
+			return nil
+		}
+		return &ovnflow.Error{Kind: errorKindForExec(err), Operation: "exec", Object: cmd.Program, Message: message, Err: err}
+	}
+	return nil
+}
+
+type LinuxRenderer struct {
+	NATBackend string
+}
+
+func (r LinuxRenderer) RenderApply(router Router) ([]Command, error) {
+	if err := inferNATInterfaces(&router.Spec); err != nil {
+		return nil, err
+	}
+	backend := strings.ToLower(strings.TrimSpace(r.NATBackend))
+	if backend == "" {
+		backend = ovnflow.NATBackendAuto
+	}
+	if !ovnflow.ValidNATBackend(backend) {
+		return nil, &ovnflow.Error{Kind: ovnflow.ErrorValidation, Operation: "render", Object: backend, Message: "invalid NAT backend"}
+	}
+	ns := router.Spec.namespaceOrDefault(router.Name)
+	var commands []Command
+	commands = append(commands, Command{Program: "ip", Args: []string{"netns", "add", ns}, IgnoreAlreadyExists: true})
+	for _, iface := range router.Spec.Interfaces {
+		commands = append(commands, renderInterfaceCommands(ns, iface)...)
+	}
+	for _, route := range router.Spec.Routes {
+		commands = append(commands, renderRouteCommand(ns, route))
+	}
+	if router.Spec.DNSMasq.Enabled {
+		commands = append(commands, renderDNSMasqCommand(ns, router)...)
+	}
+	commands = append(commands, renderNATCommands(ns, backend, router.Spec.NAT)...)
+	commands = append(commands, renderFirewallCommands(ns, backend, router.Spec.Firewall)...)
+	return commands, nil
+}
+
+func renderInterfaceCommands(ns string, iface Interface) []Command {
+	var commands []Command
+	if iface.Bridge != "" && iface.OVSPort != "" {
+		commands = append(commands, Command{Program: "ovs-vsctl", Args: []string{
+			"--may-exist", "add-port", iface.Bridge, iface.OVSPort,
+			"--", "set", "Interface", iface.OVSPort,
+			"type=internal",
+			"external_ids:ovnflow.io/managed-by=ovnflow",
+			"external_ids:ovnflow.io/linux-router-ns=" + ns,
+			"external_ids:ovnflow.io/linux-router-iface=" + iface.Name,
+		}})
+		commands = append(commands,
+			Command{Program: "ip", Args: []string{"link", "set", iface.OVSPort, "netns", ns}, IgnoreNotFound: true},
+			Command{Program: "ip", Args: []string{"netns", "exec", ns, "ip", "link", "set", iface.OVSPort, "name", iface.Name}, IgnoreNotFound: true},
+		)
+	}
+	commands = append(commands, Command{Program: "ip", Args: []string{"netns", "exec", ns, "ip", "link", "set", iface.Name, "up"}})
+	for _, address := range iface.Addresses {
+		commands = append(commands, Command{Program: "ip", Args: []string{"netns", "exec", ns, "ip", "addr", "replace", address, "dev", iface.Name}})
+	}
+	if iface.Gateway != "" {
+		commands = append(commands, Command{Program: "ip", Args: []string{"netns", "exec", ns, "ip", "route", "replace", "default", "via", iface.Gateway, "dev", iface.Name}})
+	}
+	if iface.DHCPClient {
+		commands = append(commands, Command{Program: "ip", Args: []string{"netns", "exec", ns, "dhclient", "-v", iface.Name}})
+	}
+	return commands
+}
+
+func renderRouteCommand(ns string, route Route) Command {
+	args := []string{"netns", "exec", ns, "ip", "route", "replace", route.Destination}
+	if route.Gateway != "" {
+		args = append(args, "via", route.Gateway)
+	}
+	if route.Interface != "" {
+		args = append(args, "dev", route.Interface)
+	}
+	return Command{Program: "ip", Args: args}
+}
+
+func renderDNSMasqCommand(ns string, router Router) []Command {
+	args := []string{"netns", "exec", ns, "dnsmasq"}
+	if router.Spec.DNSMasq.ConfigFile != "" {
+		args = append(args, "--conf-file="+router.Spec.DNSMasq.ConfigFile)
+	}
+	if router.Spec.DNSMasq.PIDFile != "" {
+		args = append(args, "--pid-file="+router.Spec.DNSMasq.PIDFile)
+	}
+	if router.Spec.DNSMasq.LeaseFile != "" {
+		args = append(args, "--dhcp-leasefile="+router.Spec.DNSMasq.LeaseFile)
+	}
+	for _, server := range router.Spec.DNSMasq.Servers {
+		args = append(args, "--server="+server)
+	}
+	for _, dhcpRange := range router.Spec.DNSMasq.DHCPRanges {
+		args = append(args, "--dhcp-range="+strings.Join([]string{dhcpRange.Start, dhcpRange.End, dhcpRange.Lease}, ","))
+	}
+	for _, lease := range router.Spec.DNSMasq.Leases {
+		args = append(args, "--dhcp-host="+strings.Join([]string{lease.MAC, lease.IP, lease.Name}, ","))
+	}
+	for _, host := range router.Spec.DNSMasq.Hosts {
+		for _, ip := range host.IPs {
+			args = append(args, "--host-record="+host.Domain+","+ip)
+		}
+	}
+	return []Command{{Program: "ip", Args: args}}
+}
+
+func renderNATCommands(ns, backend string, nat NAT) []Command {
+	if backend == ovnflow.NATBackendIPTables {
+		return renderIPTablesNATCommands(ns, nat)
+	}
+	return renderNFTNATCommands(ns, nat)
+}
+
+func renderNFTNATCommands(ns string, nat NAT) []Command {
+	commands := []Command{
+		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "delete", "table", "ip", "ovnflow_nat"}, IgnoreNotFound: true},
+		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "table", "ip", "ovnflow_nat"}},
+		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "ip", "ovnflow_nat", "prerouting", "{", "type", "nat", "hook", "prerouting", "priority", "dstnat", ";", "}"}},
+		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "ip", "ovnflow_nat", "postrouting", "{", "type", "nat", "hook", "postrouting", "priority", "srcnat", ";", "}"}},
+	}
+	for _, rule := range nat.Masquerades {
+		commands = append(commands, nftRule(ns, "postrouting", "ip", "saddr", rule.SourceCIDR, "oifname", rule.OutInterface, "masquerade", "comment", nftComment(rule.StableName())))
+	}
+	for _, rule := range nat.SNATRules {
+		commands = append(commands, nftRule(ns, "postrouting", "ip", "saddr", rule.SourceCIDR, "oifname", rule.OutInterface, "snat", "to", rule.ToSource, "comment", nftComment(rule.StableName())))
+	}
+	for _, rule := range nat.DNATRules {
+		commands = append(commands, nftRule(ns, "prerouting", "iifname", rule.InInterface, "ip", "daddr", rule.MatchAddress, "dnat", "to", rule.TargetAddress, "comment", nftComment(rule.StableName())))
+	}
+	for _, rule := range nat.PortForwards {
+		match := []string{"iifname", rule.InInterface}
+		if rule.ListenIP != "" {
+			match = append(match, "ip", "daddr", rule.ListenIP)
+		}
+		match = append(match, rule.Protocol, "dport", fmt.Sprint(rule.ListenPort), "dnat", "to", fmt.Sprintf("%s:%d", rule.TargetIP, rule.TargetPort), "comment", nftComment(rule.StableName()))
+		commands = append(commands, nftRule(ns, append([]string{"prerouting"}, match...)...))
+	}
+	for _, rule := range nat.DestinationMaps {
+		match := []string{"iifname", rule.InInterface, "ip", "daddr", rule.MatchAddress}
+		if rule.FromCIDR != "" {
+			match = append([]string{"ip", "saddr", rule.FromCIDR}, match...)
+		}
+		commands = append(commands, nftRule(ns, append([]string{"prerouting"}, append(match, "dnat", "to", rule.TargetAddress, "comment", nftComment(rule.StableName()))...)...))
+		if rule.SourceNAT != "" {
+			commands = append(commands, nftRule(ns, "postrouting", "ip", "daddr", rule.TargetAddress, "snat", "to", rule.SourceNAT, "comment", nftComment(rule.StableName()+"-snat")))
+		}
+	}
+	return commands
+}
+
+func renderIPTablesNATCommands(ns string, nat NAT) []Command {
+	var commands []Command
+	for _, rule := range nat.Masquerades {
+		commands = append(commands, iptablesRule(ns, "-t", "nat", "-A", "POSTROUTING", "-s", rule.SourceCIDR, "-o", rule.OutInterface, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "MASQUERADE"))
+	}
+	for _, rule := range nat.SNATRules {
+		commands = append(commands, iptablesRule(ns, "-t", "nat", "-A", "POSTROUTING", "-s", rule.SourceCIDR, "-o", rule.OutInterface, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "SNAT", "--to-source", rule.ToSource))
+	}
+	for _, rule := range nat.DNATRules {
+		commands = append(commands, iptablesRule(ns, "-t", "nat", "-A", "PREROUTING", "-i", rule.InInterface, "-d", rule.MatchAddress, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "DNAT", "--to-destination", rule.TargetAddress))
+	}
+	for _, rule := range nat.PortForwards {
+		args := []string{"-t", "nat", "-A", "PREROUTING", "-i", rule.InInterface, "-p", rule.Protocol, "--dport", fmt.Sprint(rule.ListenPort)}
+		if rule.ListenIP != "" {
+			args = append(args, "-d", rule.ListenIP)
+		}
+		args = append(args, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "DNAT", "--to-destination", fmt.Sprintf("%s:%d", rule.TargetIP, rule.TargetPort))
+		commands = append(commands, iptablesRule(ns, args...))
+	}
+	for _, rule := range nat.DestinationMaps {
+		args := []string{"-t", "nat", "-A", "PREROUTING", "-i", rule.InInterface, "-d", rule.MatchAddress}
+		if rule.FromCIDR != "" {
+			args = append(args, "-s", rule.FromCIDR)
+		}
+		args = append(args, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "DNAT", "--to-destination", rule.TargetAddress)
+		commands = append(commands, iptablesRule(ns, args...))
+		if rule.SourceNAT != "" {
+			commands = append(commands, iptablesRule(ns, "-t", "nat", "-A", "POSTROUTING", "-d", rule.TargetAddress, "-m", "comment", "--comment", iptablesComment(rule.StableName()+"-snat"), "-j", "SNAT", "--to-source", rule.SourceNAT))
+		}
+	}
+	return commands
+}
+
+func renderFirewallCommands(ns, backend string, firewall Firewall) []Command {
+	if len(firewall.Rules) == 0 {
+		return nil
+	}
+	if backend == ovnflow.NATBackendIPTables {
+		var commands []Command
+		for _, rule := range firewall.Rules {
+			commands = append(commands, iptablesFirewallRule(ns, rule))
+		}
+		return commands
+	}
+	commands := []Command{
+		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "delete", "table", "inet", "ovnflow_filter"}, IgnoreNotFound: true},
+		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "table", "inet", "ovnflow_filter"}},
+		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "inet", "ovnflow_filter", "forward", "{", "type", "filter", "hook", "forward", "priority", "filter", ";", "}"}},
+	}
+	for _, rule := range firewall.Rules {
+		commands = append(commands, nftFirewallRule(ns, rule))
+	}
+	return commands
+}
+
+func nftRule(ns string, args ...string) Command {
+	return Command{Program: "ip", Args: append([]string{"netns", "exec", ns, "nft", "add", "rule", "ip", "ovnflow_nat"}, args...)}
+}
+
+func iptablesRule(ns string, args ...string) Command {
+	return Command{Program: "ip", Args: append([]string{"netns", "exec", ns, "iptables"}, args...)}
+}
+
+func nftFirewallRule(ns string, rule FirewallRule) Command {
+	args := []string{"netns", "exec", ns, "nft", "add", "rule", "inet", "ovnflow_filter", firewallChain(rule)}
+	args = append(args, nftFirewallMatches(rule)...)
+	args = append(args, firewallVerdict(rule), "comment", nftComment(rule.Name))
+	return Command{Program: "ip", Args: args}
+}
+
+func iptablesFirewallRule(ns string, rule FirewallRule) Command {
+	args := []string{"-A", strings.ToUpper(firewallChain(rule))}
+	for _, cidr := range rule.CIDRs {
+		args = append(args, "-s", cidr)
+	}
+	if rule.Protocol != "" {
+		args = append(args, "-p", strings.ToLower(rule.Protocol))
+	}
+	for _, port := range rule.Ports {
+		args = append(args, "--dport", fmt.Sprint(port))
+	}
+	args = append(args, "-m", "comment", "--comment", iptablesComment(rule.Name), "-j", strings.ToUpper(firewallVerdict(rule)))
+	return iptablesRule(ns, args...)
+}
+
+func nftFirewallMatches(rule FirewallRule) []string {
+	var args []string
+	for _, cidr := range rule.CIDRs {
+		args = append(args, "ip", "saddr", cidr)
+	}
+	if rule.Protocol != "" {
+		args = append(args, strings.ToLower(rule.Protocol))
+	}
+	for _, port := range rule.Ports {
+		args = append(args, "dport", fmt.Sprint(port))
+	}
+	return args
+}
+
+func firewallChain(rule FirewallRule) string {
+	switch strings.ToLower(strings.TrimSpace(rule.Direction)) {
+	case "ingress", "in":
+		return "input"
+	case "egress", "out":
+		return "output"
+	default:
+		return "forward"
+	}
+}
+
+func firewallVerdict(rule FirewallRule) string {
+	switch strings.ToLower(strings.TrimSpace(rule.Action)) {
+	case "", "allow":
+		return "accept"
+	case "reject":
+		return "reject"
+	default:
+		return "drop"
+	}
+}
+
+func nftComment(name string) string {
+	return "ovnflow:" + name
+}
+
+func iptablesComment(name string) string {
+	return "ovnflow:" + name
+}
+
+func commandNotFound(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "no such file") ||
+		strings.Contains(message, "not found") ||
+		strings.Contains(message, "does not exist") ||
+		strings.Contains(message, "no such table")
+}
+
+func commandAlreadyExists(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "file exists") ||
+		strings.Contains(message, "already exists")
+}
+
+func errorKindForExec(err error) ovnflow.ErrorKind {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return ovnflow.ErrorCanceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return ovnflow.ErrorTimeout
+	default:
+		return ovnflow.ErrorUnavailable
+	}
+}

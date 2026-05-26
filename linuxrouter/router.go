@@ -166,8 +166,10 @@ type FirewallRule struct {
 }
 
 type Command struct {
-	Program string
-	Args    []string
+	Program             string
+	Args                []string
+	IgnoreNotFound      bool
+	IgnoreAlreadyExists bool
 }
 
 type Executor interface {
