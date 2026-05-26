@@ -108,3 +108,6 @@ See [v1.0 hardening](docs/v1.0-hardening.md) and
 [API stability](docs/api-stability.md) for the current release gates and stable
 surface. The [v0.1 scope](docs/v0.1-scope.md) and
 [v0.2 scope](docs/v0.2-scope.md) documents are historical compatibility notes.
+Future high-level, platform-neutral intent APIs are tracked in
+[roadmap](docs/roadmap.md), with the v2.0.0 execution plan in
+[v2.0 plan](docs/v2.0-plan.md).
