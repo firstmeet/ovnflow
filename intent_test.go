@@ -76,6 +76,9 @@ func TestVirtualNetworkNoopPlanAndReconcile(t *testing.T) {
 	if len(dryRun.Plan.Operations) != 1 || dryRun.Plan.Operations[0].Resource != "VirtualNetwork" {
 		t.Fatalf("dry run plan = %#v", dryRun.Plan)
 	}
+	if len(dryRun.Diff.Changes) != 1 || dryRun.Diff.Changes[0].Path != "/" {
+		t.Fatalf("dry run diff = %#v, want create diff", dryRun.Diff)
+	}
 	reconciled, err := builder.Reconcile(context.Background())
 	if err != nil {
 		t.Fatalf("Reconcile returned error: %v", err)
@@ -134,6 +137,13 @@ func TestV2IntentRequiresOwnerForRealMutation(t *testing.T) {
 	}
 }
 
+func TestV2IntentApplyRequiresBackend(t *testing.T) {
+	err := (&NBClient{}).VirtualNetwork("net-a").Apply(context.Background(), VirtualNetwork{Name: "net-a"})
+	if !IsKind(err, ErrorBackendUnavailable) {
+		t.Fatalf("Apply error = %v, want backend unavailable", err)
+	}
+}
+
 func TestVirtualNetworkReconcileWritesLogicalSwitchAndDNS(t *testing.T) {
 	rec := &nbRecordingExecutor{
 		results: []libovsdb.OperationResult{
@@ -161,6 +171,9 @@ func TestVirtualNetworkReconcileWritesLogicalSwitchAndDNS(t *testing.T) {
 	}
 	if !result.Applied {
 		t.Fatalf("Reconcile did not report applied")
+	}
+	if len(result.Diff.Changes) != 1 || result.Diff.Changes[0].Path != "/" {
+		t.Fatalf("Reconcile diff = %#v, want create diff", result.Diff)
 	}
 	lsOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableLogicalSwitch)
 	if lsOp == nil {
@@ -284,6 +297,112 @@ func TestVirtualNetworkGetReadsLogicalSwitchIntentMetadata(t *testing.T) {
 	}
 }
 
+func TestVirtualNetworkDryRunDiffsExistingState(t *testing.T) {
+	db := testNBDBClient(t)
+	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID:        uuidValue("ls-uuid"),
+		colName:        "net-a",
+		colPorts:       ovsSet(),
+		colOtherConfig: ovsMap(map[string]string{"subnet": "10.0.0.0/24"}),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:    "project",
+			ExternalIDOwnerNameKey:    "alpha",
+			ExternalIDLabelKey("env"): "dev",
+		}),
+	}}}}}
+	dryRun, err := (&NBClient{db: db}).VirtualNetwork("net-a").
+		Ensure().
+		WithCIDR("10.0.1.0/24").
+		WithGateway("10.0.1.1").
+		WithOwner("project", "alpha").
+		WithLabel("env", "prod").
+		DryRun(context.Background())
+	if err != nil {
+		t.Fatalf("DryRun returned error: %v", err)
+	}
+	if len(dryRun.Diff.Changes) != 3 {
+		t.Fatalf("diff changes = %#v, want cidrs gateway labels", dryRun.Diff.Changes)
+	}
+}
+
+func TestVirtualNetworkReconcileNoopDoesNotApply(t *testing.T) {
+	db := testNBDBClient(t)
+	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID:        uuidValue("ls-uuid"),
+		colName:        "net-a",
+		colPorts:       ovsSet(),
+		colOtherConfig: ovsMap(map[string]string{"subnet": "10.0.0.0/24"}),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey: "project",
+			ExternalIDOwnerNameKey: "alpha",
+		}),
+	}}}}}
+	result, err := (&NBClient{db: db}).VirtualNetwork("net-a").
+		Ensure().
+		WithCIDR("10.0.0.0/24").
+		WithOwner("project", "alpha").
+		Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	if result.Applied || !result.Diff.Empty() {
+		t.Fatalf("Reconcile result = %#v, want no-op", result)
+	}
+}
+
+func TestVirtualNetworkPatchReadsMutatesAndApplies(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID:        uuidValue("ls-uuid"),
+		colName:        "net-a",
+		colPorts:       ovsSet(),
+		colOtherConfig: ovsMap(map[string]string{"subnet": "10.0.0.0/24"}),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:    "project",
+			ExternalIDOwnerNameKey:    "alpha",
+			ExternalIDLabelKey("env"): "dev",
+		}),
+	}}}, {Rows: []libovsdb.Row{{
+		colUUID:        uuidValue("ls-uuid"),
+		colName:        "net-a",
+		colPorts:       ovsSet(),
+		colOtherConfig: ovsMap(map[string]string{"subnet": "10.0.0.0/24"}),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:    "project",
+			ExternalIDOwnerNameKey:    "alpha",
+			ExternalIDLabelKey("env"): "dev",
+		}),
+	}}}, {Rows: []libovsdb.Row{{
+		colUUID:        uuidValue("ls-uuid"),
+		colName:        "net-a",
+		colPorts:       ovsSet(),
+		colOtherConfig: ovsMap(map[string]string{"subnet": "10.0.0.0/24"}),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:    "project",
+			ExternalIDOwnerNameKey:    "alpha",
+			ExternalIDLabelKey("env"): "dev",
+		}),
+	}}}, {Count: 1}}}
+	db.executor = rec
+	gateway := "10.0.1.1"
+	got, err := (&NBClient{db: db}).VirtualNetwork("net-a").Patch(context.Background(), VirtualNetworkPatch{
+		AddCIDRs:     []string{"10.0.1.0/24"},
+		RemoveCIDRs:  []string{"10.0.0.0/24"},
+		Gateway:      &gateway,
+		Labels:       Labels{"env": "prod"},
+		RemoveLabels: []string{"missing"},
+	})
+	if err != nil {
+		t.Fatalf("Patch returned error: %v", err)
+	}
+	if got.CIDRs[0] != "10.0.1.0/24" || got.Gateway != gateway || got.Labels["env"] != "prod" {
+		t.Fatalf("patched network = %#v", got)
+	}
+	if op := findRecordedOp(rec.ops, libovsdb.OperationMutate, tableLogicalSwitch); op == nil {
+		t.Fatalf("missing logical switch mutate after patch: %#v", rec.ops)
+	}
+}
+
 func TestLogicalSwitchDNSGetRestoresMultipleIPs(t *testing.T) {
 	db := testNBDBClient(t)
 	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
@@ -306,6 +425,64 @@ func TestLogicalSwitchDNSGetRestoresMultipleIPs(t *testing.T) {
 	}
 }
 
+func TestLogicalSwitchDNSPatchAddsAndRemovesRecords(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID: uuidValue("dns-uuid"),
+		colRecords: ovsMap(map[string]string{
+			"api.service": "10.0.0.2",
+			"old.service": "10.0.0.9",
+		}),
+		colExternalIDs: ovsMap(map[string]string{
+			dnsNameExternalID:      "net-a-dns",
+			ExternalIDOwnerKindKey: "project",
+			ExternalIDOwnerNameKey: "alpha",
+		}),
+	}}}, {Rows: []libovsdb.Row{{
+		colUUID: uuidValue("dns-uuid"),
+		colRecords: ovsMap(map[string]string{
+			"api.service": "10.0.0.2",
+			"old.service": "10.0.0.9",
+		}),
+		colExternalIDs: ovsMap(map[string]string{
+			dnsNameExternalID:      "net-a-dns",
+			ExternalIDOwnerKindKey: "project",
+			ExternalIDOwnerNameKey: "alpha",
+		}),
+	}}}, {Rows: []libovsdb.Row{{
+		colUUID: uuidValue("dns-uuid"),
+		colRecords: ovsMap(map[string]string{
+			"api.service": "10.0.0.2",
+			"old.service": "10.0.0.9",
+		}),
+		colExternalIDs: ovsMap(map[string]string{
+			dnsNameExternalID:      "net-a-dns",
+			ExternalIDOwnerKindKey: "project",
+			ExternalIDOwnerNameKey: "alpha",
+		}),
+	}}}, {Count: 1}, {Rows: []libovsdb.Row{{
+		colUUID: uuidValue("dns-uuid"),
+	}}}, {Count: 1}}}
+	db.executor = rec
+	got, err := (&NBClient{db: db}).LogicalSwitchDNS("net-a-dns").Patch(context.Background(), LogicalSwitchDNSPatch{
+		AddRecords:    []DNSRecord{{Domain: "api.service", IPs: []string{"10.0.0.3"}}, {Domain: "db.service", IPs: []string{"10.0.0.4"}}},
+		RemoveDomains: []string{"old.service"},
+	})
+	if err != nil {
+		t.Fatalf("Patch returned error: %v", err)
+	}
+	records := got.RecordMap()
+	if !reflect.DeepEqual(records["api.service"], []string{"10.0.0.2", "10.0.0.3"}) || len(records["old.service"]) != 0 {
+		t.Fatalf("patched DNS records = %#v", records)
+	}
+	if findRecordedOp(rec.ops, libovsdb.OperationMutate, tableDNS) == nil {
+		t.Fatalf("missing DNS mutate after patch: %#v", rec.ops)
+	}
+	if !hasRecordedMutation(rec.ops, tableDNS, colRecords, libovsdb.MutateOperationDelete) {
+		t.Fatalf("DNS patch ops = %#v, want records delete mutation", rec.ops)
+	}
+}
+
 func TestWorkloadAttachmentGetReadsLogicalSwitchPort(t *testing.T) {
 	db := testNBDBClient(t)
 	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
@@ -318,14 +495,70 @@ func TestWorkloadAttachmentGetReadsLogicalSwitchPort(t *testing.T) {
 			ExternalIDOwnerNameKey:         "alpha",
 			ExternalIDPrefix + "workload":  "vm-a",
 			ExternalIDPrefix + "interface": "eth0",
+			ExternalIDPrefix + "network":   "net-a",
 		}),
 	}}}}}
 	got, err := (&NBClient{db: db}).WorkloadAttachment("att-a").Get(context.Background())
 	if err != nil {
 		t.Fatalf("Get returned error: %v", err)
 	}
-	if got.Name != "att-a" || got.Workload != "vm-a" || got.InterfaceName != "eth0" || got.MAC != "00:16:3e:11:22:33" || got.IPs[0] != "10.0.0.10" {
+	if got.Name != "att-a" || got.Network != "net-a" || got.Workload != "vm-a" || got.InterfaceName != "eth0" || got.MAC != "00:16:3e:11:22:33" || got.IPs[0] != "10.0.0.10" {
 		t.Fatalf("workload attachment = %#v", got)
+	}
+}
+
+func TestWorkloadAttachmentPatchUpdatesIPsAndMetadata(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID:      uuidValue("lsp-uuid"),
+		colName:      "att-a",
+		colAddresses: stringSet([]string{"00:16:3e:11:22:33 10.0.0.10"}),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:        "project",
+			ExternalIDOwnerNameKey:        "alpha",
+			ExternalIDPrefix + "network":  "net-a",
+			ExternalIDPrefix + "workload": "vm-a",
+		}),
+	}}}, {Rows: []libovsdb.Row{{
+		colUUID:      uuidValue("lsp-uuid"),
+		colName:      "att-a",
+		colAddresses: stringSet([]string{"00:16:3e:11:22:33 10.0.0.10"}),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:        "project",
+			ExternalIDOwnerNameKey:        "alpha",
+			ExternalIDPrefix + "network":  "net-a",
+			ExternalIDPrefix + "workload": "vm-a",
+		}),
+	}}}, {Rows: []libovsdb.Row{{
+		colUUID:  uuidValue("ls-uuid"),
+		colName:  "net-a",
+		colPorts: ovsSet(),
+	}}}, {Rows: []libovsdb.Row{{
+		colUUID:      uuidValue("lsp-uuid"),
+		colName:      "att-a",
+		colAddresses: stringSet([]string{"00:16:3e:11:22:33 10.0.0.10"}),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:        "project",
+			ExternalIDOwnerNameKey:        "alpha",
+			ExternalIDPrefix + "network":  "net-a",
+			ExternalIDPrefix + "workload": "vm-a",
+		}),
+	}}}, {Count: 1}}}
+	db.executor = rec
+	iface := "eth1"
+	got, err := (&NBClient{db: db}).WorkloadAttachment("att-a").Patch(context.Background(), WorkloadAttachmentPatch{
+		InterfaceName: &iface,
+		AddIPs:        []string{"10.0.0.11"},
+		RemoveIPs:     []string{"10.0.0.10"},
+	})
+	if err != nil {
+		t.Fatalf("Patch returned error: %v", err)
+	}
+	if got.InterfaceName != "eth1" || !reflect.DeepEqual(got.IPs, []string{"10.0.0.11"}) {
+		t.Fatalf("patched attachment = %#v", got)
+	}
+	if op := findRecordedOp(rec.ops, libovsdb.OperationMutate, tableLogicalSwitchPort); op == nil {
+		t.Fatalf("missing logical switch port mutate after patch: %#v", rec.ops)
 	}
 }
 
@@ -336,17 +569,77 @@ func TestSecurityPolicyGetReadsPortGroupMetadata(t *testing.T) {
 		colName: "allow-web",
 		colACLs: ovsSet(uuidValue("acl-uuid")),
 		colExternalIDs: ovsMap(map[string]string{
-			ExternalIDOwnerKindKey:    "project",
-			ExternalIDOwnerNameKey:    "alpha",
-			ExternalIDLabelKey("env"): "test",
+			ExternalIDOwnerKindKey:       "project",
+			ExternalIDOwnerNameKey:       "alpha",
+			ExternalIDLabelKey("env"):    "test",
+			ExternalIDPrefix + "subject": "pg-web",
+		}),
+	}}}, {Rows: []libovsdb.Row{{
+		colUUID:      uuidValue("acl-uuid"),
+		colPriority:  1001,
+		colDirection: "to-lport",
+		colMatch:     "outport == @pg-web && tcp && ip4.src == 10.0.0.0/24 && tcp.dst == 80",
+		colAction:    "allow",
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDKindKey:              "SecurityPolicy",
+			ExternalIDNameKey:              "allow-web",
+			ExternalIDPrefix + "subject":   "pg-web",
+			ExternalIDPrefix + "rule-name": "web",
 		}),
 	}}}}}
 	got, err := (&NBClient{db: db}).SecurityPolicy("allow-web").Get(context.Background())
 	if err != nil {
 		t.Fatalf("Get returned error: %v", err)
 	}
-	if got.Name != "allow-web" || got.Owner.Name != "alpha" || got.Labels["env"] != "test" {
+	if got.Name != "allow-web" || got.Subject != "pg-web" || got.Owner.Name != "alpha" || got.Labels["env"] != "test" || len(got.Rules) != 1 || got.Rules[0].Name != "web" {
 		t.Fatalf("security policy = %#v", got)
+	}
+}
+
+func TestSecurityPolicyPatchAddsAndRemovesRules(t *testing.T) {
+	db := testNBDBClient(t)
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID: uuidValue("pg-uuid"),
+		colName: "allow-web",
+		colACLs: ovsSet(),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:       "project",
+			ExternalIDOwnerNameKey:       "alpha",
+			ExternalIDPrefix + "subject": "pg-web",
+		}),
+	}}}, {Rows: []libovsdb.Row{{
+		colUUID: uuidValue("pg-uuid"),
+		colName: "allow-web",
+		colACLs: ovsSet(),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:       "project",
+			ExternalIDOwnerNameKey:       "alpha",
+			ExternalIDPrefix + "subject": "pg-web",
+		}),
+	}}}, {Rows: []libovsdb.Row{{
+		colUUID: uuidValue("pg-uuid"),
+		colName: "allow-web",
+		colACLs: ovsSet(),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:       "project",
+			ExternalIDOwnerNameKey:       "alpha",
+			ExternalIDPrefix + "subject": "pg-web",
+		}),
+	}}}, {Rows: []libovsdb.Row{{
+		colUUID: uuidValue("pg-uuid"),
+	}}}, {Count: 1}, {Count: 1}}}
+	db.executor = rec
+	got, err := (&NBClient{db: db}).SecurityPolicy("allow-web").Patch(context.Background(), SecurityPolicyPatch{
+		AddRules: []SecurityRule{{Name: "ssh", Action: "allow", Protocol: "tcp", CIDRs: []string{"10.0.0.0/24"}, Ports: []int{22}}},
+	})
+	if err != nil {
+		t.Fatalf("Patch returned error: %v", err)
+	}
+	if len(got.Rules) != 1 || got.Rules[0].Name != "ssh" {
+		t.Fatalf("patched policy = %#v", got)
+	}
+	if op := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableACL); op == nil {
+		t.Fatalf("missing ACL insert after policy patch: %#v", rec.ops)
 	}
 }
 
@@ -379,4 +672,22 @@ func ovsMapStrings(t *testing.T, value any) map[string]string {
 		t.Fatalf("value %T is not ovs map: %#v", value, value)
 		return nil
 	}
+}
+
+func hasMutation(mutations []libovsdb.Mutation, column string, mutator libovsdb.Mutator) bool {
+	for _, mutation := range mutations {
+		if mutation.Column == column && mutation.Mutator == mutator {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRecordedMutation(ops []libovsdb.Operation, table, column string, mutator libovsdb.Mutator) bool {
+	for _, op := range ops {
+		if op.Op == libovsdb.OperationMutate && op.Table == table && hasMutation(op.Mutations, column, mutator) {
+			return true
+		}
+	}
+	return false
 }

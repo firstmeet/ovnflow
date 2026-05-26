@@ -39,6 +39,10 @@ type Diff struct {
 	Changes  []DiffChange
 }
 
+func (d Diff) Empty() bool {
+	return len(d.Changes) == 0
+}
+
 type DryRunResult struct {
 	Plan Plan
 	Diff Diff
@@ -46,6 +50,7 @@ type DryRunResult struct {
 
 type ReconcileResult struct {
 	Plan    Plan
+	Diff    Diff
 	Applied bool
 }
 

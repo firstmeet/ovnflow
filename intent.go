@@ -3,9 +3,12 @@ package ovnflow
 import (
 	"context"
 	"net"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+
+	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 type VirtualNetwork struct {
@@ -56,6 +59,49 @@ type SecurityRule struct {
 	CIDRs       []string
 	Ports       []int
 	Established bool
+}
+
+type VirtualNetworkPatch struct {
+	AddCIDRs     []string
+	RemoveCIDRs  []string
+	Gateway      *string
+	DNS          *LogicalSwitchDNS
+	Owner        *OwnerRef
+	Labels       Labels
+	RemoveLabels []string
+}
+
+type LogicalSwitchDNSPatch struct {
+	ReplaceRecords bool
+	Records        []DNSRecord
+	AddRecords     []DNSRecord
+	RemoveDomains  []string
+	Owner          *OwnerRef
+	Labels         Labels
+	RemoveLabels   []string
+}
+
+type WorkloadAttachmentPatch struct {
+	Network       *string
+	Workload      *string
+	InterfaceName *string
+	MAC           *string
+	AddIPs        []string
+	RemoveIPs     []string
+	Owner         *OwnerRef
+	Labels        Labels
+	RemoveLabels  []string
+}
+
+type SecurityPolicyPatch struct {
+	Subject      *string
+	ReplaceRules bool
+	Rules        []SecurityRule
+	AddRules     []SecurityRule
+	RemoveRules  []string
+	Owner        *OwnerRef
+	Labels       Labels
+	RemoveLabels []string
 }
 
 func (n *NBClient) VirtualNetwork(name string) *VirtualNetworkRef {
@@ -127,6 +173,58 @@ func (r *VirtualNetworkRef) Delete(ctx context.Context) error {
 	return r.client.LogicalSwitch(r.name).Delete().Execute(ctx)
 }
 
+func (r *VirtualNetworkRef) Apply(ctx context.Context, network VirtualNetwork) error {
+	if r.client == nil || r.client.db == nil {
+		return ErrBackendUnavailable
+	}
+	if network.Name == "" {
+		network.Name = r.name
+	}
+	if network.Name != r.name {
+		return wrap(ErrorConflict, dbOVNNorthbound, tableLogicalSwitch, "apply", network.Name, "virtual network name does not match reference", nil)
+	}
+	builder := &VirtualNetworkBuilder{ref: r, spec: network}
+	_, err := builder.Reconcile(ctx)
+	return err
+}
+
+func (r *VirtualNetworkRef) Patch(ctx context.Context, patch VirtualNetworkPatch) (*VirtualNetwork, error) {
+	current, err := r.Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	next := cloneVirtualNetwork(current)
+	next.CIDRs = uniqueStrings(append(next.CIDRs, patch.AddCIDRs...))
+	next.CIDRs = removeStrings(next.CIDRs, patch.RemoveCIDRs)
+	if patch.Gateway != nil {
+		next.Gateway = *patch.Gateway
+	}
+	if patch.DNS != nil {
+		next.DNS = cloneLogicalSwitchDNS(patch.DNS)
+	}
+	if patch.Owner != nil {
+		next.Owner = *patch.Owner
+	}
+	next.Labels = patchLabels(next.Labels, patch.Labels, patch.RemoveLabels)
+	if err := r.Apply(ctx, next); err != nil {
+		return nil, err
+	}
+	var removeOtherConfig []string
+	if len(next.CIDRs) == 0 && len(current.CIDRs) > 0 {
+		removeOtherConfig = append(removeOtherConfig, "subnet")
+	}
+	if patch.Gateway != nil && next.Gateway == "" && current.Gateway != "" {
+		removeOtherConfig = append(removeOtherConfig, "gateway")
+	}
+	if err := r.client.deleteMapKeys(ctx, tableLogicalSwitch, r.name, colOtherConfig, conditionName(r.name), removeOtherConfig); err != nil {
+		return nil, err
+	}
+	if err := r.client.deleteExternalIDKeys(ctx, tableLogicalSwitch, r.name, conditionName(r.name), labelDeleteKeys(patch.RemoveLabels, patch.Labels)); err != nil {
+		return nil, err
+	}
+	return &next, nil
+}
+
 type VirtualNetworkBuilder struct {
 	ref  *VirtualNetworkRef
 	spec VirtualNetwork
@@ -185,7 +283,11 @@ func (b *VirtualNetworkBuilder) DryRun(ctx context.Context) (DryRunResult, error
 	if err != nil {
 		return DryRunResult{}, err
 	}
-	return DryRunResult{Plan: plan, Diff: Diff{Resource: "VirtualNetwork", Name: b.spec.Name}}, nil
+	diff, err := b.diff(ctx)
+	if err != nil {
+		return DryRunResult{}, err
+	}
+	return DryRunResult{Plan: plan, Diff: diff}, nil
 }
 
 func (b *VirtualNetworkBuilder) Reconcile(ctx context.Context) (ReconcileResult, error) {
@@ -193,13 +295,20 @@ func (b *VirtualNetworkBuilder) Reconcile(ctx context.Context) (ReconcileResult,
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	diff, err := b.diff(ctx)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
 	if b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
-		return ReconcileResult{Plan: plan, Applied: false}, nil
+		return ReconcileResult{Plan: plan, Diff: diff, Applied: false}, nil
+	}
+	if diff.Empty() {
+		return ReconcileResult{Plan: plan, Diff: diff, Applied: false}, nil
 	}
 	if err := b.reconcileOVSDB(ctx); err != nil {
 		return ReconcileResult{}, err
 	}
-	return ReconcileResult{Plan: plan, Applied: true}, nil
+	return ReconcileResult{Plan: plan, Diff: diff, Applied: !diff.Empty()}, nil
 }
 
 func (b *VirtualNetworkBuilder) Execute(ctx context.Context) error {
@@ -253,6 +362,74 @@ func (r *LogicalSwitchDNSRef) Delete(ctx context.Context) error {
 	return r.client.DNS(r.name).Delete().Execute(ctx)
 }
 
+func (r *LogicalSwitchDNSRef) Apply(ctx context.Context, dns LogicalSwitchDNS) error {
+	if r.client == nil || r.client.db == nil {
+		return ErrBackendUnavailable
+	}
+	if dns.Name == "" {
+		dns.Name = r.name
+	}
+	if dns.Name != r.name {
+		return wrap(ErrorConflict, dbOVNNorthbound, tableDNS, "apply", dns.Name, "logical switch dns name does not match reference", nil)
+	}
+	builder := &LogicalSwitchDNSBuilder{ref: r, spec: dns}
+	_, err := builder.Reconcile(ctx)
+	return err
+}
+
+func (r *LogicalSwitchDNSRef) Patch(ctx context.Context, patch LogicalSwitchDNSPatch) (*LogicalSwitchDNS, error) {
+	current, err := r.Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	next := cloneLogicalSwitchDNS(current)
+	if patch.ReplaceRecords {
+		next.Records = cloneDNSRecords(patch.Records)
+	}
+	next.Records = mergeDNSRecords(next.Records, patch.AddRecords)
+	next.Records = removeDNSRecordDomains(next.Records, patch.RemoveDomains)
+	if patch.Owner != nil {
+		next.Owner = *patch.Owner
+	}
+	next.Labels = patchLabels(next.Labels, patch.Labels, patch.RemoveLabels)
+	if err := r.Apply(ctx, next); err != nil {
+		return nil, err
+	}
+	if err := r.deleteRecords(ctx, dnsDomainsAbsent(current.Records, next.Records)); err != nil {
+		return nil, err
+	}
+	if err := r.client.deleteExternalIDKeys(ctx, tableDNS, r.name, nbExternalIDCondition(dnsNameExternalID, r.name), labelDeleteKeys(patch.RemoveLabels, patch.Labels)); err != nil {
+		return nil, err
+	}
+	return &next, nil
+}
+
+func (r *LogicalSwitchDNSRef) deleteRecords(ctx context.Context, domains []string) error {
+	domains = uniqueStrings(domains)
+	if len(domains) == 0 {
+		return nil
+	}
+	rows, err := r.client.selectRows(ctx, tableDNS, nbExternalIDCondition(dnsNameExternalID, r.name), []string{colUUID}, r.name)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	results, err := r.client.db.transact(ctx, tableDNS, "patch", r.name, libovsdb.Operation{
+		Op:    libovsdb.OperationMutate,
+		Table: tableDNS,
+		Where: conditionUUID(rowUUIDValue(rows[0])),
+		Mutations: []libovsdb.Mutation{
+			*libovsdb.NewMutation(colRecords, libovsdb.MutateOperationDelete, ovsMapKeys(domains)),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, []int{0}, dbOVNNorthbound, tableDNS, "patch", r.name)
+}
+
 func (b *LogicalSwitchDNSBuilder) AddRecord(domain string, ips ...string) *LogicalSwitchDNSBuilder {
 	b.spec.Records = append(b.spec.Records, DNSRecord{Domain: domain, IPs: append([]string{}, ips...)})
 	return b
@@ -292,7 +469,11 @@ func (b *LogicalSwitchDNSBuilder) DryRun(ctx context.Context) (DryRunResult, err
 	if err != nil {
 		return DryRunResult{}, err
 	}
-	return DryRunResult{Plan: plan, Diff: Diff{Resource: "LogicalSwitchDNS", Name: b.spec.Name}}, nil
+	diff, err := b.diff(ctx)
+	if err != nil {
+		return DryRunResult{}, err
+	}
+	return DryRunResult{Plan: plan, Diff: diff}, nil
 }
 
 func (b *LogicalSwitchDNSBuilder) Reconcile(ctx context.Context) (ReconcileResult, error) {
@@ -300,13 +481,20 @@ func (b *LogicalSwitchDNSBuilder) Reconcile(ctx context.Context) (ReconcileResul
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	diff, err := b.diff(ctx)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
 	if b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
-		return ReconcileResult{Plan: plan, Applied: false}, nil
+		return ReconcileResult{Plan: plan, Diff: diff, Applied: false}, nil
+	}
+	if diff.Empty() {
+		return ReconcileResult{Plan: plan, Diff: diff, Applied: false}, nil
 	}
 	if err := b.reconcileOVSDB(ctx); err != nil {
 		return ReconcileResult{}, err
 	}
-	return ReconcileResult{Plan: plan, Applied: true}, nil
+	return ReconcileResult{Plan: plan, Diff: diff, Applied: !diff.Empty()}, nil
 }
 
 func (d LogicalSwitchDNS) RecordMap() map[string][]string {
@@ -359,6 +547,61 @@ func (r *WorkloadAttachmentRef) Delete(ctx context.Context) error {
 		return ErrBackendUnavailable
 	}
 	return r.client.TableLogicalSwitchPort(r.name).Delete().Execute(ctx)
+}
+
+func (r *WorkloadAttachmentRef) Apply(ctx context.Context, attachment WorkloadAttachment) error {
+	if r.client == nil || r.client.db == nil {
+		return ErrBackendUnavailable
+	}
+	if attachment.Name == "" {
+		attachment.Name = r.name
+	}
+	if attachment.Name != r.name {
+		return wrap(ErrorConflict, dbOVNNorthbound, tableLogicalSwitchPort, "apply", attachment.Name, "workload attachment name does not match reference", nil)
+	}
+	builder := &WorkloadAttachmentBuilder{ref: r, spec: attachment}
+	_, err := builder.Reconcile(ctx)
+	return err
+}
+
+func (r *WorkloadAttachmentRef) Patch(ctx context.Context, patch WorkloadAttachmentPatch) (*WorkloadAttachment, error) {
+	current, err := r.Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	next := cloneWorkloadAttachment(current)
+	if patch.Network != nil {
+		next.Network = *patch.Network
+	}
+	if patch.Workload != nil {
+		next.Workload = *patch.Workload
+	}
+	if patch.InterfaceName != nil {
+		next.InterfaceName = *patch.InterfaceName
+	}
+	if patch.MAC != nil {
+		next.MAC = *patch.MAC
+	}
+	next.IPs = uniqueStrings(append(next.IPs, patch.AddIPs...))
+	next.IPs = removeStrings(next.IPs, patch.RemoveIPs)
+	if patch.Owner != nil {
+		next.Owner = *patch.Owner
+	}
+	next.Labels = patchLabels(next.Labels, patch.Labels, patch.RemoveLabels)
+	if err := r.Apply(ctx, next); err != nil {
+		return nil, err
+	}
+	removeKeys := labelDeleteKeys(patch.RemoveLabels, patch.Labels)
+	if patch.Workload != nil && *patch.Workload == "" {
+		removeKeys = append(removeKeys, ExternalIDPrefix+"workload")
+	}
+	if patch.InterfaceName != nil && *patch.InterfaceName == "" {
+		removeKeys = append(removeKeys, ExternalIDPrefix+"interface")
+	}
+	if err := r.client.deleteExternalIDKeys(ctx, tableLogicalSwitchPort, r.name, conditionName(r.name), removeKeys); err != nil {
+		return nil, err
+	}
+	return &next, nil
 }
 
 type WorkloadAttachmentBuilder struct {
@@ -425,7 +668,11 @@ func (b *WorkloadAttachmentBuilder) DryRun(ctx context.Context) (DryRunResult, e
 	if err != nil {
 		return DryRunResult{}, err
 	}
-	return DryRunResult{Plan: plan, Diff: Diff{Resource: "WorkloadAttachment", Name: b.spec.Name}}, nil
+	diff, err := b.diff(ctx)
+	if err != nil {
+		return DryRunResult{}, err
+	}
+	return DryRunResult{Plan: plan, Diff: diff}, nil
 }
 
 func (b *WorkloadAttachmentBuilder) Reconcile(ctx context.Context) (ReconcileResult, error) {
@@ -433,13 +680,20 @@ func (b *WorkloadAttachmentBuilder) Reconcile(ctx context.Context) (ReconcileRes
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	diff, err := b.diff(ctx)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
 	if b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
-		return ReconcileResult{Plan: plan, Applied: false}, nil
+		return ReconcileResult{Plan: plan, Diff: diff, Applied: false}, nil
+	}
+	if diff.Empty() {
+		return ReconcileResult{Plan: plan, Diff: diff, Applied: false}, nil
 	}
 	if err := b.reconcileOVSDB(ctx); err != nil {
 		return ReconcileResult{}, err
 	}
-	return ReconcileResult{Plan: plan, Applied: true}, nil
+	return ReconcileResult{Plan: plan, Diff: diff, Applied: !diff.Empty()}, nil
 }
 
 func (b *WorkloadAttachmentBuilder) Execute(ctx context.Context) error {
@@ -467,7 +721,19 @@ func (r *SecurityPolicyRef) Get(ctx context.Context) (*SecurityPolicy, error) {
 	if err != nil {
 		return nil, err
 	}
-	return securityPolicyFromPortGroup(pg), nil
+	policy := securityPolicyFromPortGroup(pg)
+	acls, err := r.client.selectACLsByUUID(ctx, pg.ACLs, r.name)
+	if err != nil {
+		return nil, err
+	}
+	for _, acl := range acls {
+		if acl.ExternalIDs[ExternalIDKindKey] != "SecurityPolicy" || acl.ExternalIDs[ExternalIDNameKey] != r.name {
+			continue
+		}
+		policy.Rules = append(policy.Rules, securityRuleFromACL(acl))
+	}
+	*policy = normalizeSecurityPolicy(*policy)
+	return policy, nil
 }
 
 func (r *SecurityPolicyRef) Inspect(ctx context.Context) (InspectResult, error) {
@@ -486,6 +752,52 @@ func (r *SecurityPolicyRef) Delete(ctx context.Context) error {
 		return ErrBackendUnavailable
 	}
 	return r.client.PortGroup(r.name).Delete().Execute(ctx)
+}
+
+func (r *SecurityPolicyRef) Apply(ctx context.Context, policy SecurityPolicy) error {
+	if r.client == nil || r.client.db == nil {
+		return ErrBackendUnavailable
+	}
+	if policy.Name == "" {
+		policy.Name = r.name
+	}
+	if policy.Name != r.name {
+		return wrap(ErrorConflict, dbOVNNorthbound, tablePortGroup, "apply", policy.Name, "security policy name does not match reference", nil)
+	}
+	builder := &SecurityPolicyBuilder{ref: r, spec: policy}
+	_, err := builder.Reconcile(ctx)
+	return err
+}
+
+func (r *SecurityPolicyRef) Patch(ctx context.Context, patch SecurityPolicyPatch) (*SecurityPolicy, error) {
+	current, err := r.Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	next := cloneSecurityPolicy(current)
+	if patch.Subject != nil {
+		next.Subject = *patch.Subject
+	}
+	if patch.ReplaceRules {
+		next.Rules = cloneSecurityRules(patch.Rules)
+	}
+	next.Rules = append(next.Rules, cloneSecurityRules(patch.AddRules)...)
+	next.Rules = removeSecurityRules(next.Rules, patch.RemoveRules)
+	if patch.Owner != nil {
+		next.Owner = *patch.Owner
+	}
+	next.Labels = patchLabels(next.Labels, patch.Labels, patch.RemoveLabels)
+	if err := r.Apply(ctx, next); err != nil {
+		return nil, err
+	}
+	removeKeys := labelDeleteKeys(patch.RemoveLabels, patch.Labels)
+	if patch.Subject != nil && *patch.Subject == "" {
+		removeKeys = append(removeKeys, ExternalIDPrefix+"subject")
+	}
+	if err := r.client.deleteExternalIDKeys(ctx, tablePortGroup, r.name, conditionName(r.name), removeKeys); err != nil {
+		return nil, err
+	}
+	return &next, nil
 }
 
 type SecurityPolicyBuilder struct {
@@ -537,7 +849,11 @@ func (b *SecurityPolicyBuilder) DryRun(ctx context.Context) (DryRunResult, error
 	if err != nil {
 		return DryRunResult{}, err
 	}
-	return DryRunResult{Plan: plan, Diff: Diff{Resource: "SecurityPolicy", Name: b.spec.Name}}, nil
+	diff, err := b.diff(ctx)
+	if err != nil {
+		return DryRunResult{}, err
+	}
+	return DryRunResult{Plan: plan, Diff: diff}, nil
 }
 
 func (b *SecurityPolicyBuilder) Reconcile(ctx context.Context) (ReconcileResult, error) {
@@ -545,13 +861,20 @@ func (b *SecurityPolicyBuilder) Reconcile(ctx context.Context) (ReconcileResult,
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	diff, err := b.diff(ctx)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
 	if b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
-		return ReconcileResult{Plan: plan, Applied: false}, nil
+		return ReconcileResult{Plan: plan, Diff: diff, Applied: false}, nil
+	}
+	if diff.Empty() {
+		return ReconcileResult{Plan: plan, Diff: diff, Applied: false}, nil
 	}
 	if err := b.reconcileOVSDB(ctx); err != nil {
 		return ReconcileResult{}, err
 	}
-	return ReconcileResult{Plan: plan, Applied: true}, nil
+	return ReconcileResult{Plan: plan, Diff: diff, Applied: !diff.Empty()}, nil
 }
 
 func (b *SecurityPolicyBuilder) Execute(ctx context.Context) error {
@@ -676,7 +999,117 @@ func (b *VirtualNetworkBuilder) reconcileOVSDB(ctx context.Context) error {
 			return err
 		}
 	}
+	ops, err := b.logicalSwitchPatchOps(ctx, b.spec.Gateway, nil, nil)
+	if err != nil {
+		return err
+	}
+	if len(ops) > 0 {
+		results, err := b.ref.client.db.transact(ctx, tableLogicalSwitch, "patch", b.spec.Name, ops...)
+		if err != nil {
+			return err
+		}
+		if err := ensureAffected(results, mustAffectNonInsertOps(ops), dbOVNNorthbound, tableLogicalSwitch, "patch", b.spec.Name); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (b *VirtualNetworkBuilder) logicalSwitchPatchOps(ctx context.Context, gateway string, removeOtherConfig []string, removeExternalIDs []string) ([]libovsdb.Operation, error) {
+	rows, err := b.ref.client.selectLogicalSwitches(ctx, b.spec.Name)
+	if err != nil {
+		if IsKind(err, ErrorNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	var mutations []libovsdb.Mutation
+	if gateway != "" {
+		mutations = append(mutations, *libovsdb.NewMutation(colOtherConfig, libovsdb.MutateOperationInsert, ovsMap(map[string]string{"gateway": gateway})))
+	}
+	if len(removeOtherConfig) > 0 {
+		mutations = append(mutations, *libovsdb.NewMutation(colOtherConfig, libovsdb.MutateOperationDelete, ovsMapKeys(removeOtherConfig)))
+	}
+	if len(removeExternalIDs) > 0 {
+		mutations = append(mutations, *libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationDelete, ovsMapKeys(removeExternalIDs)))
+	}
+	if len(mutations) == 0 {
+		return nil, nil
+	}
+	return []libovsdb.Operation{{
+		Op:        libovsdb.OperationMutate,
+		Table:     tableLogicalSwitch,
+		Where:     conditionUUID(rows[0].UUID),
+		Mutations: mutations,
+	}}, nil
+}
+
+func (n *NBClient) deleteExternalIDKeys(ctx context.Context, table, object string, where []libovsdb.Condition, keys []string) error {
+	return n.deleteMapKeys(ctx, table, object, colExternalIDs, where, keys)
+}
+
+func (n *NBClient) deleteMapKeys(ctx context.Context, table, object, column string, where []libovsdb.Condition, keys []string) error {
+	keys = uniqueStrings(keys)
+	if len(keys) == 0 {
+		return nil
+	}
+	rows, err := n.selectRows(ctx, table, where, []string{colUUID}, object)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	results, err := n.db.transact(ctx, table, "patch", object, libovsdb.Operation{
+		Op:    libovsdb.OperationMutate,
+		Table: table,
+		Where: conditionUUID(rowUUIDValue(rows[0])),
+		Mutations: []libovsdb.Mutation{
+			*libovsdb.NewMutation(column, libovsdb.MutateOperationDelete, ovsMapKeys(keys)),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, []int{0}, dbOVNNorthbound, table, "patch", object)
+}
+
+func (b *VirtualNetworkBuilder) diff(ctx context.Context) (Diff, error) {
+	desired := normalizeVirtualNetwork(b.spec)
+	diff := Diff{Resource: "VirtualNetwork", Name: desired.Name}
+	current, found, err := b.current(ctx)
+	if err != nil {
+		return Diff{}, err
+	}
+	if !found {
+		diff.Changes = append(diff.Changes, DiffChange{Path: "/", Before: nil, After: desired})
+		return diff, nil
+	}
+	appendFieldDiff(&diff, "cidrs", current.CIDRs, desired.CIDRs)
+	appendFieldDiff(&diff, "gateway", current.Gateway, desired.Gateway)
+	appendFieldDiff(&diff, "owner", current.Owner, desired.Owner)
+	appendFieldDiff(&diff, "labels", current.Labels, desired.Labels)
+	if desired.DNS.Name != "" || len(desired.DNS.Records) > 0 {
+		appendFieldDiff(&diff, "dns", normalizeLogicalSwitchDNS(current.DNS), normalizeLogicalSwitchDNS(desired.DNS))
+	}
+	return diff, nil
+}
+
+func (b *VirtualNetworkBuilder) current(ctx context.Context) (VirtualNetwork, bool, error) {
+	if b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
+		return VirtualNetwork{}, false, nil
+	}
+	current, err := b.ref.Get(ctx)
+	if err != nil {
+		if IsKind(err, ErrorNotFound) {
+			return VirtualNetwork{}, false, nil
+		}
+		return VirtualNetwork{}, false, err
+	}
+	return normalizeVirtualNetwork(*current), true, nil
 }
 
 func (b *LogicalSwitchDNSBuilder) reconcileOVSDB(ctx context.Context) error {
@@ -698,6 +1131,37 @@ func (b *LogicalSwitchDNSBuilder) reconcileOVSDBWithOwner(ctx context.Context, o
 	return dns.Execute(ctx)
 }
 
+func (b *LogicalSwitchDNSBuilder) diff(ctx context.Context) (Diff, error) {
+	desired := normalizeLogicalSwitchDNS(b.spec)
+	diff := Diff{Resource: "LogicalSwitchDNS", Name: desired.Name}
+	current, found, err := b.current(ctx)
+	if err != nil {
+		return Diff{}, err
+	}
+	if !found {
+		diff.Changes = append(diff.Changes, DiffChange{Path: "/", Before: nil, After: desired})
+		return diff, nil
+	}
+	appendFieldDiff(&diff, "records", dnsRecordComparable(current.Records), dnsRecordComparable(desired.Records))
+	appendFieldDiff(&diff, "owner", current.Owner, desired.Owner)
+	appendFieldDiff(&diff, "labels", current.Labels, desired.Labels)
+	return diff, nil
+}
+
+func (b *LogicalSwitchDNSBuilder) current(ctx context.Context) (LogicalSwitchDNS, bool, error) {
+	if b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
+		return LogicalSwitchDNS{}, false, nil
+	}
+	current, err := b.ref.Get(ctx)
+	if err != nil {
+		if IsKind(err, ErrorNotFound) {
+			return LogicalSwitchDNS{}, false, nil
+		}
+		return LogicalSwitchDNS{}, false, err
+	}
+	return normalizeLogicalSwitchDNS(*current), true, nil
+}
+
 func (b *WorkloadAttachmentBuilder) reconcileOVSDB(ctx context.Context) error {
 	externalIDs, err := intentExternalIDs("WorkloadAttachment", b.spec.Name, b.spec.Owner, b.spec.Labels)
 	if err != nil {
@@ -708,6 +1172,9 @@ func (b *WorkloadAttachmentBuilder) reconcileOVSDB(ctx context.Context) error {
 	}
 	if b.spec.InterfaceName != "" {
 		externalIDs[ExternalIDPrefix+"interface"] = b.spec.InterfaceName
+	}
+	if b.spec.Network != "" {
+		externalIDs[ExternalIDPrefix+"network"] = b.spec.Network
 	}
 	port := b.ref.client.LogicalSwitch(b.spec.Network).Ensure().AddPort(b.spec.Name)
 	if b.spec.MAC != "" && len(b.spec.IPs) == 1 {
@@ -728,10 +1195,60 @@ func (b *WorkloadAttachmentBuilder) reconcileOVSDB(ctx context.Context) error {
 	return port.Execute(ctx)
 }
 
+func (b *WorkloadAttachmentBuilder) diff(ctx context.Context) (Diff, error) {
+	desired := normalizeWorkloadAttachment(b.spec)
+	diff := Diff{Resource: "WorkloadAttachment", Name: desired.Name}
+	current, found, err := b.current(ctx)
+	if err != nil {
+		return Diff{}, err
+	}
+	if !found {
+		diff.Changes = append(diff.Changes, DiffChange{Path: "/", Before: nil, After: desired})
+		return diff, nil
+	}
+	appendFieldDiff(&diff, "network", current.Network, desired.Network)
+	appendFieldDiff(&diff, "workload", current.Workload, desired.Workload)
+	appendFieldDiff(&diff, "interface", current.InterfaceName, desired.InterfaceName)
+	appendFieldDiff(&diff, "mac", current.MAC, desired.MAC)
+	appendFieldDiff(&diff, "ips", current.IPs, desired.IPs)
+	appendFieldDiff(&diff, "owner", current.Owner, desired.Owner)
+	appendFieldDiff(&diff, "labels", current.Labels, desired.Labels)
+	return diff, nil
+}
+
+func (b *WorkloadAttachmentBuilder) current(ctx context.Context) (WorkloadAttachment, bool, error) {
+	if b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
+		return WorkloadAttachment{}, false, nil
+	}
+	current, err := b.ref.Get(ctx)
+	if err != nil {
+		if IsKind(err, ErrorNotFound) {
+			return WorkloadAttachment{}, false, nil
+		}
+		return WorkloadAttachment{}, false, err
+	}
+	return normalizeWorkloadAttachment(*current), true, nil
+}
+
 func (b *SecurityPolicyBuilder) reconcileOVSDB(ctx context.Context) error {
 	externalIDs, err := intentExternalIDs("SecurityPolicy", b.spec.Name, b.spec.Owner, b.spec.Labels)
 	if err != nil {
 		return err
+	}
+	if b.spec.Subject != "" {
+		externalIDs[ExternalIDPrefix+"subject"] = b.spec.Subject
+	}
+	if b.ref != nil && b.ref.client != nil && b.ref.client.db != nil {
+		if preOps, err := b.replaceSecurityPolicyACLOps(ctx); err != nil {
+			return err
+		} else if len(preOps) > 0 {
+			row := libovsdb.Row{colName: b.spec.Name}
+			nbSetUUIDSet(row, colACLs, nil)
+			setRowMap(row, colExternalIDs, externalIDs)
+			var mutations []libovsdb.Mutation
+			nbAppendMapMutation(&mutations, colExternalIDs, externalIDs)
+			return b.ref.client.executeNamedWithPreOps(ctx, tablePortGroup, b.spec.Name, nbModeEnsure, row, mutations, preOps)
+		}
 	}
 	pg := b.ref.client.PortGroup(b.spec.Name).Ensure()
 	for key, value := range externalIDs {
@@ -748,6 +1265,110 @@ func (b *SecurityPolicyBuilder) reconcileOVSDB(ctx context.Context) error {
 		}
 	}
 	return pg.Execute(ctx)
+}
+
+func (b *SecurityPolicyBuilder) replaceSecurityPolicyACLOps(ctx context.Context) ([]libovsdb.Operation, error) {
+	current, err := b.ref.client.GetPortGroup(ctx, b.spec.Name)
+	if err != nil {
+		if IsKind(err, ErrorNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	acls, err := b.ref.client.selectACLsByUUID(ctx, current.ACLs, b.spec.Name)
+	if err != nil {
+		return nil, err
+	}
+	var removeRefs []string
+	var ops []libovsdb.Operation
+	for _, acl := range acls {
+		if acl.ExternalIDs[ExternalIDKindKey] != "SecurityPolicy" || acl.ExternalIDs[ExternalIDNameKey] != b.spec.Name {
+			continue
+		}
+		removeRefs = append(removeRefs, acl.UUID)
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationDelete,
+			Table: tableACL,
+			Where: conditionUUID(acl.UUID),
+		})
+	}
+	if len(removeRefs) > 0 {
+		ops = append([]libovsdb.Operation{{
+			Op:    libovsdb.OperationMutate,
+			Table: tablePortGroup,
+			Where: conditionUUID(current.UUID),
+			Mutations: []libovsdb.Mutation{
+				*libovsdb.NewMutation(colACLs, libovsdb.MutateOperationDelete, uuidSet(removeRefs...)),
+			},
+		}}, ops...)
+	}
+	for i, rule := range b.spec.Rules {
+		externalIDs, err := intentExternalIDs("SecurityPolicy", b.spec.Name, b.spec.Owner, b.spec.Labels)
+		if err != nil {
+			return nil, err
+		}
+		if b.spec.Subject != "" {
+			externalIDs[ExternalIDPrefix+"subject"] = b.spec.Subject
+		}
+		externalIDs[ExternalIDPrefix+"rule-index"] = strconv.Itoa(i)
+		if rule.Name != "" {
+			externalIDs[ExternalIDPrefix+"rule-name"] = rule.Name
+		}
+		aclUUID := namedUUID("acl")
+		ops = append(ops, libovsdb.Operation{
+			Op:       libovsdb.OperationInsert,
+			Table:    tableACL,
+			UUIDName: aclUUID,
+			Row: inlineACLRow(inlineACLSpec{
+				direction:   ruleDirection(rule),
+				priority:    rulePriority(rule),
+				match:       ruleMatch(b.spec.Subject, rule),
+				action:      ruleAction(rule),
+				externalIDs: externalIDs,
+			}),
+		})
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationMutate,
+			Table: tablePortGroup,
+			Where: conditionUUID(current.UUID),
+			Mutations: []libovsdb.Mutation{
+				*libovsdb.NewMutation(colACLs, libovsdb.MutateOperationInsert, uuidSet(aclUUID)),
+			},
+		})
+	}
+	return ops, nil
+}
+
+func (b *SecurityPolicyBuilder) diff(ctx context.Context) (Diff, error) {
+	desired := normalizeSecurityPolicy(b.spec)
+	diff := Diff{Resource: "SecurityPolicy", Name: desired.Name}
+	current, found, err := b.current(ctx)
+	if err != nil {
+		return Diff{}, err
+	}
+	if !found {
+		diff.Changes = append(diff.Changes, DiffChange{Path: "/", Before: nil, After: desired})
+		return diff, nil
+	}
+	appendFieldDiff(&diff, "subject", current.Subject, desired.Subject)
+	appendFieldDiff(&diff, "rules", current.Rules, desired.Rules)
+	appendFieldDiff(&diff, "owner", current.Owner, desired.Owner)
+	appendFieldDiff(&diff, "labels", current.Labels, desired.Labels)
+	return diff, nil
+}
+
+func (b *SecurityPolicyBuilder) current(ctx context.Context) (SecurityPolicy, bool, error) {
+	if b.ref == nil || b.ref.client == nil || b.ref.client.db == nil {
+		return SecurityPolicy{}, false, nil
+	}
+	current, err := b.ref.Get(ctx)
+	if err != nil {
+		if IsKind(err, ErrorNotFound) {
+			return SecurityPolicy{}, false, nil
+		}
+		return SecurityPolicy{}, false, err
+	}
+	return normalizeSecurityPolicy(*current), true, nil
 }
 
 func virtualNetworkFromLogicalSwitch(ls *LogicalSwitch) *VirtualNetwork {
@@ -794,6 +1415,7 @@ func workloadAttachmentFromLogicalSwitchPort(lsp *LogicalSwitchPort) *WorkloadAt
 	owner, labels := ownerAndLabelsFromExternalIDs(lsp.ExternalIDs)
 	out := &WorkloadAttachment{
 		Name:          lsp.Name,
+		Network:       lsp.ExternalIDs[ExternalIDPrefix+"network"],
 		Workload:      lsp.ExternalIDs[ExternalIDPrefix+"workload"],
 		InterfaceName: lsp.ExternalIDs[ExternalIDPrefix+"interface"],
 		Owner:         owner,
@@ -817,10 +1439,78 @@ func securityPolicyFromPortGroup(pg *PortGroup) *SecurityPolicy {
 	}
 	owner, labels := ownerAndLabelsFromExternalIDs(pg.ExternalIDs)
 	return &SecurityPolicy{
-		Name:   pg.Name,
-		Owner:  owner,
-		Labels: labels,
+		Name:    pg.Name,
+		Subject: pg.ExternalIDs[ExternalIDPrefix+"subject"],
+		Owner:   owner,
+		Labels:  labels,
 	}
+}
+
+func (n *NBClient) selectACLsByUUID(ctx context.Context, ids []string, object string) ([]ACL, error) {
+	var out []ACL
+	for _, id := range uniqueStrings(ids) {
+		rows, err := n.selectRows(ctx, tableACL, conditionUUID(id), nbACLColumns(), object)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			continue
+		}
+		out = append(out, *aclFromRow(rows[0]))
+	}
+	return out, nil
+}
+
+func securityRuleFromACL(acl ACL) SecurityRule {
+	rule := SecurityRule{
+		Name:      acl.ExternalIDs[ExternalIDPrefix+"rule-name"],
+		Action:    acl.Action,
+		Direction: acl.Direction,
+		Protocol:  protocolFromACLMatch(acl.Match),
+		CIDRs:     cidrsFromACLMatch(acl.Match),
+		Ports:     portsFromACLMatch(acl.Match),
+	}
+	if strings.Contains(acl.Match, "ct.est") {
+		rule.Established = true
+	}
+	return rule
+}
+
+func protocolFromACLMatch(match string) string {
+	for _, protocol := range []string{"tcp", "udp", "icmp"} {
+		for _, clause := range strings.Split(match, "&&") {
+			if strings.TrimSpace(clause) == protocol {
+				return protocol
+			}
+		}
+	}
+	return ""
+}
+
+func cidrsFromACLMatch(match string) []string {
+	var out []string
+	for _, clause := range strings.Split(match, "&&") {
+		clause = strings.TrimSpace(clause)
+		if strings.HasPrefix(clause, "ip4.src == ") {
+			out = append(out, strings.TrimPrefix(clause, "ip4.src == "))
+		}
+	}
+	return out
+}
+
+func portsFromACLMatch(match string) []int {
+	var out []int
+	for _, clause := range strings.Split(match, "&&") {
+		clause = strings.TrimSpace(clause)
+		if !strings.HasPrefix(clause, "tcp.dst == ") {
+			continue
+		}
+		port, err := strconv.Atoi(strings.TrimPrefix(clause, "tcp.dst == "))
+		if err == nil {
+			out = append(out, port)
+		}
+	}
+	return out
 }
 
 func ownerAndLabelsFromExternalIDs(externalIDs map[string]string) (OwnerRef, Labels) {
@@ -839,6 +1529,285 @@ func ownerAndLabelsFromExternalIDs(externalIDs map[string]string) (OwnerRef, Lab
 		labels = nil
 	}
 	return owner, labels
+}
+
+func ovsMapKeys(keys []string) libovsdb.OvsSet {
+	return stringSet(uniqueStrings(keys))
+}
+
+func appendFieldDiff(diff *Diff, path string, before, after any) {
+	if reflect.DeepEqual(before, after) {
+		return
+	}
+	diff.Changes = append(diff.Changes, DiffChange{Path: path, Before: before, After: after})
+}
+
+func patchLabels(current Labels, add Labels, remove []string) Labels {
+	out := cloneLabels(current)
+	for _, key := range remove {
+		delete(out, key)
+	}
+	for key, value := range add {
+		if out == nil {
+			out = Labels{}
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func cloneLabels(in Labels) Labels {
+	if len(in) == 0 {
+		return nil
+	}
+	out := Labels{}
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneVirtualNetwork(in *VirtualNetwork) VirtualNetwork {
+	if in == nil {
+		return VirtualNetwork{}
+	}
+	out := *in
+	out.CIDRs = append([]string{}, in.CIDRs...)
+	out.DNS = cloneLogicalSwitchDNS(&in.DNS)
+	out.Labels = cloneLabels(in.Labels)
+	return out
+}
+
+func cloneLogicalSwitchDNS(in *LogicalSwitchDNS) LogicalSwitchDNS {
+	if in == nil {
+		return LogicalSwitchDNS{}
+	}
+	out := *in
+	out.Records = cloneDNSRecords(in.Records)
+	out.Labels = cloneLabels(in.Labels)
+	return out
+}
+
+func cloneWorkloadAttachment(in *WorkloadAttachment) WorkloadAttachment {
+	if in == nil {
+		return WorkloadAttachment{}
+	}
+	out := *in
+	out.IPs = append([]string{}, in.IPs...)
+	out.Labels = cloneLabels(in.Labels)
+	return out
+}
+
+func cloneSecurityPolicy(in *SecurityPolicy) SecurityPolicy {
+	if in == nil {
+		return SecurityPolicy{}
+	}
+	out := *in
+	out.Rules = cloneSecurityRules(in.Rules)
+	out.Labels = cloneLabels(in.Labels)
+	return out
+}
+
+func cloneDNSRecords(in []DNSRecord) []DNSRecord {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]DNSRecord, len(in))
+	for i := range in {
+		out[i] = DNSRecord{Domain: in[i].Domain, IPs: append([]string{}, in[i].IPs...)}
+	}
+	return out
+}
+
+func cloneSecurityRules(in []SecurityRule) []SecurityRule {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]SecurityRule, len(in))
+	for i := range in {
+		out[i] = in[i]
+		out[i].CIDRs = append([]string{}, in[i].CIDRs...)
+		out[i].Ports = append([]int{}, in[i].Ports...)
+	}
+	return out
+}
+
+func normalizeVirtualNetwork(in VirtualNetwork) VirtualNetwork {
+	out := cloneVirtualNetwork(&in)
+	out.CIDRs = uniqueStrings(out.CIDRs)
+	sort.Strings(out.CIDRs)
+	out.Labels = normalizeLabels(out.Labels)
+	out.DNS = normalizeLogicalSwitchDNS(out.DNS)
+	return out
+}
+
+func normalizeLogicalSwitchDNS(in LogicalSwitchDNS) LogicalSwitchDNS {
+	out := cloneLogicalSwitchDNS(&in)
+	out.Labels = normalizeLabels(out.Labels)
+	recordMap := out.RecordMap()
+	out.Records = make([]DNSRecord, 0, len(recordMap))
+	for domain, ips := range recordMap {
+		out.Records = append(out.Records, DNSRecord{Domain: domain, IPs: uniqueStrings(ips)})
+	}
+	sort.Slice(out.Records, func(i, j int) bool { return out.Records[i].Domain < out.Records[j].Domain })
+	return out
+}
+
+func normalizeWorkloadAttachment(in WorkloadAttachment) WorkloadAttachment {
+	out := cloneWorkloadAttachment(&in)
+	out.IPs = uniqueStrings(out.IPs)
+	sort.Strings(out.IPs)
+	out.Labels = normalizeLabels(out.Labels)
+	return out
+}
+
+func normalizeSecurityPolicy(in SecurityPolicy) SecurityPolicy {
+	out := cloneSecurityPolicy(&in)
+	out.Labels = normalizeLabels(out.Labels)
+	for i := range out.Rules {
+		out.Rules[i].CIDRs = uniqueStrings(out.Rules[i].CIDRs)
+		sort.Strings(out.Rules[i].CIDRs)
+		sort.Ints(out.Rules[i].Ports)
+	}
+	sort.Slice(out.Rules, func(i, j int) bool {
+		return securityRuleKey(out.Rules[i]) < securityRuleKey(out.Rules[j])
+	})
+	return out
+}
+
+func normalizeLabels(in Labels) Labels {
+	if len(in) == 0 {
+		return nil
+	}
+	return cloneLabels(in)
+}
+
+func dnsRecordComparable(records []DNSRecord) map[string][]string {
+	out := map[string][]string{}
+	for _, record := range records {
+		out[record.Domain] = append([]string{}, record.IPs...)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func mergeDNSRecords(current, add []DNSRecord) []DNSRecord {
+	if len(add) == 0 {
+		return cloneDNSRecords(current)
+	}
+	out := cloneDNSRecords(current)
+	out = append(out, cloneDNSRecords(add)...)
+	return normalizeLogicalSwitchDNS(LogicalSwitchDNS{Records: out}).Records
+}
+
+func removeDNSRecordDomains(current []DNSRecord, remove []string) []DNSRecord {
+	if len(remove) == 0 {
+		return cloneDNSRecords(current)
+	}
+	deny := map[string]struct{}{}
+	for _, domain := range remove {
+		deny[domain] = struct{}{}
+	}
+	var out []DNSRecord
+	for _, record := range current {
+		if _, ok := deny[record.Domain]; ok {
+			continue
+		}
+		out = append(out, DNSRecord{Domain: record.Domain, IPs: append([]string{}, record.IPs...)})
+	}
+	return out
+}
+
+func dnsDomainsAbsent(before, after []DNSRecord) []string {
+	afterSet := map[string]struct{}{}
+	for _, record := range after {
+		afterSet[record.Domain] = struct{}{}
+	}
+	var out []string
+	for _, record := range before {
+		if _, ok := afterSet[record.Domain]; !ok {
+			out = append(out, record.Domain)
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func labelDeleteKeys(remove []string, add Labels) []string {
+	var out []string
+	for _, label := range remove {
+		if _, replaced := add[label]; replaced {
+			continue
+		}
+		out = append(out, ExternalIDLabelKey(label))
+	}
+	return out
+}
+
+func removeStrings(current, remove []string) []string {
+	if len(remove) == 0 {
+		return append([]string{}, current...)
+	}
+	deny := map[string]struct{}{}
+	for _, value := range remove {
+		deny[value] = struct{}{}
+	}
+	out := make([]string, 0, len(current))
+	for _, value := range current {
+		if _, ok := deny[value]; ok {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func removeSecurityRules(current []SecurityRule, remove []string) []SecurityRule {
+	if len(remove) == 0 {
+		return cloneSecurityRules(current)
+	}
+	deny := map[string]struct{}{}
+	for _, value := range remove {
+		deny[value] = struct{}{}
+	}
+	out := make([]SecurityRule, 0, len(current))
+	for _, rule := range current {
+		if _, ok := deny[rule.Name]; rule.Name != "" && ok {
+			continue
+		}
+		if _, ok := deny[securityRuleKey(rule)]; ok {
+			continue
+		}
+		out = append(out, rule)
+	}
+	return out
+}
+
+func securityRuleKey(rule SecurityRule) string {
+	return strings.Join([]string{
+		rule.Name,
+		rule.Action,
+		rule.Direction,
+		rule.Protocol,
+		strings.Join(rule.CIDRs, ","),
+		intSliceKey(rule.Ports),
+		strconv.FormatBool(rule.Established),
+	}, "|")
+}
+
+func intSliceKey(values []int) string {
+	if len(values) == 0 {
+		return ""
+	}
+	parts := make([]string, len(values))
+	for i, value := range values {
+		parts[i] = strconv.Itoa(value)
+	}
+	return strings.Join(parts, ",")
 }
 
 func intentExternalIDs(kind, name string, owner OwnerRef, labels Labels) (map[string]string, error) {
