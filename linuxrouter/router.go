@@ -264,27 +264,51 @@ func (r *Ref) Apply(ctx context.Context, router Router) error {
 	if err != nil {
 		return err
 	}
+	r.client.mu.Lock()
+	defer r.client.mu.Unlock()
 	for _, command := range commands {
 		if err := r.client.executor.Run(ctx, command); err != nil {
 			return err
 		}
 	}
-	r.client.mu.Lock()
-	defer r.client.mu.Unlock()
 	r.client.store[router.Name] = cloneRouter(router)
 	return nil
 }
 
 func (r *Ref) Patch(ctx context.Context, patch Patch) (Router, error) {
-	current, err := r.Get(ctx)
-	if err != nil {
+	if err := validateName("router", r.name); err != nil {
 		return Router{}, err
 	}
+	if r.client == nil {
+		return Router{}, ovnflow.ErrBackendUnavailable
+	}
+	r.client.mu.Lock()
+	defer r.client.mu.Unlock()
+	current, ok := r.client.store[r.name]
+	if !ok {
+		return Router{}, ovnflow.ErrNotFound
+	}
+	current = cloneRouter(current)
 	if err := patch.Validate(current); err != nil {
 		return Router{}, err
 	}
-	patch.ApplyTo(&current)
-	return current, r.Apply(ctx, current)
+	if err := patch.ApplyTo(&current); err != nil {
+		return Router{}, err
+	}
+	if err := current.Validate(); err != nil {
+		return Router{}, err
+	}
+	commands, err := r.client.renderer.RenderApply(current)
+	if err != nil {
+		return Router{}, err
+	}
+	for _, command := range commands {
+		if err := r.client.executor.Run(ctx, command); err != nil {
+			return Router{}, err
+		}
+	}
+	r.client.store[current.Name] = cloneRouter(current)
+	return cloneRouter(current), nil
 }
 
 type Patch struct {
@@ -305,6 +329,7 @@ type PatchPreconditions struct {
 
 type PatchOptions struct {
 	RequireOwnership bool
+	IgnoreNotFound   bool
 }
 
 type InterfacePatch struct {
@@ -363,36 +388,70 @@ func (p Patch) Validate(current Router) error {
 	return nil
 }
 
-func (p Patch) ApplyTo(router *Router) {
+func (p Patch) ApplyTo(router *Router) error {
+	if router == nil {
+		return &ovnflow.Error{Kind: ovnflow.ErrorValidation, Operation: "patch", Object: "router", Message: "router must not be nil"}
+	}
+	next := cloneRouter(*router)
 	if p.DNSMasq.Replace != nil {
-		router.Spec.DNSMasq = *p.DNSMasq.Replace
+		next.Spec.DNSMasq = *p.DNSMasq.Replace
 	}
 	if p.NAT.Replace != nil {
-		router.Spec.NAT = *p.NAT.Replace
+		next.Spec.NAT = *p.NAT.Replace
 	}
 	if p.Firewall.Replace != nil {
-		router.Spec.Firewall = *p.Firewall.Replace
+		next.Spec.Firewall = *p.Firewall.Replace
 	}
-	router.Spec.Interfaces = replaceByName(router.Spec.Interfaces, p.Interfaces.Replace, func(v Interface) string { return v.Name })
-	router.Spec.Interfaces = deleteByName(router.Spec.Interfaces, p.Interfaces.Delete, func(v Interface) string { return v.Name })
-	router.Spec.Interfaces = append(router.Spec.Interfaces, p.Interfaces.Add...)
-	router.Spec.Routes = replaceByName(router.Spec.Routes, p.Routes.Replace, func(v Route) string { return v.Name })
-	router.Spec.Routes = deleteByName(router.Spec.Routes, p.Routes.Delete, func(v Route) string { return v.Name })
-	router.Spec.Routes = append(router.Spec.Routes, p.Routes.Add...)
-	router.Spec.NAT.SNATRules = deleteByName(router.Spec.NAT.SNATRules, p.NAT.Delete.SNATRules, func(v SNATRule) string { return v.StableName() })
-	router.Spec.NAT.Masquerades = deleteByName(router.Spec.NAT.Masquerades, p.NAT.Delete.Masquerades, func(v MasqueradeRule) string { return v.StableName() })
-	router.Spec.NAT.DNATRules = deleteByName(router.Spec.NAT.DNATRules, p.NAT.Delete.DNATRules, func(v DNATRule) string { return v.StableName() })
-	router.Spec.NAT.PortForwards = deleteByName(router.Spec.NAT.PortForwards, p.NAT.Delete.PortForwards, func(v PortForwardRule) string { return v.StableName() })
-	router.Spec.NAT.DestinationMaps = deleteByName(router.Spec.NAT.DestinationMaps, p.NAT.Delete.DestinationMaps, func(v DestinationMapRule) string { return v.StableName() })
-	router.Spec.NAT.SNATRules = append(router.Spec.NAT.SNATRules, p.NAT.Add.SNATRules...)
-	router.Spec.NAT.Masquerades = append(router.Spec.NAT.Masquerades, p.NAT.Add.Masquerades...)
-	router.Spec.NAT.DNATRules = append(router.Spec.NAT.DNATRules, p.NAT.Add.DNATRules...)
-	router.Spec.NAT.PortForwards = append(router.Spec.NAT.PortForwards, p.NAT.Add.PortForwards...)
-	router.Spec.NAT.DestinationMaps = append(router.Spec.NAT.DestinationMaps, p.NAT.Add.DestinationMaps...)
-	router.Spec.DNSMasq.Hosts = deleteByName(router.Spec.DNSMasq.Hosts, p.DNSMasq.DeleteHosts, func(v HostRecord) string { return v.Domain })
-	router.Spec.DNSMasq.Hosts = append(router.Spec.DNSMasq.Hosts, p.DNSMasq.AddHosts...)
-	router.Spec.Firewall.Rules = deleteByName(router.Spec.Firewall.Rules, p.Firewall.DeleteRules, func(v FirewallRule) string { return v.Name })
-	router.Spec.Firewall.Rules = append(router.Spec.Firewall.Rules, p.Firewall.AddRules...)
+	var err error
+	next.Spec.Interfaces = replaceByName(next.Spec.Interfaces, p.Interfaces.Replace, func(v Interface) string { return v.Name })
+	next.Spec.Interfaces, err = deleteByName(next.Spec.Interfaces, p.Interfaces.Delete, p.Options.IgnoreNotFound, "interface", func(v Interface) string { return v.Name })
+	if err != nil {
+		return err
+	}
+	next.Spec.Interfaces = append(next.Spec.Interfaces, p.Interfaces.Add...)
+	next.Spec.Routes = replaceByName(next.Spec.Routes, p.Routes.Replace, func(v Route) string { return v.Name })
+	next.Spec.Routes, err = deleteByName(next.Spec.Routes, p.Routes.Delete, p.Options.IgnoreNotFound, "route", func(v Route) string { return v.Name })
+	if err != nil {
+		return err
+	}
+	next.Spec.Routes = append(next.Spec.Routes, p.Routes.Add...)
+	next.Spec.NAT.SNATRules, err = deleteByName(next.Spec.NAT.SNATRules, p.NAT.Delete.SNATRules, p.Options.IgnoreNotFound, "snat", func(v SNATRule) string { return v.StableName() })
+	if err != nil {
+		return err
+	}
+	next.Spec.NAT.Masquerades, err = deleteByName(next.Spec.NAT.Masquerades, p.NAT.Delete.Masquerades, p.Options.IgnoreNotFound, "masquerade", func(v MasqueradeRule) string { return v.StableName() })
+	if err != nil {
+		return err
+	}
+	next.Spec.NAT.DNATRules, err = deleteByName(next.Spec.NAT.DNATRules, p.NAT.Delete.DNATRules, p.Options.IgnoreNotFound, "dnat", func(v DNATRule) string { return v.StableName() })
+	if err != nil {
+		return err
+	}
+	next.Spec.NAT.PortForwards, err = deleteByName(next.Spec.NAT.PortForwards, p.NAT.Delete.PortForwards, p.Options.IgnoreNotFound, "port-forward", func(v PortForwardRule) string { return v.StableName() })
+	if err != nil {
+		return err
+	}
+	next.Spec.NAT.DestinationMaps, err = deleteByName(next.Spec.NAT.DestinationMaps, p.NAT.Delete.DestinationMaps, p.Options.IgnoreNotFound, "destination-map", func(v DestinationMapRule) string { return v.StableName() })
+	if err != nil {
+		return err
+	}
+	next.Spec.NAT.SNATRules = append(next.Spec.NAT.SNATRules, p.NAT.Add.SNATRules...)
+	next.Spec.NAT.Masquerades = append(next.Spec.NAT.Masquerades, p.NAT.Add.Masquerades...)
+	next.Spec.NAT.DNATRules = append(next.Spec.NAT.DNATRules, p.NAT.Add.DNATRules...)
+	next.Spec.NAT.PortForwards = append(next.Spec.NAT.PortForwards, p.NAT.Add.PortForwards...)
+	next.Spec.NAT.DestinationMaps = append(next.Spec.NAT.DestinationMaps, p.NAT.Add.DestinationMaps...)
+	next.Spec.DNSMasq.Hosts, err = deleteByName(next.Spec.DNSMasq.Hosts, p.DNSMasq.DeleteHosts, p.Options.IgnoreNotFound, "dnsmasq-host", func(v HostRecord) string { return v.Domain })
+	if err != nil {
+		return err
+	}
+	next.Spec.DNSMasq.Hosts = append(next.Spec.DNSMasq.Hosts, p.DNSMasq.AddHosts...)
+	next.Spec.Firewall.Rules, err = deleteByName(next.Spec.Firewall.Rules, p.Firewall.DeleteRules, p.Options.IgnoreNotFound, "firewall-rule", func(v FirewallRule) string { return v.Name })
+	if err != nil {
+		return err
+	}
+	next.Spec.Firewall.Rules = append(next.Spec.Firewall.Rules, p.Firewall.AddRules...)
+	*router = cloneRouter(next)
+	return nil
 }
 
 type Plan struct {
@@ -430,13 +489,13 @@ func (CommandRenderer) RenderApply(router Router) ([]Command, error) {
 		commands = append(commands, Command{Program: "nat", Args: []string{"snat", rule.StableName(), rule.SourceCIDR, rule.OutInterface, rule.ToSource}})
 	}
 	for _, rule := range router.Spec.NAT.PortForwards {
-		commands = append(commands, Command{Program: "nat", Args: []string{"port-forward", rule.StableName(), rule.Protocol, rule.InInterface, fmt.Sprint(rule.ListenPort), rule.TargetIP, fmt.Sprint(rule.TargetPort)}})
+		commands = append(commands, Command{Program: "nat", Args: []string{"port-forward", rule.StableName(), rule.Protocol, rule.InInterface, rule.ListenIP, fmt.Sprint(rule.ListenPort), rule.TargetIP, fmt.Sprint(rule.TargetPort)}})
 	}
 	for _, rule := range router.Spec.NAT.DNATRules {
 		commands = append(commands, Command{Program: "nat", Args: []string{"dnat", rule.StableName(), rule.InInterface, rule.MatchAddress, rule.TargetAddress}})
 	}
 	for _, rule := range router.Spec.NAT.DestinationMaps {
-		commands = append(commands, Command{Program: "nat", Args: []string{"destination-map", rule.StableName(), rule.InInterface, rule.OutInterface, rule.MatchAddress, rule.TargetAddress}})
+		commands = append(commands, Command{Program: "nat", Args: []string{"destination-map", rule.StableName(), rule.InInterface, rule.OutInterface, rule.MatchAddress, rule.TargetAddress, rule.FromCIDR, rule.SourceNAT}})
 	}
 	return commands, nil
 }
@@ -465,7 +524,13 @@ func (r Router) Validate() error {
 			}
 		}
 	}
-	return r.Spec.NAT.Validate()
+	if err := r.Spec.DNSMasq.Validate(); err != nil {
+		return err
+	}
+	if err := r.Spec.NAT.Validate(); err != nil {
+		return err
+	}
+	return r.Spec.Firewall.Validate()
 }
 
 func (i Interface) Validate() error {
@@ -482,6 +547,44 @@ func (i Interface) Validate() error {
 	}
 	if i.Gateway != "" && net.ParseIP(i.Gateway) == nil {
 		return wrapValidation("interface", i.Name, "invalid gateway", nil)
+	}
+	return nil
+}
+
+func (d DNSMasq) Validate() error {
+	for _, dhcpRange := range d.DHCPRanges {
+		if net.ParseIP(dhcpRange.Start) == nil {
+			return wrapValidation("dnsmasq", dhcpRange.Start, "invalid dhcp range start", nil)
+		}
+		if net.ParseIP(dhcpRange.End) == nil {
+			return wrapValidation("dnsmasq", dhcpRange.End, "invalid dhcp range end", nil)
+		}
+	}
+	for _, server := range d.Servers {
+		if !validDNSMasqServer(server) {
+			return wrapValidation("dnsmasq", server, "invalid dns server", nil)
+		}
+	}
+	for _, lease := range d.Leases {
+		if _, err := net.ParseMAC(lease.MAC); err != nil {
+			return wrapValidation("dnsmasq", lease.MAC, "invalid static lease mac", err)
+		}
+		if net.ParseIP(lease.IP) == nil {
+			return wrapValidation("dnsmasq", lease.IP, "invalid static lease ip", nil)
+		}
+	}
+	for _, host := range d.Hosts {
+		if strings.TrimSpace(host.Domain) == "" {
+			return wrapValidation("dnsmasq", host.Domain, "host domain must not be empty", nil)
+		}
+		if len(host.IPs) == 0 {
+			return wrapValidation("dnsmasq", host.Domain, "host record requires at least one ip", nil)
+		}
+		for _, ip := range host.IPs {
+			if net.ParseIP(ip) == nil {
+				return wrapValidation("dnsmasq", host.Domain, "invalid host record ip", nil)
+			}
+		}
 	}
 	return nil
 }
@@ -511,8 +614,14 @@ func (n NAT) Validate() error {
 		if err := validateRuleName(rule.StableName(), names); err != nil {
 			return err
 		}
-		if rule.ListenPort <= 0 || rule.TargetPort <= 0 {
-			return wrapValidation("nat", rule.StableName(), "ports must be positive", nil)
+		if !isOneOf(rule.Protocol, "tcp", "udp") {
+			return wrapValidation("nat", rule.StableName(), "protocol must be tcp or udp", nil)
+		}
+		if rule.ListenIP != "" && net.ParseIP(rule.ListenIP) == nil {
+			return wrapValidation("nat", rule.StableName(), "invalid listen ip", nil)
+		}
+		if !validPort(rule.ListenPort) || !validPort(rule.TargetPort) {
+			return wrapValidation("nat", rule.StableName(), "ports must be between 1 and 65535", nil)
 		}
 		if net.ParseIP(rule.TargetIP) == nil {
 			return wrapValidation("nat", rule.StableName(), "invalid target ip", nil)
@@ -540,6 +649,35 @@ func (n NAT) Validate() error {
 		}
 		if rule.SourceNAT != "" && net.ParseIP(rule.SourceNAT) == nil {
 			return wrapValidation("nat", rule.StableName(), "invalid destination map source nat", nil)
+		}
+	}
+	return nil
+}
+
+func (f Firewall) Validate() error {
+	names := map[string]bool{}
+	for _, rule := range f.Rules {
+		if err := validateRuleName(rule.Name, names); err != nil {
+			return err
+		}
+		if strings.TrimSpace(rule.Action) != "" && !isOneOf(rule.Action, "allow", "drop", "reject") {
+			return wrapValidation("firewall", rule.Name, "action must be allow, drop, or reject", nil)
+		}
+		if rule.Direction != "" && !isOneOf(rule.Direction, "ingress", "egress", "forward", "in", "out") {
+			return wrapValidation("firewall", rule.Name, "invalid direction", nil)
+		}
+		if rule.Protocol != "" && !isOneOf(rule.Protocol, "tcp", "udp", "icmp", "icmpv6", "ip", "ipv4", "ipv6") {
+			return wrapValidation("firewall", rule.Name, "invalid protocol", nil)
+		}
+		for _, cidr := range rule.CIDRs {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				return wrapValidation("firewall", rule.Name, "invalid cidr", err)
+			}
+		}
+		for _, port := range rule.Ports {
+			if !validPort(port) {
+				return wrapValidation("firewall", rule.Name, "port must be between 1 and 65535", nil)
+			}
 		}
 	}
 	return nil
@@ -674,13 +812,24 @@ func replaceByName[T any](base, replacements []T, nameOf func(T) string) []T {
 	return base
 }
 
-func deleteByName[T any](base []T, names []string, nameOf func(T) string) []T {
+func deleteByName[T any](base []T, names []string, ignoreMissing bool, kind string, nameOf func(T) string) ([]T, error) {
 	if len(names) == 0 {
-		return base
+		return base, nil
 	}
 	remove := map[string]bool{}
 	for _, name := range names {
 		remove[name] = true
+	}
+	if !ignoreMissing {
+		existing := map[string]bool{}
+		for _, value := range base {
+			existing[nameOf(value)] = true
+		}
+		for _, name := range names {
+			if !existing[name] {
+				return base, &ovnflow.Error{Kind: ovnflow.ErrorNotFound, Operation: "patch-delete", Object: kind + ":" + name, Message: kind + " not found"}
+			}
+		}
 	}
 	out := base[:0]
 	for _, value := range base {
@@ -688,7 +837,7 @@ func deleteByName[T any](base []T, names []string, nameOf func(T) string) []T {
 			out = append(out, value)
 		}
 	}
-	return out
+	return out, nil
 }
 
 func cloneRouter(in Router) Router {
@@ -832,6 +981,25 @@ func validateName(kind, name string) error {
 		return wrapValidation(kind, name, "name must not be empty", nil)
 	}
 	return nil
+}
+
+func validPort(port int) bool {
+	return port >= 1 && port <= 65535
+}
+
+func validDNSMasqServer(server string) bool {
+	server = strings.TrimSpace(server)
+	return server != "" && !strings.ContainsAny(server, " \t\r\n")
+}
+
+func isOneOf(value string, allowed ...string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func ambiguous(kind string) error {

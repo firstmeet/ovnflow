@@ -3,6 +3,7 @@ package linuxrouter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -110,6 +111,7 @@ func TestSingleLANAndWANInferDestinationMap(t *testing.T) {
 				MatchAddress:  "192.168.9.2",
 				TargetAddress: "192.168.0.1",
 				FromCIDR:      "10.0.0.0/24",
+				SourceNAT:     "192.0.2.10",
 			}}},
 		},
 	}
@@ -119,13 +121,44 @@ func TestSingleLANAndWANInferDestinationMap(t *testing.T) {
 	}
 	found := false
 	for _, command := range plan.Commands {
-		if command.Program == "nat" && len(command.Args) >= 4 && command.Args[0] == "destination-map" && command.Args[2] == "lan0" && command.Args[3] == "wan0" {
+		if command.Program == "nat" && len(command.Args) == 8 && command.Args[0] == "destination-map" && command.Args[2] == "lan0" && command.Args[3] == "wan0" && command.Args[6] == "10.0.0.0/24" && command.Args[7] == "192.0.2.10" {
 			found = true
 		}
 	}
 	if !found {
 		t.Fatalf("plan did not infer lan0/wan0: %#v", plan.Commands)
 	}
+}
+
+func TestPortForwardRenderIncludesListenIP(t *testing.T) {
+	router := Router{
+		Name: "edge",
+		Spec: Spec{
+			Interfaces: []Interface{{Name: "wan0", Role: InterfaceWAN}},
+			NAT: NAT{PortForwards: []PortForwardRule{{
+				Name:        "web",
+				Protocol:    "tcp",
+				ListenIP:    "192.0.2.10",
+				ListenPort:  8080,
+				TargetIP:    "10.0.0.10",
+				TargetPort:  80,
+				InInterface: "wan0",
+			}}},
+		},
+	}
+	plan, err := router.Plan(nil)
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	for _, command := range plan.Commands {
+		if command.Program == "nat" && command.Args[0] == "port-forward" {
+			if len(command.Args) != 8 || command.Args[4] != "192.0.2.10" {
+				t.Fatalf("port-forward args = %#v, want listen ip at arg 4", command.Args)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing port-forward command: %#v", plan.Commands)
 }
 
 func TestMultipleLANInferenceIsAmbiguous(t *testing.T) {
@@ -194,6 +227,195 @@ func TestGetApplyPatchSkeleton(t *testing.T) {
 	}
 }
 
+func TestPatchDeleteMissingRuleReturnsNotFound(t *testing.T) {
+	ctx := context.Background()
+	ref := NewClient(nil, nil).Router("edge")
+	if err := ref.Apply(ctx, Router{
+		Name: "edge",
+		Spec: Spec{
+			Interfaces: []Interface{{Name: "wan0", Role: InterfaceWAN}},
+			NAT:        NAT{Masquerades: []MasqueradeRule{{Name: "egress", SourceCIDR: "10.0.0.0/24", OutInterface: "wan0"}}},
+		},
+	}); err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	_, err := ref.Patch(ctx, Patch{NAT: NATPatch{Delete: NATDelete{Masquerades: []string{"missing"}}}})
+	if !ovnflow.IsKind(err, ovnflow.ErrorNotFound) {
+		t.Fatalf("delete missing error kind = %q for %v, want not_found", ovnflow.KindOf(err), err)
+	}
+}
+
+func TestPatchDeleteMissingRuleCanIgnoreNotFound(t *testing.T) {
+	ctx := context.Background()
+	ref := NewClient(nil, nil).Router("edge")
+	if err := ref.Apply(ctx, Router{Name: "edge", Spec: Spec{Interfaces: []Interface{{Name: "wan0", Role: InterfaceWAN}}}}); err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	got, err := ref.Patch(ctx, Patch{
+		Options: PatchOptions{IgnoreNotFound: true},
+		NAT:     NATPatch{Delete: NATDelete{Masquerades: []string{"missing"}}},
+	})
+	if err != nil {
+		t.Fatalf("Patch returned error: %v", err)
+	}
+	if len(got.Spec.NAT.Masquerades) != 0 {
+		t.Fatalf("unexpected NAT state: %#v", got.Spec.NAT)
+	}
+}
+
+func TestPatchDeleteExistingResourcesByStableName(t *testing.T) {
+	ctx := context.Background()
+	ref := NewClient(nil, nil).Router("edge")
+	router := Router{
+		Name: "edge",
+		Spec: Spec{
+			Interfaces: []Interface{
+				{Name: "lan0", Role: InterfaceLAN},
+				{Name: "wan0", Role: InterfaceWAN},
+				{Name: "wan1", Role: InterfaceWAN},
+			},
+			Routes: []Route{
+				{Name: "default", Destination: "0.0.0.0/0", Gateway: "192.0.2.1"},
+				{Name: "private", Destination: "10.0.0.0/8", Gateway: "10.0.0.1"},
+			},
+			DNSMasq: DNSMasq{Hosts: []HostRecord{
+				{Domain: "api.service", IPs: []string{"10.0.0.10"}},
+				{Domain: "db.service", IPs: []string{"10.0.0.11"}},
+			}},
+			NAT: NAT{
+				SNATRules:       []SNATRule{{Name: "snat-a", SourceCIDR: "10.0.0.0/24", OutInterface: "wan0", ToSource: "192.0.2.10"}, {Name: "snat-b", SourceCIDR: "10.0.1.0/24", OutInterface: "wan1", ToSource: "192.0.2.11"}},
+				Masquerades:     []MasqueradeRule{{Name: "masq-a", SourceCIDR: "10.0.2.0/24", OutInterface: "wan0"}, {Name: "masq-b", SourceCIDR: "10.0.3.0/24", OutInterface: "wan1"}},
+				DNATRules:       []DNATRule{{Name: "dnat-a", MatchAddress: "192.0.2.20", TargetAddress: "10.0.0.20", InInterface: "wan0"}, {Name: "dnat-b", MatchAddress: "192.0.2.21", TargetAddress: "10.0.0.21", InInterface: "wan1"}},
+				PortForwards:    []PortForwardRule{{Name: "pf-a", Protocol: "tcp", InInterface: "wan0", ListenPort: 8080, TargetIP: "10.0.0.30", TargetPort: 80}, {Name: "pf-b", Protocol: "udp", InInterface: "wan1", ListenPort: 5353, TargetIP: "10.0.0.31", TargetPort: 53}},
+				DestinationMaps: []DestinationMapRule{{Name: "map-a", MatchAddress: "192.168.9.2", TargetAddress: "192.168.0.1", FromCIDR: "10.0.0.0/24", InInterface: "lan0", OutInterface: "wan0", SourceNAT: "192.0.2.10"}, {Name: "map-b", MatchAddress: "192.168.9.3", TargetAddress: "192.168.0.2", InInterface: "lan0", OutInterface: "wan1"}},
+			},
+			Firewall: Firewall{Rules: []FirewallRule{
+				{Name: "allow-web", Action: "allow", Ports: []int{80}},
+				{Name: "drop-ssh", Action: "drop", Ports: []int{22}},
+			}},
+		},
+	}
+	if err := ref.Apply(ctx, router); err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	got, err := ref.Patch(ctx, Patch{
+		Interfaces: InterfacePatch{Delete: []string{"wan1"}},
+		Routes:     RoutePatch{Delete: []string{"private"}},
+		DNSMasq:    DNSMasqPatch{DeleteHosts: []string{"db.service"}},
+		NAT: NATPatch{Delete: NATDelete{
+			SNATRules:       []string{"snat-b"},
+			Masquerades:     []string{"masq-b"},
+			DNATRules:       []string{"dnat-b"},
+			PortForwards:    []string{"pf-b"},
+			DestinationMaps: []string{"map-b"},
+		}},
+		Firewall: FirewallPatch{DeleteRules: []string{"drop-ssh"}},
+	})
+	if err != nil {
+		t.Fatalf("Patch returned error: %v", err)
+	}
+	if len(got.Spec.Interfaces) != 2 || len(got.Spec.Routes) != 1 || len(got.Spec.DNSMasq.Hosts) != 1 || len(got.Spec.Firewall.Rules) != 1 {
+		t.Fatalf("unexpected patched router: %#v", got.Spec)
+	}
+	if len(got.Spec.NAT.SNATRules) != 1 || got.Spec.NAT.SNATRules[0].Name != "snat-a" ||
+		len(got.Spec.NAT.Masquerades) != 1 || got.Spec.NAT.Masquerades[0].Name != "masq-a" ||
+		len(got.Spec.NAT.DNATRules) != 1 || got.Spec.NAT.DNATRules[0].Name != "dnat-a" ||
+		len(got.Spec.NAT.PortForwards) != 1 || got.Spec.NAT.PortForwards[0].Name != "pf-a" ||
+		len(got.Spec.NAT.DestinationMaps) != 1 || got.Spec.NAT.DestinationMaps[0].Name != "map-a" {
+		t.Fatalf("unexpected NAT after delete: %#v", got.Spec.NAT)
+	}
+}
+
+func TestPatchApplyToFailureDoesNotPartiallyMutateRouter(t *testing.T) {
+	router := Router{
+		Name: "edge",
+		Spec: Spec{
+			Interfaces: []Interface{{Name: "wan0", Role: InterfaceWAN}},
+			DNSMasq:    DNSMasq{Hosts: []HostRecord{{Domain: "api.service", IPs: []string{"10.0.0.10"}}}},
+		},
+	}
+	err := (Patch{
+		DNSMasq: DNSMasqPatch{
+			Replace:     &DNSMasq{Hosts: []HostRecord{{Domain: "new.service", IPs: []string{"10.0.0.20"}}}},
+			DeleteHosts: []string{"missing.service"},
+		},
+	}).ApplyTo(&router)
+	if !ovnflow.IsKind(err, ovnflow.ErrorNotFound) {
+		t.Fatalf("ApplyTo error kind = %q for %v, want not_found", ovnflow.KindOf(err), err)
+	}
+	if len(router.Spec.DNSMasq.Hosts) != 1 || router.Spec.DNSMasq.Hosts[0].Domain != "api.service" {
+		t.Fatalf("router was partially mutated after failed ApplyTo: %#v", router)
+	}
+}
+
+func TestPatchResultDoesNotAliasPatchPayload(t *testing.T) {
+	ctx := context.Background()
+	ref := NewClient(nil, nil).Router("edge")
+	if err := ref.Apply(ctx, Router{Name: "edge", Spec: Spec{Interfaces: []Interface{{Name: "wan0", Role: InterfaceWAN}}}}); err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	ifaceAddresses := []string{"192.0.2.2/24"}
+	hostIPs := []string{"10.0.0.10"}
+	rulePorts := []int{80}
+	got, err := ref.Patch(ctx, Patch{
+		Interfaces: InterfacePatch{Add: []Interface{{Name: "lan0", Role: InterfaceLAN, Addresses: ifaceAddresses}}},
+		DNSMasq:    DNSMasqPatch{AddHosts: []HostRecord{{Domain: "api.service", IPs: hostIPs}}},
+		Firewall:   FirewallPatch{AddRules: []FirewallRule{{Name: "allow-web", Action: "allow", Ports: rulePorts}}},
+	})
+	if err != nil {
+		t.Fatalf("Patch returned error: %v", err)
+	}
+	ifaceAddresses[0] = "198.51.100.2/24"
+	hostIPs[0] = "10.0.0.99"
+	rulePorts[0] = 443
+	if got.Spec.Interfaces[1].Addresses[0] != "192.0.2.2/24" || got.Spec.DNSMasq.Hosts[0].IPs[0] != "10.0.0.10" || got.Spec.Firewall.Rules[0].Ports[0] != 80 {
+		t.Fatalf("Patch result aliases caller-owned payload: %#v", got)
+	}
+	stored, err := ref.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if stored.Spec.Interfaces[1].Addresses[0] != "192.0.2.2/24" || stored.Spec.DNSMasq.Hosts[0].IPs[0] != "10.0.0.10" || stored.Spec.Firewall.Rules[0].Ports[0] != 80 {
+		t.Fatalf("stored router aliases caller-owned payload: %#v", stored)
+	}
+}
+
+func TestConcurrentPatchPreservesIndependentAdds(t *testing.T) {
+	ctx := context.Background()
+	ref := NewClient(nil, nil).Router("edge")
+	if err := ref.Apply(ctx, Router{Name: "edge", Spec: Spec{Interfaces: []Interface{{Name: "wan0", Role: InterfaceWAN}}}}); err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := 0; i < 20; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := ref.Patch(ctx, Patch{NAT: NATPatch{Add: NAT{Masquerades: []MasqueradeRule{{
+				Name:       fmt.Sprintf("egress-%02d", i),
+				SourceCIDR: fmt.Sprintf("10.%d.0.0/16", i),
+			}}}}})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Patch returned error: %v", err)
+		}
+	}
+	got, err := ref.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if len(got.Spec.NAT.Masquerades) != 20 {
+		t.Fatalf("patches lost updates: got %d masquerades, want 20: %#v", len(got.Spec.NAT.Masquerades), got.Spec.NAT.Masquerades)
+	}
+}
+
 func TestApplyNameMismatchReturnsConflict(t *testing.T) {
 	ref := NewClient(nil, nil).Router("edge")
 	err := ref.Apply(context.Background(), Router{Name: "other"})
@@ -232,7 +454,7 @@ func TestGetAndApplyDeepCopyRouterState(t *testing.T) {
 			Labels:     ovnflow.Labels{"env": "test"},
 			Interfaces: []Interface{{Name: "wan0", Role: InterfaceWAN, Addresses: []string{"192.0.2.2/24"}}},
 			DNSMasq:    DNSMasq{Hosts: []HostRecord{{Domain: "api.service", IPs: []string{"10.0.0.2"}}}},
-			Firewall:   Firewall{Rules: []FirewallRule{{Name: "allow-web", CIDRs: []string{"10.0.0.0/24"}, Ports: []int{80}}}},
+			Firewall:   Firewall{Rules: []FirewallRule{{Name: "allow-web", Action: "allow", CIDRs: []string{"10.0.0.0/24"}, Ports: []int{80}}}},
 		},
 		Status: Status{
 			Interfaces:   []InterfaceStatus{{Name: "wan0", Addresses: []string{"192.0.2.2/24"}}},
@@ -314,5 +536,68 @@ func TestDNSMasqHostRecordAllowsMultipleIPs(t *testing.T) {
 	router := Router{Name: "edge", Spec: Spec{Interfaces: []Interface{{Name: "lan0", Role: InterfaceLAN}}, DNSMasq: DNSMasq{Enabled: true, Hosts: []HostRecord{record}}}}
 	if err := router.Validate(); err != nil {
 		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
+func TestDNSMasqServersAllowHostOrDomainSpecificSyntax(t *testing.T) {
+	router := Router{Name: "edge", Spec: Spec{DNSMasq: DNSMasq{Servers: []string{"223.5.5.5", "/corp.local/10.0.0.53", "dns.internal"}}}}
+	if err := router.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
+func TestDNSMasqValidationRejectsInvalidInputs(t *testing.T) {
+	tests := []DNSMasq{
+		{DHCPRanges: []DHCPRange{{Start: "bad", End: "10.0.0.20"}}},
+		{Servers: []string{""}},
+		{Servers: []string{"dns server"}},
+		{Leases: []StaticLease{{MAC: "bad", IP: "10.0.0.10"}}},
+		{Leases: []StaticLease{{MAC: "00:11:22:33:44:55", IP: "bad"}}},
+		{Hosts: []HostRecord{{Domain: "", IPs: []string{"10.0.0.10"}}}},
+		{Hosts: []HostRecord{{Domain: "api.service"}}},
+		{Hosts: []HostRecord{{Domain: "api.service", IPs: []string{"bad"}}}},
+	}
+	for _, dnsmasq := range tests {
+		router := Router{Name: "edge", Spec: Spec{DNSMasq: dnsmasq}}
+		if !ovnflow.IsKind(router.Validate(), ovnflow.ErrorValidation) {
+			t.Fatalf("router with dnsmasq %#v should fail validation", dnsmasq)
+		}
+	}
+}
+
+func TestFirewallActionDefaultsToAllow(t *testing.T) {
+	router := Router{Name: "edge", Spec: Spec{Firewall: Firewall{Rules: []FirewallRule{{Name: "web", Ports: []int{80}}}}}}
+	if err := router.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
+func TestFirewallValidationRejectsInvalidInputs(t *testing.T) {
+	tests := []Firewall{
+		{Rules: []FirewallRule{{Name: "bad-action", Action: "pass"}}},
+		{Rules: []FirewallRule{{Name: "bad-direction", Action: "allow", Direction: "sideways"}}},
+		{Rules: []FirewallRule{{Name: "bad-protocol", Action: "allow", Protocol: "sctp"}}},
+		{Rules: []FirewallRule{{Name: "bad-cidr", Action: "allow", CIDRs: []string{"bad"}}}},
+		{Rules: []FirewallRule{{Name: "bad-port", Action: "allow", Ports: []int{65536}}}},
+	}
+	for _, firewall := range tests {
+		router := Router{Name: "edge", Spec: Spec{Firewall: firewall}}
+		if !ovnflow.IsKind(router.Validate(), ovnflow.ErrorValidation) {
+			t.Fatalf("router with firewall %#v should fail validation", firewall)
+		}
+	}
+}
+
+func TestNATValidationRejectsInvalidPortForward(t *testing.T) {
+	tests := []PortForwardRule{
+		{Name: "bad-proto", Protocol: "icmp", ListenPort: 8080, TargetIP: "10.0.0.10", TargetPort: 80},
+		{Name: "bad-listen-ip", Protocol: "tcp", ListenIP: "bad", ListenPort: 8080, TargetIP: "10.0.0.10", TargetPort: 80},
+		{Name: "bad-port", Protocol: "tcp", ListenPort: 70000, TargetIP: "10.0.0.10", TargetPort: 80},
+	}
+	for _, rule := range tests {
+		router := Router{Name: "edge", Spec: Spec{NAT: NAT{PortForwards: []PortForwardRule{rule}}}}
+		if !ovnflow.IsKind(router.Validate(), ovnflow.ErrorValidation) {
+			t.Fatalf("router with port forward %#v should fail validation", rule)
+		}
 	}
 }
