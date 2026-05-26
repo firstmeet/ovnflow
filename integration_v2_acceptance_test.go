@@ -164,6 +164,7 @@ func TestIntegrationV2MutationGateIsEnvGated(t *testing.T) {
 	assertV2ProviderNetworkReadback(t, rawNB, rawOVS, resources, "v2-"+suffix)
 	assertV2LocalOVSReadback(t, rawOVS, resources, "v2-"+suffix)
 	assertV2DoctorReport(t, sdk, resources)
+	assertV2OwnershipAuditClean(t, sdk, "v2-"+suffix)
 	must(t, sdk.WorkloadAttachment(resources.attachment).DetachLocalOVS(ctx), "detach workload local OVS")
 	assertV2LocalOVSDetached(t, rawOVS, resources)
 	must(t, sdk.ProviderNetwork(resources.provider).Delete(ctx), "delete provider network")
@@ -357,6 +358,22 @@ func assertV2DoctorReport(t *testing.T, sdk *Client, resources v2Resources) {
 	}
 	if report.OVS.BridgeMappings[resources.physicalNet] != resources.bridge {
 		t.Fatalf("doctor bridge mappings = %#v, want %s:%s", report.OVS.BridgeMappings, resources.physicalNet, resources.bridge)
+	}
+}
+
+func assertV2OwnershipAuditClean(t *testing.T, sdk *Client, ownerName string) {
+	t.Helper()
+	report, err := sdk.Diagnostics().AuditOwnership(testContext(t), OwnershipAuditOptions{
+		Owner: OwnerRef{Kind: "project", Name: ownerName},
+	})
+	if err != nil {
+		t.Fatalf("Diagnostics.AuditOwnership returned error: %v", err)
+	}
+	if report.Summary.OwnedResources == 0 {
+		t.Fatalf("ownership audit did not see v2 resources: %#v", report)
+	}
+	if report.Summary.Errors != 0 {
+		t.Fatalf("ownership audit errors = %#v", report.Findings)
 	}
 }
 

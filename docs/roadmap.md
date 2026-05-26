@@ -96,10 +96,14 @@ of private platform workflows:
   OVS state, Linux router state, NAT/firewall rules, and flow troubleshooting.
   A first read-only OVSDB Doctor now covers NB/SB/OVS connectivity, schema,
   table counts, port-binding summaries, localnet ports, and OVS bridge
-  mappings; LinuxRouter and packet-flow probes remain future hardening.
+  mappings. A first read-only ownership audit reports ovnflow-owned resources,
+  incomplete ownership markers, and common orphan/reference risks across NB and
+  OVS. LinuxRouter and packet-flow probes remain future hardening.
 - `Resource ownership`: reusable `OwnerRef`, `Labels`, and `external_ids`
   helpers for querying, grouping, cleanup, and controller reconciliation.
-- `Safe cleanup`: SDK-owned resource pruning and orphan/reference checks.
+- `Safe cleanup`: SDK-owned resource pruning and orphan/reference checks. The
+  foundation is intentionally audit-first; automatic pruning should remain
+  explicit and owned-only.
 - `Test harness`: WSL/Docker/OVS/OVN endpoint checks, schema checks,
   dependency checks, and permission checks.
 

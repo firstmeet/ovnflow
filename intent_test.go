@@ -729,40 +729,41 @@ func TestWorkloadAttachmentSyncLocalOVSRejectsUnownedInterface(t *testing.T) {
 }
 
 func TestWorkloadAttachmentDetachLocalOVSFindsOwnedCustomPort(t *testing.T) {
+	ownedIDs := map[string]string{
+		ExternalIDManagedByKey:  "ovnflow",
+		ExternalIDAPIVersionKey: "v2",
+		ExternalIDKindKey:       "WorkloadAttachment",
+		ExternalIDNameKey:       "att-a",
+		ExternalIDOwnerKindKey:  "project",
+		ExternalIDOwnerNameKey:  "alpha",
+	}
 	ovsDB := testOVSDBClient(t)
 	ovsRec := &recordingExecutor{results: []libovsdb.OperationResult{
 		{Rows: []libovsdb.Row{{
-			colUUID:       uuidValue("port-uuid"),
-			colName:       "vnet0",
-			colInterfaces: uuidSet("iface-uuid"),
-			colExternalIDs: ovsMap(map[string]string{
-				ExternalIDManagedByKey: "ovnflow",
-				ExternalIDKindKey:      "WorkloadAttachment",
-				ExternalIDNameKey:      "att-a",
-			}),
+			colUUID:        uuidValue("port-uuid"),
+			colName:        "vnet0",
+			colInterfaces:  []string{"iface-uuid"},
+			colExternalIDs: ovsMap(ownedIDs),
+		}}},
+		{Rows: []libovsdb.Row{{
+			colUUID:        uuidValue("iface-uuid"),
+			colName:        "tap0",
+			colExternalIDs: ovsMap(ownedIDs),
 		}}},
 		{Rows: []libovsdb.Row{{colUUID: uuidValue("br-uuid"), colName: "br-int", colPorts: uuidSet("port-uuid")}}},
 		{Rows: []libovsdb.Row{{colUUID: uuidValue("br-uuid"), colName: "br-int", colPorts: uuidSet("port-uuid")}}},
 		{Rows: []libovsdb.Row{{
-			colUUID:       uuidValue("port-uuid"),
-			colName:       "vnet0",
-			colInterfaces: uuidSet("iface-uuid"),
-			colExternalIDs: ovsMap(map[string]string{
-				ExternalIDManagedByKey: "ovnflow",
-				ExternalIDKindKey:      "WorkloadAttachment",
-				ExternalIDNameKey:      "att-a",
-			}),
+			colUUID:        uuidValue("port-uuid"),
+			colName:        "vnet0",
+			colInterfaces:  []string{"iface-uuid"},
+			colExternalIDs: ovsMap(ownedIDs),
 		}}},
 		{Rows: []libovsdb.Row{{colUUID: uuidValue("br-uuid"), colName: "br-int", colPorts: uuidSet("port-uuid")}}},
 		{Rows: []libovsdb.Row{{
-			colUUID:       uuidValue("port-uuid"),
-			colName:       "vnet0",
-			colInterfaces: uuidSet("iface-uuid"),
-			colExternalIDs: ovsMap(map[string]string{
-				ExternalIDManagedByKey: "ovnflow",
-				ExternalIDKindKey:      "WorkloadAttachment",
-				ExternalIDNameKey:      "att-a",
-			}),
+			colUUID:        uuidValue("port-uuid"),
+			colName:        "vnet0",
+			colInterfaces:  []string{"iface-uuid"},
+			colExternalIDs: ovsMap(ownedIDs),
 		}}},
 		{Count: 1},
 		{Count: 1},
@@ -787,6 +788,39 @@ func TestWorkloadAttachmentDetachLocalOVSFindsOwnedCustomPort(t *testing.T) {
 	}
 	if !deletedPort {
 		t.Fatalf("missing delete of owned custom OVS port: %#v", ovsRec.ops)
+	}
+}
+
+func TestWorkloadAttachmentDetachRejectsUnownedInterface(t *testing.T) {
+	ovsDB := testOVSDBClient(t)
+	ovsRec := &recordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{{
+			colUUID:       uuidValue("port-uuid"),
+			colName:       "vnet0",
+			colInterfaces: []string{"iface-uuid"},
+			colExternalIDs: ovsMap(map[string]string{
+				ExternalIDManagedByKey:  "ovnflow",
+				ExternalIDAPIVersionKey: "v2",
+				ExternalIDKindKey:       "WorkloadAttachment",
+				ExternalIDNameKey:       "att-a",
+				ExternalIDOwnerKindKey:  "project",
+				ExternalIDOwnerNameKey:  "alpha",
+			}),
+		}}},
+		{Rows: []libovsdb.Row{{
+			colUUID:        uuidValue("iface-uuid"),
+			colName:        "tap0",
+			colExternalIDs: ovsMap(map[string]string{"iface-id": "att-a"}),
+		}}},
+	}}
+	ovsDB.executor = ovsRec
+
+	err := (&WorkloadAttachmentRef{ovs: &OVSClient{db: ovsDB}, name: "att-a"}).DetachLocalOVS(context.Background())
+	if !IsKind(err, ErrorOwnershipViolation) {
+		t.Fatalf("DetachLocalOVS error = %v, want ownership violation", err)
+	}
+	if op := findRecordedOp(ovsRec.ops, libovsdb.OperationDelete, tableInterface); op != nil {
+		t.Fatalf("should not delete unowned interface: %#v", op)
 	}
 }
 
@@ -1088,12 +1122,91 @@ func TestSecurityPolicyPatchAddsAndRemovesRules(t *testing.T) {
 	}
 }
 
-func TestV2IntentDeleteUsesUnderlyingResources(t *testing.T) {
+func TestWorkloadAttachmentDeleteRequiresV2Ownership(t *testing.T) {
 	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
-		colUUID:  uuidValue("lsp-uuid"),
-		colName:  "att-a",
-		colPorts: ovsSet(),
-	}}}, {Count: 1}}}
+		colUUID:        uuidValue("lsp-uuid"),
+		colName:        "att-a",
+		colExternalIDs: ovsMap(map[string]string{"owner": "foreign"}),
+	}}}}}
+	db := testNBDBClient(t)
+	db.executor = rec
+	err := (&NBClient{db: db}).WorkloadAttachment("att-a").Delete(context.Background())
+	if !IsKind(err, ErrorOwnershipViolation) {
+		t.Fatalf("Delete error = %v, want ownership violation", err)
+	}
+	if op := findRecordedOp(rec.ops, libovsdb.OperationDelete, tableLogicalSwitchPort); op != nil {
+		t.Fatalf("should not delete unmanaged logical switch port: %#v", op)
+	}
+}
+
+func TestVirtualNetworkDeleteRejectsUnownedChildPort(t *testing.T) {
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{{
+			colUUID:  uuidValue("ls-uuid"),
+			colName:  "net-a",
+			colPorts: []string{"lsp-uuid"},
+			colExternalIDs: ovsMap(map[string]string{
+				ExternalIDManagedByKey:  "ovnflow",
+				ExternalIDAPIVersionKey: "v2",
+				ExternalIDKindKey:       "VirtualNetwork",
+				ExternalIDNameKey:       "net-a",
+				ExternalIDOwnerKindKey:  "project",
+				ExternalIDOwnerNameKey:  "alpha",
+			}),
+		}}},
+		{Rows: []libovsdb.Row{{
+			colUUID:        uuidValue("lsp-uuid"),
+			colName:        "external-port",
+			colExternalIDs: ovsMap(map[string]string{"owner": "foreign"}),
+		}}},
+	}}
+	db := testNBDBClient(t)
+	db.executor = rec
+
+	err := (&NBClient{db: db}).VirtualNetwork("net-a").Delete(context.Background())
+	if !IsKind(err, ErrorOwnershipViolation) {
+		t.Fatalf("Delete error = %v, want ownership violation", err)
+	}
+	if op := findRecordedOp(rec.ops, libovsdb.OperationDelete, tableLogicalSwitchPort); op != nil {
+		t.Fatalf("should not delete unowned child port: %#v", op)
+	}
+}
+
+func TestLogicalSwitchDNSDeleteRequiresV2Ownership(t *testing.T) {
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID:        uuidValue("dns-uuid"),
+		colExternalIDs: ovsMap(map[string]string{dnsNameExternalID: "dns-a"}),
+	}}}}}
+	db := testNBDBClient(t)
+	db.executor = rec
+
+	err := (&NBClient{db: db}).LogicalSwitchDNS("dns-a").Delete(context.Background())
+	if !IsKind(err, ErrorOwnershipViolation) {
+		t.Fatalf("Delete error = %v, want ownership violation", err)
+	}
+	if op := findRecordedOp(rec.ops, libovsdb.OperationDelete, tableDNS); op != nil {
+		t.Fatalf("should not delete unmanaged DNS row: %#v", op)
+	}
+}
+
+func TestWorkloadAttachmentDeleteRemovesOwnedLogicalSwitchPort(t *testing.T) {
+	ownedRow := libovsdb.Row{
+		colUUID: uuidValue("lsp-uuid"),
+		colName: "att-a",
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDManagedByKey:  "ovnflow",
+			ExternalIDAPIVersionKey: "v2",
+			ExternalIDKindKey:       "WorkloadAttachment",
+			ExternalIDNameKey:       "att-a",
+			ExternalIDOwnerKindKey:  "project",
+			ExternalIDOwnerNameKey:  "alpha",
+		}),
+	}
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{ownedRow}},
+		{Rows: []libovsdb.Row{ownedRow}},
+		{Count: 1},
+	}}
 	db := testNBDBClient(t)
 	db.executor = rec
 	if err := (&NBClient{db: db}).WorkloadAttachment("att-a").Delete(context.Background()); err != nil {
@@ -1101,6 +1214,67 @@ func TestV2IntentDeleteUsesUnderlyingResources(t *testing.T) {
 	}
 	if op := findRecordedOp(rec.ops, libovsdb.OperationDelete, tableLogicalSwitchPort); op == nil {
 		t.Fatalf("missing Logical_Switch_Port delete: %#v", rec.ops)
+	}
+}
+
+func TestSecurityPolicyDeleteRemovesOwnedACLsAndDetachesForeignACLs(t *testing.T) {
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{{
+			colUUID: uuidValue("pg-uuid"),
+			colName: "allow-web",
+			colACLs: uuidSet("owned-acl", "foreign-acl"),
+			colExternalIDs: ovsMap(map[string]string{
+				ExternalIDManagedByKey:  "ovnflow",
+				ExternalIDAPIVersionKey: "v2",
+				ExternalIDKindKey:       "SecurityPolicy",
+				ExternalIDNameKey:       "allow-web",
+				ExternalIDOwnerKindKey:  "project",
+				ExternalIDOwnerNameKey:  "alpha",
+			}),
+		}}},
+		{Rows: []libovsdb.Row{{
+			colUUID: uuidValue("owned-acl"),
+			colExternalIDs: ovsMap(map[string]string{
+				ExternalIDManagedByKey:  "ovnflow",
+				ExternalIDAPIVersionKey: "v2",
+				ExternalIDKindKey:       "SecurityPolicy",
+				ExternalIDNameKey:       "allow-web",
+				ExternalIDOwnerKindKey:  "project",
+				ExternalIDOwnerNameKey:  "alpha",
+			}),
+		}}},
+		{Rows: []libovsdb.Row{{
+			colUUID:        uuidValue("foreign-acl"),
+			colExternalIDs: ovsMap(map[string]string{"owner": "foreign"}),
+		}}},
+		{Count: 1},
+		{Count: 1},
+		{Count: 1},
+		{Count: 1},
+	}}
+	db := testNBDBClient(t)
+	db.executor = rec
+
+	if err := (&NBClient{db: db}).SecurityPolicy("allow-web").Delete(context.Background()); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	var deletedOwned, deletedForeign bool
+	for _, op := range rec.ops {
+		if op.Op != libovsdb.OperationDelete || op.Table != tableACL {
+			continue
+		}
+		if len(op.Where) == 1 && op.Where[0].Value == uuidValue("owned-acl") {
+			deletedOwned = true
+		}
+		if len(op.Where) == 1 && op.Where[0].Value == uuidValue("foreign-acl") {
+			deletedForeign = true
+		}
+	}
+	if !deletedOwned {
+		t.Fatalf("missing owned ACL delete: %#v", rec.ops)
+	}
+	if deletedForeign {
+		t.Fatalf("foreign ACL must only be detached, not deleted: %#v", rec.ops)
 	}
 }
 

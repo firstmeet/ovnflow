@@ -174,6 +174,13 @@ func anyStringSlice(value any) []string {
 		return typed
 	case []any:
 		if len(typed) == 2 {
+			if marker, ok := typed[0].(string); ok && (marker == "uuid" || marker == "named-uuid") {
+				if id, ok := typed[1].(string); ok && id != "" {
+					return []string{id}
+				}
+			}
+		}
+		if len(typed) == 2 {
 			if marker, ok := typed[0].(string); ok && marker == "set" {
 				if values, ok := typed[1].([]any); ok {
 					return anySliceStrings(values)

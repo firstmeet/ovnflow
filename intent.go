@@ -222,7 +222,49 @@ func (r *VirtualNetworkRef) Delete(ctx context.Context) error {
 	if r.client == nil || r.client.db == nil {
 		return ErrBackendUnavailable
 	}
-	return r.client.LogicalSwitch(r.name).Delete().Execute(ctx)
+	switches, err := r.client.selectLogicalSwitches(ctx, r.name)
+	if err != nil {
+		return err
+	}
+	if len(switches) == 0 {
+		return wrap(ErrorNotFound, dbOVNNorthbound, tableLogicalSwitch, "delete", r.name, "virtual network not found", nil)
+	}
+	if err := requireV2OwnedExternalIDs(switches[0].ExternalIDs, "VirtualNetwork", r.name, dbOVNNorthbound, tableLogicalSwitch, "delete", r.name); err != nil {
+		return err
+	}
+	var ops []libovsdb.Operation
+	var mustAffect []int
+	for _, portUUID := range uniqueStrings(switches[0].Ports) {
+		port, err := r.client.getLogicalSwitchPortByUUID(ctx, portUUID)
+		if err != nil {
+			return err
+		}
+		switch port.ExternalIDs[ExternalIDKindKey] {
+		case "WorkloadAttachment":
+			if port.ExternalIDs[ExternalIDPrefix+"network"] != r.name {
+				return wrap(ErrorOwnershipViolation, dbOVNNorthbound, tableLogicalSwitchPort, "delete", port.Name, "workload attachment belongs to another virtual network", nil)
+			}
+			if err := requireV2OwnedExternalIDs(port.ExternalIDs, "WorkloadAttachment", port.ExternalIDs[ExternalIDNameKey], dbOVNNorthbound, tableLogicalSwitchPort, "delete", port.Name); err != nil {
+				return err
+			}
+			refOps, err := r.client.unreferenceOps(ctx, tableLogicalSwitchPort, port.UUID)
+			if err != nil {
+				return err
+			}
+			ops = append(ops, refOps...)
+			ops = append(ops, libovsdb.Operation{Op: libovsdb.OperationDelete, Table: tableLogicalSwitchPort, Where: conditionUUID(port.UUID)})
+			mustAffect = append(mustAffect, len(ops)-1)
+		default:
+			return wrap(ErrorOwnershipViolation, dbOVNNorthbound, tableLogicalSwitchPort, "delete", port.Name, "virtual network contains a non-owned logical switch port", nil)
+		}
+	}
+	ops = append(ops, libovsdb.Operation{Op: libovsdb.OperationDelete, Table: tableLogicalSwitch, Where: conditionUUID(switches[0].UUID)})
+	mustAffect = append(mustAffect, len(ops)-1)
+	results, err := r.client.db.transact(ctx, tableLogicalSwitch, "delete", r.name, ops...)
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, mustAffect, dbOVNNorthbound, tableLogicalSwitch, "delete", r.name)
 }
 
 func (r *VirtualNetworkRef) Apply(ctx context.Context, network VirtualNetwork) error {
@@ -410,6 +452,13 @@ func (r *LogicalSwitchDNSRef) Delete(ctx context.Context) error {
 	}
 	if r.client == nil || r.client.db == nil {
 		return ErrBackendUnavailable
+	}
+	dns, err := r.client.GetDNS(ctx, r.name)
+	if err != nil {
+		return err
+	}
+	if err := requireV2OwnedExternalIDs(dns.ExternalIDs, "LogicalSwitchDNS", r.name, dbOVNNorthbound, tableDNS, "delete", r.name); err != nil {
+		return err
 	}
 	return r.client.DNS(r.name).Delete().Execute(ctx)
 }
@@ -607,6 +656,18 @@ func (r *WorkloadAttachmentRef) Delete(ctx context.Context) error {
 	if r.client == nil || r.client.db == nil {
 		return ErrBackendUnavailable
 	}
+	lsp, err := r.client.GetLogicalSwitchPort(ctx, r.name)
+	if err != nil {
+		return err
+	}
+	if err := requireV2OwnedExternalIDs(lsp.ExternalIDs, "WorkloadAttachment", r.name, dbOVNNorthbound, tableLogicalSwitchPort, "delete", r.name); err != nil {
+		return err
+	}
+	if r.ovs != nil && r.ovs.db != nil {
+		if err := r.detachLocalOVS(ctx, true); err != nil && !IsKind(err, ErrorNotFound) {
+			return err
+		}
+	}
 	return r.client.TableLogicalSwitchPort(r.name).Delete().Execute(ctx)
 }
 
@@ -672,6 +733,10 @@ func (r *WorkloadAttachmentRef) DetachLocalOVS(ctx context.Context) error {
 	if r.ovs == nil || r.ovs.db == nil {
 		return ErrBackendUnavailable
 	}
+	return r.detachLocalOVS(ctx, false)
+}
+
+func (r *WorkloadAttachmentRef) detachLocalOVS(ctx context.Context, allowMissing bool) error {
 	ports, err := r.ovs.ListPorts(ctx)
 	if err != nil {
 		return err
@@ -684,7 +749,19 @@ func (r *WorkloadAttachmentRef) DetachLocalOVS(ctx context.Context) error {
 		}
 	}
 	if ownedPort == nil {
+		if allowMissing {
+			return nil
+		}
 		return wrap(ErrorNotFound, dbOpenVSwitch, tablePort, "detach", r.name, "local OVS workload port not found", nil)
+	}
+	for _, ifaceUUID := range ownedPort.Interfaces {
+		iface, err := r.ovs.getInterfaceByUUID(ctx, ifaceUUID)
+		if err != nil {
+			return err
+		}
+		if !ovsResourceOwnedBy(iface.ExternalIDs, "WorkloadAttachment", r.name) {
+			return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tableInterface, "detach", iface.Name, "workload port references an interface not owned by this attachment", nil)
+		}
 	}
 	bridges, err := r.ovs.ListBridges(ctx)
 	if err != nil {
@@ -1193,7 +1270,60 @@ func (r *SecurityPolicyRef) Delete(ctx context.Context) error {
 	if r.client == nil || r.client.db == nil {
 		return ErrBackendUnavailable
 	}
-	return r.client.PortGroup(r.name).Delete().Execute(ctx)
+	pg, err := r.client.GetPortGroup(ctx, r.name)
+	if err != nil {
+		return err
+	}
+	if err := requireV2OwnedExternalIDs(pg.ExternalIDs, "SecurityPolicy", r.name, dbOVNNorthbound, tablePortGroup, "delete", r.name); err != nil {
+		return err
+	}
+	acls, err := r.client.selectACLsByUUID(ctx, pg.ACLs, r.name)
+	if err != nil {
+		return err
+	}
+	var ops []libovsdb.Operation
+	var mustAffect []int
+	var ownedACLs []string
+	for _, acl := range acls {
+		if ovsResourceOwnedBy(acl.ExternalIDs, "SecurityPolicy", r.name) {
+			if err := requireV2OwnedExternalIDs(acl.ExternalIDs, "SecurityPolicy", r.name, dbOVNNorthbound, tableACL, "delete", acl.UUID); err != nil {
+				return err
+			}
+			ownedACLs = append(ownedACLs, acl.UUID)
+			continue
+		}
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationMutate,
+			Table: tablePortGroup,
+			Where: conditionUUID(pg.UUID),
+			Mutations: []libovsdb.Mutation{
+				*libovsdb.NewMutation(colACLs, libovsdb.MutateOperationDelete, uuidSet(acl.UUID)),
+			},
+		})
+		mustAffect = append(mustAffect, len(ops)-1)
+	}
+	if len(ownedACLs) > 0 {
+		ops = append(ops, libovsdb.Operation{
+			Op:    libovsdb.OperationMutate,
+			Table: tablePortGroup,
+			Where: conditionUUID(pg.UUID),
+			Mutations: []libovsdb.Mutation{
+				*libovsdb.NewMutation(colACLs, libovsdb.MutateOperationDelete, uuidSet(ownedACLs...)),
+			},
+		})
+		mustAffect = append(mustAffect, len(ops)-1)
+	}
+	for _, aclUUID := range ownedACLs {
+		ops = append(ops, libovsdb.Operation{Op: libovsdb.OperationDelete, Table: tableACL, Where: conditionUUID(aclUUID)})
+		mustAffect = append(mustAffect, len(ops)-1)
+	}
+	ops = append(ops, libovsdb.Operation{Op: libovsdb.OperationDelete, Table: tablePortGroup, Where: conditionUUID(pg.UUID)})
+	mustAffect = append(mustAffect, len(ops)-1)
+	results, err := r.client.db.transact(ctx, tablePortGroup, "delete", r.name, ops...)
+	if err != nil {
+		return err
+	}
+	return ensureAffected(results, mustAffect, dbOVNNorthbound, tablePortGroup, "delete", r.name)
 }
 
 func (r *SecurityPolicyRef) Apply(ctx context.Context, policy SecurityPolicy) error {
@@ -1860,6 +1990,9 @@ func (b *ProviderNetworkBuilder) validateTargets(ctx context.Context) error {
 		if !providerNetworkLocalnetOwnedBy(port.ExternalIDs, desired.Name) {
 			return wrap(ErrorOwnershipViolation, dbOVNNorthbound, tableLogicalSwitchPort, "ensure", desired.LocalnetPort, "localnet port is already managed by another owner", nil)
 		}
+		if err := requireV2OwnedExternalIDs(port.ExternalIDs, "ProviderNetwork", desired.Name, dbOVNNorthbound, tableLogicalSwitchPort, "ensure", desired.LocalnetPort); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -2224,6 +2357,18 @@ func (n *NBClient) selectACLsByUUID(ctx context.Context, ids []string, object st
 		out = append(out, *aclFromRow(rows[0]))
 	}
 	return out, nil
+}
+
+func (n *NBClient) getLogicalSwitchPortByUUID(ctx context.Context, id string) (*LogicalSwitchPort, error) {
+	rows, err := n.selectRows(ctx, tableLogicalSwitchPort, conditionUUID(id), []string{colUUID, colName, colAddresses, colExternalIDs, colOptions, colType}, id)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, wrap(ErrorNotFound, dbOVNNorthbound, tableLogicalSwitchPort, "get", id, "logical switch port not found", nil)
+	}
+	port := logicalSwitchPortFromRow(Row(rawRow(rows[0])))
+	return &port, nil
 }
 
 func securityRuleFromACL(acl ACL) SecurityRule {
@@ -2639,6 +2784,25 @@ func intentExternalIDs(kind, name string, owner OwnerRef, labels Labels) (map[st
 
 func providerNetworkLocalnetOwnedBy(externalIDs map[string]string, name string) bool {
 	return externalIDs[ExternalIDManagedByKey] == "ovnflow" && externalIDs[ExternalIDKindKey] == "ProviderNetwork" && externalIDs[ExternalIDNameKey] == name
+}
+
+func requireV2OwnedExternalIDs(externalIDs map[string]string, kind, name, database, table, op, object string) error {
+	if externalIDs[ExternalIDManagedByKey] != "ovnflow" {
+		return wrap(ErrorOwnershipViolation, database, table, op, object, "resource is not managed by ovnflow", nil)
+	}
+	if externalIDs[ExternalIDAPIVersionKey] != "v2" {
+		return wrap(ErrorOwnershipViolation, database, table, op, object, "resource is not managed by ovnflow v2", nil)
+	}
+	if externalIDs[ExternalIDKindKey] != kind {
+		return wrap(ErrorOwnershipViolation, database, table, op, object, "resource kind does not match requested intent", nil)
+	}
+	if strings.TrimSpace(name) != "" && externalIDs[ExternalIDNameKey] != name {
+		return wrap(ErrorOwnershipViolation, database, table, op, object, "resource name does not match requested intent", nil)
+	}
+	if externalIDs[ExternalIDOwnerKindKey] == "" || (externalIDs[ExternalIDOwnerNameKey] == "" && externalIDs[ExternalIDOwnerIDKey] == "") {
+		return wrap(ErrorOwnershipViolation, database, table, op, object, "resource owner marker is incomplete", nil)
+	}
+	return nil
 }
 
 func providerNetworkMappingOwnerKey(physicalNetwork string) string {

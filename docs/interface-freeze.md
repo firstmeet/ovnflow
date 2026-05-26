@@ -36,6 +36,12 @@ tests independent from OVN/OVS.
 multiple IP addresses directly instead of forcing callers to encode records as
 flat strings.
 
+v2 intent delete paths are guarded by ovnflow ownership markers before they
+remove resources. They require `managed-by=ovnflow`, `api-version=v2`, matching
+`kind/name`, and a complete owner marker. `Diagnostics().AuditOwnership` is the
+read-only foundation for safe cleanup: it lists owned resources and reports
+common orphan/reference risks without mutating NB or OVS.
+
 ## LinuxRouter boundary
 
 LinuxRouter lives in the `linuxrouter` package. It defines `Spec`, `Status`,

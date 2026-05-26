@@ -104,6 +104,14 @@ func TestRowDecodersSupportOVSDBShapes(t *testing.T) {
 	}
 }
 
+func TestAnyStringSliceSupportsSingleUUIDJSONShape(t *testing.T) {
+	got := anyStringSlice([]any{"uuid", "iface-uuid"})
+	want := []string{"iface-uuid"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("anyStringSlice() = %#v, want %#v", got, want)
+	}
+}
+
 func TestUniqueStringsDropsEmptyValuesAndPreservesOrder(t *testing.T) {
 	got := uniqueStrings([]string{"", "a", "b", "a", "", "c", "b"})
 	want := []string{"a", "b", "c"}
