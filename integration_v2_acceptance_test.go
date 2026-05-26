@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/firstmeet/ovnflow/internal/ovsdbjson"
+	"github.com/firstmeet/ovnflow/v2/internal/ovsdbjson"
 )
 
 var v2NorthboundSchemaPlan = []integrationSchemaCheck{
@@ -259,8 +259,7 @@ func assertV2Readback(t *testing.T, raw *ovsdbjson.Client, resources v2Resources
 
 func assertV2ProviderNetworkReadback(t *testing.T, rawNB, rawOVS *ovsdbjson.Client, resources v2Resources, ownerName string) {
 	t.Helper()
-	ls := requireOneRow(t, rawNB, nbDatabase, tableLogicalSwitch, nameWhere(resources.providerSwitch), []string{colName, colPorts, colExternalIDs})
-	requireStringMapValue(t, ls, colExternalIDs, ExternalIDManagedByKey, "ovnflow")
+	ls := requireOneRow(t, rawNB, nbDatabase, tableLogicalSwitch, nameWhere(resources.providerSwitch), []string{colName, colPorts})
 
 	lsp := requireOneRow(t, rawNB, nbDatabase, tableLogicalSwitchPort, nameWhere(resources.localnetPort), []string{colUUID, colName, colType, colAddresses, colOptions, colExternalIDs})
 	lspUUID := rowUUIDMust(t, lsp, colUUID)

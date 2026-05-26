@@ -2,7 +2,9 @@ module github.com/firstmeet/ovnflow-sdkcheck
 
 go 1.22.0
 
-require github.com/firstmeet/ovnflow v1.0.0
+require github.com/firstmeet/ovnflow/v2 v2.0.0
+
+replace github.com/firstmeet/ovnflow/v2 => ../..
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect

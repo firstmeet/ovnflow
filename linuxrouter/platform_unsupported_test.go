@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/firstmeet/ovnflow"
+	"github.com/firstmeet/ovnflow/v2"
 )
 
 func TestPlatformClientUnsupportedOnNonLinux(t *testing.T) {

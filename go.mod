@@ -1,4 +1,4 @@
-module github.com/firstmeet/ovnflow
+module github.com/firstmeet/ovnflow/v2
 
 go 1.22.0
 

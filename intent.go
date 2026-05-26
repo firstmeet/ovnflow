@@ -957,19 +957,9 @@ func (r *ProviderNetworkRef) Get(ctx context.Context) (*ProviderNetwork, error) 
 	if r.client == nil || r.client.db == nil {
 		return nil, ErrBackendUnavailable
 	}
-	ports, err := r.client.ListLogicalSwitchPorts(ctx)
+	localnet, err := r.providerLocalnetPort(ctx)
 	if err != nil {
 		return nil, err
-	}
-	var localnet *LogicalSwitchPort
-	for i := range ports {
-		if ports[i].Type == "localnet" && ports[i].ExternalIDs[ExternalIDKindKey] == "ProviderNetwork" && ports[i].ExternalIDs[ExternalIDNameKey] == r.name {
-			localnet = &ports[i]
-			break
-		}
-	}
-	if localnet == nil {
-		return nil, wrap(ErrorNotFound, dbOVNNorthbound, tableLogicalSwitchPort, "get", r.name, "provider localnet port not found", nil)
 	}
 	network := providerNetworkFromLocalnetPort(localnet)
 	if network.Name == "" {
@@ -1039,6 +1029,9 @@ func (r *ProviderNetworkRef) Patch(ctx context.Context, patch ProviderNetworkPat
 		}
 	}
 	if current.LocalnetPort != "" && current.LocalnetPort != next.LocalnetPort {
+		if err := r.requireOwnedLocalnetPort(ctx, current.LocalnetPort, "delete"); err != nil {
+			return nil, err
+		}
 		if err := r.client.TableLogicalSwitchPort(current.LocalnetPort).Delete().Execute(ctx); err != nil && !IsKind(err, ErrorNotFound) {
 			return nil, err
 		}
@@ -1057,8 +1050,15 @@ func (r *ProviderNetworkRef) Delete(ctx context.Context) error {
 	if r.client == nil || r.client.db == nil || r.ovs == nil || r.ovs.db == nil {
 		return ErrBackendUnavailable
 	}
-	network, err := r.Get(ctx)
+	localnet, err := r.providerLocalnetPort(ctx)
 	if err != nil {
+		return err
+	}
+	network := providerNetworkFromLocalnetPort(localnet)
+	if network.Name == "" {
+		network.Name = r.name
+	}
+	if err := r.requireOwnedLocalnetPort(ctx, network.LocalnetPort, "delete"); err != nil {
 		return err
 	}
 	if err := r.detachBridgeMapping(ctx, *network); err != nil && !IsKind(err, ErrorNotFound) {
@@ -1067,53 +1067,66 @@ func (r *ProviderNetworkRef) Delete(ctx context.Context) error {
 	return r.client.TableLogicalSwitchPort(network.LocalnetPort).Delete().Execute(ctx)
 }
 
+func (r *ProviderNetworkRef) providerLocalnetPort(ctx context.Context) (*LogicalSwitchPort, error) {
+	ports, err := r.client.ListLogicalSwitchPorts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range ports {
+		if ports[i].Type == "localnet" && ports[i].ExternalIDs[ExternalIDKindKey] == "ProviderNetwork" && ports[i].ExternalIDs[ExternalIDNameKey] == r.name {
+			return &ports[i], nil
+		}
+	}
+	return nil, wrap(ErrorNotFound, dbOVNNorthbound, tableLogicalSwitchPort, "get", r.name, "provider localnet port not found", nil)
+}
+
+func (r *ProviderNetworkRef) requireOwnedLocalnetPort(ctx context.Context, name, op string) error {
+	if strings.TrimSpace(name) == "" {
+		return wrap(ErrorValidation, dbOVNNorthbound, tableLogicalSwitchPort, op, r.name, "provider localnet port is required", nil)
+	}
+	port, err := r.client.GetLogicalSwitchPort(ctx, name)
+	if err != nil {
+		return err
+	}
+	if port.Type != "localnet" {
+		return wrap(ErrorOwnershipViolation, dbOVNNorthbound, tableLogicalSwitchPort, op, name, "provider port is not a localnet port", nil)
+	}
+	return requireV2OwnedExternalIDs(port.ExternalIDs, "ProviderNetwork", r.name, dbOVNNorthbound, tableLogicalSwitchPort, op, name)
+}
+
 func (r *ProviderNetworkRef) detachBridgeMapping(ctx context.Context, network ProviderNetwork) error {
 	if network.PhysicalNetwork == "" {
 		return wrap(ErrorValidation, dbOpenVSwitch, tableOpenVSwitch, "delete", r.name, "physical network is required", nil)
 	}
-	markers, err := r.providerMappingMarkers(ctx)
+	root, err := r.ovs.GetOpenVSwitch(ctx)
+	if err != nil {
+		return err
+	}
+	mappings, err := ParseBridgeMappings(root.ExternalIDs[ovsBridgeMappingsKey])
 	if err != nil {
 		return err
 	}
 	key := providerNetworkMappingOwnerKey(network.PhysicalNetwork)
-	owner := markers[key]
+	owner := root.ExternalIDs[key]
 	if owner != "" && owner != r.name {
 		return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tableOpenVSwitch, "delete", network.PhysicalNetwork, "bridge mapping is managed by another provider network", nil)
 	}
 	if owner == "" {
 		return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tableOpenVSwitch, "delete", network.PhysicalNetwork, "bridge mapping is not managed by ovnflow", nil)
 	}
-	if err := r.ovs.DeleteBridgeMapping(ctx, network.PhysicalNetwork, network.Bridge); err != nil && !IsKind(err, ErrorNotFound) {
-		return err
+	current := mappings[network.PhysicalNetwork]
+	if current != "" && network.Bridge != "" && current != network.Bridge {
+		return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tableOpenVSwitch, "delete", network.PhysicalNetwork, "bridge mapping points at another bridge", nil)
 	}
-	return r.deleteProviderMappingMarker(ctx, network.PhysicalNetwork)
-}
-
-func (r *ProviderNetworkRef) providerMappingMarkers(ctx context.Context) (map[string]string, error) {
-	root, err := r.ovs.GetOpenVSwitch(ctx)
-	if err != nil {
-		return nil, err
+	delete(mappings, network.PhysicalNetwork)
+	formatted := FormatBridgeMappings(mappings)
+	mutations := []libovsdb.Mutation{
+		*libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationDelete, ovsMapKeys([]string{ovsBridgeMappingsKey, key})),
 	}
-	return root.ExternalIDs, nil
-}
-
-func (r *ProviderNetworkRef) deleteProviderMappingMarker(ctx context.Context, physicalNetwork string) error {
-	root, err := r.ovs.GetOpenVSwitch(ctx)
-	if err != nil {
-		return err
+	if formatted != "" {
+		mutations = append(mutations, *libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationInsert, ovsMap(map[string]string{ovsBridgeMappingsKey: formatted})))
 	}
-	results, err := r.ovs.db.executor.Transact(ctx, libovsdb.Operation{
-		Op:    libovsdb.OperationMutate,
-		Table: tableOpenVSwitch,
-		Where: conditionUUID(root.UUID),
-		Mutations: []libovsdb.Mutation{
-			*libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationDelete, ovsMapKeys([]string{providerNetworkMappingOwnerKey(physicalNetwork)})),
-		},
-	})
-	if err != nil {
-		return classifyTransactError(err, dbOpenVSwitch, tableOpenVSwitch, "delete", physicalNetwork)
-	}
-	return ensureAffected(results, []int{0}, dbOpenVSwitch, tableOpenVSwitch, "delete", physicalNetwork)
+	return r.ovs.mutateOpenVSwitchExternalIDsCAS(ctx, root, "delete", network.PhysicalNetwork, mutations)
 }
 
 type ProviderNetworkBuilder struct {
@@ -2007,7 +2020,6 @@ func (b *ProviderNetworkBuilder) reconcileOVSDB(ctx context.Context) error {
 	externalIDs[ExternalIDPrefix+"logical-switch"] = desired.LogicalSwitch
 	externalIDs[ExternalIDPrefix+"bridge"] = desired.Bridge
 	if err := b.ref.client.LogicalSwitch(desired.LogicalSwitch).Ensure().
-		WithExternalID(ExternalIDManagedByKey, "ovnflow").
 		AddLocalnetPort(desired.LocalnetPort, desired.PhysicalNetwork).
 		WithExternalID(ExternalIDKindKey, "ProviderNetwork").
 		WithExternalID(ExternalIDNameKey, desired.Name).
@@ -2056,22 +2068,13 @@ func (b *ProviderNetworkBuilder) setOwnedBridgeMapping(ctx context.Context, desi
 	if formatted != "" {
 		values[ovsBridgeMappingsKey] = formatted
 	}
-	results, err := b.ref.ovs.db.executor.Transact(ctx, libovsdb.Operation{
-		Op:    libovsdb.OperationMutate,
-		Table: tableOpenVSwitch,
-		Where: conditionUUID(root.UUID),
-		Mutations: []libovsdb.Mutation{
-			*libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationDelete, ovsMapKeys([]string{ovsBridgeMappingsKey, providerNetworkMappingOwnerKey(desired.PhysicalNetwork)})),
-			*libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationInsert, ovsMap(map[string]string{
-				providerNetworkMappingOwnerKey(desired.PhysicalNetwork): values[providerNetworkMappingOwnerKey(desired.PhysicalNetwork)],
-				ovsBridgeMappingsKey: values[ovsBridgeMappingsKey],
-			})),
-		},
+	return b.ref.ovs.mutateOpenVSwitchExternalIDsCAS(ctx, root, "ensure", desired.PhysicalNetwork, []libovsdb.Mutation{
+		*libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationDelete, ovsMapKeys([]string{ovsBridgeMappingsKey, providerNetworkMappingOwnerKey(desired.PhysicalNetwork)})),
+		*libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationInsert, ovsMap(map[string]string{
+			providerNetworkMappingOwnerKey(desired.PhysicalNetwork): values[providerNetworkMappingOwnerKey(desired.PhysicalNetwork)],
+			ovsBridgeMappingsKey: values[ovsBridgeMappingsKey],
+		})),
 	})
-	if err != nil {
-		return classifyTransactError(err, dbOpenVSwitch, tableOpenVSwitch, "ensure", desired.PhysicalNetwork)
-	}
-	return ensureAffected(results, []int{0}, dbOpenVSwitch, tableOpenVSwitch, "ensure", desired.PhysicalNetwork)
 }
 
 func (b *ProviderNetworkBuilder) diff(ctx context.Context) (Diff, error) {

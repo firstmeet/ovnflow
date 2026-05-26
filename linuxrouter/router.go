@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/firstmeet/ovnflow"
+	"github.com/firstmeet/ovnflow/v2"
 )
 
 type Router struct {

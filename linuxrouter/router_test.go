@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/firstmeet/ovnflow"
+	"github.com/firstmeet/ovnflow/v2"
 )
 
 func TestNATStableRuleNames(t *testing.T) {

@@ -5,7 +5,7 @@ package linuxrouter
 import (
 	"testing"
 
-	"github.com/firstmeet/ovnflow"
+	"github.com/firstmeet/ovnflow/v2"
 )
 
 func TestParseIPAddrJSON(t *testing.T) {

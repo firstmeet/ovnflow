@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/firstmeet/ovnflow"
+	"github.com/firstmeet/ovnflow/v2"
 )
 
 func main() {

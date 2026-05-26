@@ -3,7 +3,7 @@ package ovnflow_test
 import (
 	"context"
 
-	"github.com/firstmeet/ovnflow"
+	"github.com/firstmeet/ovnflow/v2"
 )
 
 func Example_logicalSwitchCreate() {

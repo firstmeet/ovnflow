@@ -147,7 +147,7 @@ func (o *OVSClient) EnsureBridgeMapping(ctx context.Context, physicalNetwork, br
 		return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tableOpenVSwitch, "ensure", physicalNetwork, "bridge mapping already points at another bridge", nil)
 	}
 	mappings[physicalNetwork] = bridge
-	return o.replaceBridgeMappings(ctx, root.UUID, mappings)
+	return o.replaceBridgeMappings(ctx, root, mappings)
 }
 
 func (o *OVSClient) DeleteBridgeMapping(ctx context.Context, physicalNetwork, bridge string) error {
@@ -170,11 +170,11 @@ func (o *OVSClient) DeleteBridgeMapping(ctx context.Context, physicalNetwork, br
 		return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tableOpenVSwitch, "delete", physicalNetwork, "bridge mapping points at another bridge", nil)
 	}
 	delete(mappings, physicalNetwork)
-	return o.replaceBridgeMappings(ctx, root.UUID, mappings)
+	return o.replaceBridgeMappings(ctx, root, mappings)
 }
 
-func (o *OVSClient) replaceBridgeMappings(ctx context.Context, rootUUID string, mappings map[string]string) error {
-	if rootUUID == "" {
+func (o *OVSClient) replaceBridgeMappings(ctx context.Context, root *OpenVSwitch, mappings map[string]string) error {
+	if root == nil || root.UUID == "" {
 		return wrap(ErrorConflict, dbOpenVSwitch, tableOpenVSwitch, "update", "", "Open_vSwitch root UUID missing", nil)
 	}
 	formatted := FormatBridgeMappings(mappings)
@@ -183,16 +183,38 @@ func (o *OVSClient) replaceBridgeMappings(ctx context.Context, rootUUID string, 
 	if formatted != "" {
 		mutations = append(mutations, *libovsdb.NewMutation(colExternalIDs, libovsdb.MutateOperationInsert, ovsMap(map[string]string{ovsBridgeMappingsKey: formatted})))
 	}
+	return o.mutateOpenVSwitchExternalIDsCAS(ctx, root, "update", root.UUID, mutations)
+}
+
+func (o *OVSClient) mutateOpenVSwitchExternalIDsCAS(ctx context.Context, root *OpenVSwitch, op, object string, mutations []libovsdb.Mutation) error {
+	if o == nil || o.db == nil {
+		return ErrBackendUnavailable
+	}
+	if root == nil || root.UUID == "" {
+		return wrap(ErrorConflict, dbOpenVSwitch, tableOpenVSwitch, op, object, "Open_vSwitch root UUID missing", nil)
+	}
+	if len(mutations) == 0 {
+		return nil
+	}
+	timeout := 0
 	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+		Op:      libovsdb.OperationWait,
+		Table:   tableOpenVSwitch,
+		Where:   conditionUUID(root.UUID),
+		Columns: []string{colExternalIDs},
+		Until:   string(libovsdb.WaitConditionEqual),
+		Rows:    []libovsdb.Row{{colExternalIDs: ovsMap(root.ExternalIDs)}},
+		Timeout: &timeout,
+	}, libovsdb.Operation{
 		Op:        libovsdb.OperationMutate,
 		Table:     tableOpenVSwitch,
-		Where:     conditionUUID(rootUUID),
+		Where:     conditionUUID(root.UUID),
 		Mutations: mutations,
 	})
 	if err != nil {
-		return classifyTransactError(err, dbOpenVSwitch, tableOpenVSwitch, "update", rootUUID)
+		return classifyTransactError(err, dbOpenVSwitch, tableOpenVSwitch, op, object)
 	}
-	return ensureAffected(results, []int{0}, dbOpenVSwitch, tableOpenVSwitch, "update", rootUUID)
+	return ensureAffected(results, []int{1}, dbOpenVSwitch, tableOpenVSwitch, op, object)
 }
 
 func ParseBridgeMappings(raw string) (map[string]string, error) {

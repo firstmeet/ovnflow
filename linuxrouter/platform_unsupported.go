@@ -5,7 +5,7 @@ package linuxrouter
 import (
 	"context"
 
-	"github.com/firstmeet/ovnflow"
+	"github.com/firstmeet/ovnflow/v2"
 )
 
 type UnsupportedClient struct{}

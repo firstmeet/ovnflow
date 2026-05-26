@@ -5,7 +5,7 @@ package linuxrouter
 import (
 	"os"
 
-	"github.com/firstmeet/ovnflow"
+	"github.com/firstmeet/ovnflow/v2"
 )
 
 func NewPlatformClient() PlatformClient {

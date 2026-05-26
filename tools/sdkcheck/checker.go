@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/firstmeet/ovnflow"
+	"github.com/firstmeet/ovnflow/v2"
 )
 
 const (

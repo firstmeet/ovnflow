@@ -899,8 +899,7 @@ func TestProviderNetworkReconcileWritesLocalnetAndBridgeMapping(t *testing.T) {
 		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colBridges: uuidSet("br-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other"})}}},
 		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other"})}}},
 		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other"})}}},
-		{Count: 1},
-		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other,physnet1:br-ex"})}}},
+		{},
 		{Count: 1},
 	}}
 	ovsDB.executor = ovsRec
@@ -926,6 +925,17 @@ func TestProviderNetworkReconcileWritesLocalnetAndBridgeMapping(t *testing.T) {
 	}
 	if lspOp.Row[colType] != "localnet" {
 		t.Fatalf("localnet row = %#v", lspOp.Row)
+	}
+	if lsOp := findRecordedOp(nbRec.ops, libovsdb.OperationMutate, tableLogicalSwitch); lsOp != nil {
+		for _, mutation := range lsOp.Mutations {
+			if mutation.Column != colExternalIDs || mutation.Mutator != libovsdb.MutateOperationInsert {
+				continue
+			}
+			values := ovsMapStrings(t, mutation.Value)
+			if values[ExternalIDManagedByKey] == "ovnflow" {
+				t.Fatalf("provider logical switch must not be marked SDK-owned: %#v", lsOp)
+			}
+		}
 	}
 	updateOp := findRecordedOp(nbRec.ops, libovsdb.OperationMutate, tableLogicalSwitchPort)
 	if updateOp == nil || !hasMutation(updateOp.Mutations, colExternalIDs, libovsdb.MutateOperationInsert) {
@@ -987,14 +997,24 @@ func TestProviderNetworkDeleteRemovesOwnedMappingAndLocalnetOnly(t *testing.T) {
 			colName:    "ln-provider",
 			colType:    "localnet",
 			colOptions: ovsMap(map[string]string{"network_name": "physnet1"}),
-			colExternalIDs: ovsMap(map[string]string{
-				ExternalIDManagedByKey:                "ovnflow",
+			colExternalIDs: ovsMap(mergeStringMaps(testOwnedExternalIDs("ProviderNetwork", "public"), map[string]string{
 				ExternalIDKindKey:                     "ProviderNetwork",
 				ExternalIDNameKey:                     "public",
 				ExternalIDPrefix + "logical-switch":   "provider-net",
 				ExternalIDPrefix + "bridge":           "br-ex",
 				ExternalIDPrefix + "physical-network": "physnet1",
-			}),
+			})),
+		}}},
+		{Rows: []libovsdb.Row{{
+			colUUID:    uuidValue("lsp-uuid"),
+			colName:    "ln-provider",
+			colType:    "localnet",
+			colOptions: ovsMap(map[string]string{"network_name": "physnet1"}),
+			colExternalIDs: ovsMap(mergeStringMaps(testOwnedExternalIDs("ProviderNetwork", "public"), map[string]string{
+				ExternalIDPrefix + "logical-switch":   "provider-net",
+				ExternalIDPrefix + "bridge":           "br-ex",
+				ExternalIDPrefix + "physical-network": "physnet1",
+			})),
 		}}},
 		{Rows: []libovsdb.Row{{colUUID: uuidValue("lsp-uuid")}}},
 		{Count: 1},
@@ -1003,10 +1023,7 @@ func TestProviderNetworkDeleteRemovesOwnedMappingAndLocalnetOnly(t *testing.T) {
 	ovsDB := testOVSDBClient(t)
 	ovsRec := &recordingExecutor{results: []libovsdb.OperationResult{
 		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other,physnet1:br-ex", markerKey: "public"})}}},
-		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other,physnet1:br-ex", markerKey: "public"})}}},
-		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other,physnet1:br-ex", markerKey: "public"})}}},
-		{Count: 1},
-		{Rows: []libovsdb.Row{{colUUID: uuidValue("ovs-uuid"), colExternalIDs: ovsMap(map[string]string{ovsBridgeMappingsKey: "other:br-other", markerKey: "public"})}}},
+		{},
 		{Count: 1},
 	}}
 	ovsDB.executor = ovsRec
@@ -1036,8 +1053,65 @@ func TestProviderNetworkDeleteRemovesOwnedMappingAndLocalnetOnly(t *testing.T) {
 	if formatted != "other:br-other" {
 		t.Fatalf("bridge mappings after delete = %q", formatted)
 	}
+	var markerDeleted bool
+	for _, op := range ovsRec.ops {
+		if op.Op != libovsdb.OperationMutate || op.Table != tableOpenVSwitch {
+			continue
+		}
+		for _, mutation := range op.Mutations {
+			if mutation.Column != colExternalIDs || mutation.Mutator != libovsdb.MutateOperationDelete {
+				continue
+			}
+			for _, key := range ovsSetStrings(t, mutation.Value) {
+				if key == markerKey {
+					markerDeleted = true
+				}
+			}
+		}
+	}
+	if !markerDeleted {
+		t.Fatalf("provider marker was not deleted in bridge mapping CAS mutate: %#v", ovsRec.ops)
+	}
 	if op := findRecordedOp(ovsRec.ops, libovsdb.OperationDelete, tableBridge); op != nil {
 		t.Fatalf("provider network delete must not delete physical bridge: %#v", op)
+	}
+}
+
+func TestProviderNetworkDeleteRejectsUnownedLocalnet(t *testing.T) {
+	nbDB := testNBDBClient(t)
+	unowned := libovsdb.Row{
+		colUUID:    uuidValue("lsp-uuid"),
+		colName:    "ln-provider",
+		colType:    "localnet",
+		colOptions: ovsMap(map[string]string{"network_name": "physnet1"}),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDManagedByKey:                "ovnflow",
+			ExternalIDKindKey:                     "ProviderNetwork",
+			ExternalIDNameKey:                     "public",
+			ExternalIDPrefix + "logical-switch":   "provider-net",
+			ExternalIDPrefix + "bridge":           "br-ex",
+			ExternalIDPrefix + "physical-network": "physnet1",
+		}),
+	}
+	nbRec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{unowned}},
+		{Rows: []libovsdb.Row{unowned}},
+	}}
+	nbDB.executor = nbRec
+	ovsDB := testOVSDBClient(t)
+	ovsRec := &recordingExecutor{}
+	ovsDB.executor = ovsRec
+	ref := &ProviderNetworkRef{client: &NBClient{db: nbDB}, ovs: &OVSClient{db: ovsDB}, name: "public"}
+
+	err := ref.Delete(context.Background())
+	if !IsKind(err, ErrorOwnershipViolation) {
+		t.Fatalf("Delete error = %v, want ownership violation", err)
+	}
+	if op := findRecordedOp(nbRec.ops, libovsdb.OperationDelete, tableLogicalSwitchPort); op != nil {
+		t.Fatalf("delete should not remove unowned localnet port: %#v", op)
+	}
+	if len(ovsRec.ops) != 0 {
+		t.Fatalf("delete should not touch OVS before ownership passes: %#v", ovsRec.ops)
 	}
 }
 
@@ -1289,6 +1363,21 @@ func ovsMapStrings(t *testing.T, value any) map[string]string {
 		return out
 	default:
 		t.Fatalf("value %T is not ovs map: %#v", value, value)
+		return nil
+	}
+}
+
+func ovsSetStrings(t *testing.T, value any) []string {
+	t.Helper()
+	switch typed := value.(type) {
+	case libovsdb.OvsSet:
+		out := make([]string, 0, len(typed.GoSet))
+		for _, item := range typed.GoSet {
+			out = append(out, anyString(item))
+		}
+		return out
+	default:
+		t.Fatalf("value %T is not ovs set: %#v", value, value)
 		return nil
 	}
 }

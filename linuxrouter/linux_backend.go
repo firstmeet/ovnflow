@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/firstmeet/ovnflow"
+	"github.com/firstmeet/ovnflow/v2"
 )
 
 type SystemExecutor struct{}
@@ -55,7 +55,7 @@ func (r LinuxRenderer) RenderApply(router Router) ([]Command, error) {
 	var commands []Command
 	commands = append(commands, Command{Program: "ip", Args: []string{"netns", "add", ns}, IgnoreAlreadyExists: true})
 	for _, iface := range router.Spec.Interfaces {
-		commands = append(commands, renderInterfaceCommands(ns, iface)...)
+		commands = append(commands, renderInterfaceCommands(router.Name, ns, iface)...)
 	}
 	for _, route := range router.Spec.Routes {
 		commands = append(commands, renderRouteCommand(ns, route))
@@ -68,14 +68,28 @@ func (r LinuxRenderer) RenderApply(router Router) ([]Command, error) {
 	return commands, nil
 }
 
-func renderInterfaceCommands(ns string, iface Interface) []Command {
+func renderInterfaceCommands(routerName, ns string, iface Interface) []Command {
 	var commands []Command
 	if iface.Bridge != "" && iface.OVSPort != "" {
+		commands = append(commands,
+			linuxRouterOVSOwnershipGuardCommand("Port", iface.OVSPort, ns),
+			linuxRouterOVSOwnershipGuardCommand("Interface", iface.OVSPort, ns),
+		)
 		commands = append(commands, Command{Program: "ovs-vsctl", Args: []string{
 			"--may-exist", "add-port", iface.Bridge, iface.OVSPort,
+			"--", "set", "Port", iface.OVSPort,
+			"external_ids:ovnflow.io/managed-by=ovnflow",
+			"external_ids:ovnflow.io/api-version=v2",
+			"external_ids:ovnflow.io/kind=LinuxRouter",
+			"external_ids:ovnflow.io/name=" + routerName,
+			"external_ids:ovnflow.io/linux-router-ns=" + ns,
+			"external_ids:ovnflow.io/linux-router-iface=" + iface.Name,
 			"--", "set", "Interface", iface.OVSPort,
 			"type=internal",
 			"external_ids:ovnflow.io/managed-by=ovnflow",
+			"external_ids:ovnflow.io/api-version=v2",
+			"external_ids:ovnflow.io/kind=LinuxRouter",
+			"external_ids:ovnflow.io/name=" + routerName,
 			"external_ids:ovnflow.io/linux-router-ns=" + ns,
 			"external_ids:ovnflow.io/linux-router-iface=" + iface.Name,
 		}})
@@ -181,15 +195,15 @@ func renderNFTNATCommands(ns string, nat NAT) []Command {
 }
 
 func renderIPTablesNATCommands(ns string, nat NAT) []Command {
-	var commands []Command
+	commands := []Command{iptablesCleanupOwnedRules(ns, "nat")}
 	for _, rule := range nat.Masquerades {
-		commands = append(commands, iptablesRule(ns, "-t", "nat", "-A", "POSTROUTING", "-s", rule.SourceCIDR, "-o", rule.OutInterface, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "MASQUERADE"))
+		commands = append(commands, iptablesReplaceRule(ns, "-t", "nat", "-A", "POSTROUTING", "-s", rule.SourceCIDR, "-o", rule.OutInterface, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "MASQUERADE")...)
 	}
 	for _, rule := range nat.SNATRules {
-		commands = append(commands, iptablesRule(ns, "-t", "nat", "-A", "POSTROUTING", "-s", rule.SourceCIDR, "-o", rule.OutInterface, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "SNAT", "--to-source", rule.ToSource))
+		commands = append(commands, iptablesReplaceRule(ns, "-t", "nat", "-A", "POSTROUTING", "-s", rule.SourceCIDR, "-o", rule.OutInterface, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "SNAT", "--to-source", rule.ToSource)...)
 	}
 	for _, rule := range nat.DNATRules {
-		commands = append(commands, iptablesRule(ns, "-t", "nat", "-A", "PREROUTING", "-i", rule.InInterface, "-d", rule.MatchAddress, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "DNAT", "--to-destination", rule.TargetAddress))
+		commands = append(commands, iptablesReplaceRule(ns, "-t", "nat", "-A", "PREROUTING", "-i", rule.InInterface, "-d", rule.MatchAddress, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "DNAT", "--to-destination", rule.TargetAddress)...)
 	}
 	for _, rule := range nat.PortForwards {
 		args := []string{"-t", "nat", "-A", "PREROUTING", "-i", rule.InInterface, "-p", rule.Protocol, "--dport", fmt.Sprint(rule.ListenPort)}
@@ -197,7 +211,7 @@ func renderIPTablesNATCommands(ns string, nat NAT) []Command {
 			args = append(args, "-d", rule.ListenIP)
 		}
 		args = append(args, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "DNAT", "--to-destination", fmt.Sprintf("%s:%d", rule.TargetIP, rule.TargetPort))
-		commands = append(commands, iptablesRule(ns, args...))
+		commands = append(commands, iptablesReplaceRule(ns, args...)...)
 	}
 	for _, rule := range nat.DestinationMaps {
 		args := []string{"-t", "nat", "-A", "PREROUTING", "-i", rule.InInterface, "-d", rule.MatchAddress}
@@ -205,30 +219,32 @@ func renderIPTablesNATCommands(ns string, nat NAT) []Command {
 			args = append(args, "-s", rule.FromCIDR)
 		}
 		args = append(args, "-m", "comment", "--comment", iptablesComment(rule.StableName()), "-j", "DNAT", "--to-destination", rule.TargetAddress)
-		commands = append(commands, iptablesRule(ns, args...))
+		commands = append(commands, iptablesReplaceRule(ns, args...)...)
 		if rule.SourceNAT != "" {
-			commands = append(commands, iptablesRule(ns, "-t", "nat", "-A", "POSTROUTING", "-d", rule.TargetAddress, "-m", "comment", "--comment", iptablesComment(rule.StableName()+"-snat"), "-j", "SNAT", "--to-source", rule.SourceNAT))
+			commands = append(commands, iptablesReplaceRule(ns, "-t", "nat", "-A", "POSTROUTING", "-d", rule.TargetAddress, "-m", "comment", "--comment", iptablesComment(rule.StableName()+"-snat"), "-j", "SNAT", "--to-source", rule.SourceNAT)...)
 		}
 	}
 	return commands
 }
 
 func renderFirewallCommands(ns, backend string, firewall Firewall) []Command {
-	if len(firewall.Rules) == 0 {
-		return nil
-	}
 	if backend == ovnflow.NATBackendIPTables {
-		var commands []Command
+		commands := []Command{iptablesCleanupOwnedRules(ns, "filter")}
 		for _, rule := range firewall.Rules {
-			commands = append(commands, iptablesFirewallRule(ns, rule))
+			commands = append(commands, iptablesReplaceFirewallRule(ns, rule)...)
 		}
 		return commands
 	}
 	commands := []Command{
 		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "delete", "table", "inet", "ovnflow_filter"}, IgnoreNotFound: true},
-		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "table", "inet", "ovnflow_filter"}},
-		{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "inet", "ovnflow_filter", "forward", "{", "type", "filter", "hook", "forward", "priority", "filter", ";", "}"}},
 	}
+	if len(firewall.Rules) == 0 {
+		return commands
+	}
+	commands = append(commands,
+		Command{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "table", "inet", "ovnflow_filter"}},
+		Command{Program: "ip", Args: []string{"netns", "exec", ns, "nft", "add", "chain", "inet", "ovnflow_filter", "forward", "{", "type", "filter", "hook", "forward", "priority", "filter", ";", "}"}},
+	)
 	for _, rule := range firewall.Rules {
 		commands = append(commands, nftFirewallRule(ns, rule))
 	}
@@ -243,6 +259,19 @@ func iptablesRule(ns string, args ...string) Command {
 	return Command{Program: "ip", Args: append([]string{"netns", "exec", ns, "iptables"}, args...)}
 }
 
+func iptablesReplaceRule(ns string, args ...string) []Command {
+	deleteArgs := append([]string{}, args...)
+	for i, arg := range deleteArgs {
+		if arg == "-A" {
+			deleteArgs[i] = "-D"
+			break
+		}
+	}
+	deleteRule := iptablesRule(ns, deleteArgs...)
+	deleteRule.IgnoreNotFound = true
+	return []Command{deleteRule, iptablesRule(ns, args...)}
+}
+
 func nftFirewallRule(ns string, rule FirewallRule) Command {
 	args := []string{"netns", "exec", ns, "nft", "add", "rule", "inet", "ovnflow_filter", firewallChain(rule)}
 	args = append(args, nftFirewallMatches(rule)...)
@@ -250,7 +279,21 @@ func nftFirewallRule(ns string, rule FirewallRule) Command {
 	return Command{Program: "ip", Args: args}
 }
 
-func iptablesFirewallRule(ns string, rule FirewallRule) Command {
+func iptablesReplaceFirewallRule(ns string, rule FirewallRule) []Command {
+	args := iptablesFirewallArgs(rule)
+	deleteArgs := append([]string{}, args...)
+	for i, arg := range deleteArgs {
+		if arg == "-A" {
+			deleteArgs[i] = "-D"
+			break
+		}
+	}
+	deleteRule := iptablesRule(ns, deleteArgs...)
+	deleteRule.IgnoreNotFound = true
+	return []Command{deleteRule, iptablesRule(ns, args...)}
+}
+
+func iptablesFirewallArgs(rule FirewallRule) []string {
 	args := []string{"-A", strings.ToUpper(firewallChain(rule))}
 	for _, cidr := range rule.CIDRs {
 		args = append(args, "-s", cidr)
@@ -261,8 +304,44 @@ func iptablesFirewallRule(ns string, rule FirewallRule) Command {
 	for _, port := range rule.Ports {
 		args = append(args, "--dport", fmt.Sprint(port))
 	}
-	args = append(args, "-m", "comment", "--comment", iptablesComment(rule.Name), "-j", strings.ToUpper(firewallVerdict(rule)))
-	return iptablesRule(ns, args...)
+	return append(args, "-m", "comment", "--comment", iptablesComment(rule.Name), "-j", strings.ToUpper(firewallVerdict(rule)))
+}
+
+func iptablesCleanupOwnedRules(ns, table string) Command {
+	script := `iptables-save` + iptablesSaveTableArg(table) + ` | awk '` + iptablesOwnedRuleAWK(table) + `' | while IFS= read -r rule; do iptables ` + iptablesTableArg(table) + ` $rule || true; done`
+	return Command{Program: "ip", Args: []string{"netns", "exec", ns, "sh", "-c", script}, IgnoreNotFound: true}
+}
+
+func iptablesSaveTableArg(table string) string {
+	if table == "nat" {
+		return " -t nat"
+	}
+	return ""
+}
+
+func iptablesTableArg(table string) string {
+	if table == "nat" {
+		return "-t nat"
+	}
+	return ""
+}
+
+func iptablesOwnedRuleAWK(table string) string {
+	if table == "nat" {
+		return `/ovnflow:/ { sub(/^-A /,"-D "); print }`
+	}
+	return `BEGIN { in_filter=0 } /^\*filter$/ { in_filter=1; next } /^\*/ { in_filter=0 } /^COMMIT$/ { in_filter=0 } in_filter && /ovnflow:/ { sub(/^-A /,"-D "); print }`
+}
+
+func linuxRouterOVSOwnershipGuardCommand(table, name, ns string) Command {
+	script := `table="$1"; name="$2"; ns="$3"; ` +
+		`if ovs-vsctl --data=bare --no-heading --columns=_uuid find "$table" name="$name" | grep -q .; then ` +
+		`managed=$(ovs-vsctl --if-exists get "$table" "$name" external_ids:ovnflow.io/managed-by 2>/dev/null | tr -d '"'); ` +
+		`kind=$(ovs-vsctl --if-exists get "$table" "$name" external_ids:ovnflow.io/kind 2>/dev/null | tr -d '"'); ` +
+		`owner_ns=$(ovs-vsctl --if-exists get "$table" "$name" external_ids:ovnflow.io/linux-router-ns 2>/dev/null | tr -d '"'); ` +
+		`if [ "$managed" != "ovnflow" ] || [ "$kind" != "LinuxRouter" ] || [ "$owner_ns" != "$ns" ]; then ` +
+		`echo "ownership violation: $table $name is not managed by ovnflow LinuxRouter namespace $ns" >&2; exit 77; fi; fi`
+	return Command{Program: "sh", Args: []string{"-c", script, "ovnflow-linuxrouter-guard", table, name, ns}}
 }
 
 func nftFirewallMatches(rule FirewallRule) []string {
@@ -314,7 +393,9 @@ func commandNotFound(message string) bool {
 	return strings.Contains(message, "no such file") ||
 		strings.Contains(message, "not found") ||
 		strings.Contains(message, "does not exist") ||
-		strings.Contains(message, "no such table")
+		strings.Contains(message, "cannot find device") ||
+		strings.Contains(message, "no such table") ||
+		strings.Contains(message, "bad rule") && strings.Contains(message, "matching rule")
 }
 
 func commandAlreadyExists(message string) bool {

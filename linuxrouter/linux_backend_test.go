@@ -7,7 +7,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/firstmeet/ovnflow"
+	"github.com/firstmeet/ovnflow/v2"
 )
 
 func TestLinuxRendererRendersNamespaceInterfacesDNSMasqAndNFTables(t *testing.T) {
@@ -44,6 +44,7 @@ func TestLinuxRendererRendersNamespaceInterfacesDNSMasqAndNFTables(t *testing.T)
 	if !commands[0].IgnoreAlreadyExists {
 		t.Fatalf("namespace ensure command should ignore already-exists: %#v", commands[0])
 	}
+	assertCommandContains(t, commands, "ovs-vsctl", "set", "Port", "edge-lan", "external_ids:ovnflow.io/kind=LinuxRouter")
 	assertCommandContains(t, commands, "ovs-vsctl", "external_ids:ovnflow.io/linux-router-ns=ovnflow-edge")
 	assertCommandContains(t, commands, "ip", "dhclient", "-v", "wan0")
 	assertCommandContains(t, commands, "ip", "dnsmasq", "--conf-file=/run/ovnflow/edge/dnsmasq.conf", "--host-record=api.service,172.16.100.6")
@@ -90,6 +91,12 @@ func TestSystemExecutorClassifiesCommandFailures(t *testing.T) {
 	err := (SystemExecutor{}).Run(context.Background(), Command{Program: "sh", Args: []string{"-c", "echo boom >&2; exit 7"}})
 	if !ovnflow.IsKind(err, ovnflow.ErrorUnavailable) {
 		t.Fatalf("error kind = %q for %v, want unavailable", ovnflow.KindOf(err), err)
+	}
+}
+
+func TestCommandNotFoundRecognizesIprouteMissingDevice(t *testing.T) {
+	if !commandNotFound("Cannot find device \"edge-wan\"") {
+		t.Fatal("Cannot find device should be treated as not found")
 	}
 }
 

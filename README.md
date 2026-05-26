@@ -5,7 +5,7 @@
 connections, runtime schema discovery, watches, and transactions.
 
 ```powershell
-go get github.com/firstmeet/ovnflow
+go get github.com/firstmeet/ovnflow/v2
 ```
 
 The current SDK surface covers:

@@ -2,6 +2,34 @@
 
 All notable changes to `ovnflow` are tracked here.
 
+## v2.0.0 - pending release
+
+### Added
+
+- Go semantic import path for v2: `github.com/firstmeet/ovnflow/v2`.
+- Platform-neutral intent APIs for `VirtualNetwork`, `LogicalSwitchDNS`,
+  `WorkloadAttachment`, `ProviderNetwork`, and `SecurityPolicy`.
+- Neutral ownership metadata through `OwnerRef`, `Labels`, and reserved
+  `ovnflow.io/` external IDs.
+- Intent `DryRun`, `Reconcile`, `Get`, `Inspect`, and guarded `Delete`
+  helpers.
+- Read-only diagnostics with `Diagnostics().Doctor` and
+  `Diagnostics().AuditOwnership`.
+- Optional Linux-only `linuxrouter` package for namespace routers, DNSMasq,
+  SNAT, MASQUERADE, DNAT, port forwarding, destination mapping, firewall
+  rules, object-style `Get`/`Apply`/`Patch`, and runtime observation.
+
+### Hardened
+
+- v2 delete paths require ovnflow ownership markers before deleting resources.
+- Safe cleanup is audit-first and owned-only; automatic pruning is not enabled
+  by default.
+- Provider network, workload attachment, and security policy reconciliation
+  preserve foreign resources and report typed ownership violations.
+- GitHub Actions cover unit, vet, staticcheck, govulncheck, race, Docker
+  OVN/OVS integration, v2 mutation checks, external SDK import checks, and
+  release-blocking privileged LinuxRouter checks.
+
 ## v1.0.0 - 2026-05-24
 
 ### Added

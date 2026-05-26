@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/firstmeet/ovnflow/internal/ovsdbjson"
+	"github.com/firstmeet/ovnflow/v2/internal/ovsdbjson"
 	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 

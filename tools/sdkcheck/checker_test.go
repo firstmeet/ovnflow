@@ -6,7 +6,11 @@ import (
 )
 
 func TestSDKInterfaces(t *testing.T) {
-	report := Run(context.Background(), OptionsFromEnv())
+	opts := OptionsFromEnv()
+	if opts.OVSAddr == "" || opts.OVNNBAddr == "" || opts.OVNSBAddr == "" {
+		t.Skip("set OVNFLOW_OVS_ADDR, OVNFLOW_OVN_NB_ADDR, and OVNFLOW_OVN_SB_ADDR to run SDK interface checks")
+	}
+	report := Run(context.Background(), opts)
 	for _, step := range report.Steps {
 		step := step
 		t.Run(step.Name, func(t *testing.T) {

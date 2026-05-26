@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/firstmeet/ovnflow"
+	"github.com/firstmeet/ovnflow/v2"
 )
 
 type LinuxObserver struct {
@@ -320,11 +320,22 @@ func commandMissingTable(err error) bool {
 }
 
 func processInNamespace(pid int, ns string) bool {
-	processNS, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "ns", "net"))
-	if err != nil {
+	processPath := filepath.Join("/proc", strconv.Itoa(pid), "ns", "net")
+	processInfo, statErr := os.Stat(processPath)
+	processNS, linkErr := os.Readlink(processPath)
+	if statErr != nil && linkErr != nil {
 		return false
 	}
 	for _, path := range []string{filepath.Join("/run/netns", ns), filepath.Join("/var/run/netns", ns)} {
+		if statErr == nil {
+			nsInfo, err := os.Stat(path)
+			if err == nil && os.SameFile(processInfo, nsInfo) {
+				return true
+			}
+		}
+		if linkErr != nil {
+			continue
+		}
 		nsLink, err := os.Readlink(path)
 		if err == nil && nsLink == processNS {
 			return true
