@@ -94,6 +94,9 @@ of private platform workflows:
   routers, OVS interfaces, and runtime state.
 - `Diagnostics`: correlate OVN Northbound intent, Southbound bindings, local
   OVS state, Linux router state, NAT/firewall rules, and flow troubleshooting.
+  A first read-only OVSDB Doctor now covers NB/SB/OVS connectivity, schema,
+  table counts, port-binding summaries, localnet ports, and OVS bridge
+  mappings; LinuxRouter and packet-flow probes remain future hardening.
 - `Resource ownership`: reusable `OwnerRef`, `Labels`, and `external_ids`
   helpers for querying, grouping, cleanup, and controller reconciliation.
 - `Safe cleanup`: SDK-owned resource pruning and orphan/reference checks.

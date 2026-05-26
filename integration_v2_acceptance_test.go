@@ -163,6 +163,7 @@ func TestIntegrationV2MutationGateIsEnvGated(t *testing.T) {
 	assertV2Readback(t, rawNB, resources, "v2-"+suffix)
 	assertV2ProviderNetworkReadback(t, rawNB, rawOVS, resources, "v2-"+suffix)
 	assertV2LocalOVSReadback(t, rawOVS, resources, "v2-"+suffix)
+	assertV2DoctorReport(t, sdk, resources)
 	must(t, sdk.WorkloadAttachment(resources.attachment).DetachLocalOVS(ctx), "detach workload local OVS")
 	assertV2LocalOVSDetached(t, rawOVS, resources)
 	must(t, sdk.ProviderNetwork(resources.provider).Delete(ctx), "delete provider network")
@@ -335,6 +336,28 @@ func assertV2LocalOVSReadback(t *testing.T, raw *ovsdbjson.Client, resources v2R
 	requireStringMapValue(t, iface, colExternalIDs, ExternalIDKindKey, "WorkloadAttachment")
 	requireStringMapValue(t, iface, colExternalIDs, ExternalIDNameKey, resources.attachment)
 	requireStringMapValue(t, iface, colExternalIDs, ExternalIDOwnerNameKey, ownerName)
+}
+
+func assertV2DoctorReport(t *testing.T, sdk *Client, resources v2Resources) {
+	t.Helper()
+	report, err := sdk.Diagnostics().Doctor(testContext(t), DoctorOptions{})
+	if err != nil {
+		t.Fatalf("Diagnostics.Doctor returned error: %v", err)
+	}
+	for _, database := range []string{dbOVNNorthbound, dbOVNSouthbound, dbOpenVSwitch} {
+		if !report.Databases[database].Connected {
+			t.Fatalf("doctor database %s not connected: %#v", database, report.Databases[database])
+		}
+	}
+	if report.Northbound.LogicalSwitches == 0 || report.Northbound.LogicalSwitchPorts == 0 || report.Northbound.ProviderLocalnetPorts == 0 {
+		t.Fatalf("doctor northbound report did not see v2 resources: %#v", report.Northbound)
+	}
+	if report.OVS.Bridges == 0 || report.OVS.Ports == 0 || report.OVS.Interfaces == 0 {
+		t.Fatalf("doctor ovs report did not see v2 local resources: %#v", report.OVS)
+	}
+	if report.OVS.BridgeMappings[resources.physicalNet] != resources.bridge {
+		t.Fatalf("doctor bridge mappings = %#v, want %s:%s", report.OVS.BridgeMappings, resources.physicalNet, resources.bridge)
+	}
 }
 
 func assertV2LocalOVSDetached(t *testing.T, raw *ovsdbjson.Client, resources v2Resources) {

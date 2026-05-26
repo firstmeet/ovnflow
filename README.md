@@ -17,6 +17,7 @@ The current SDK surface covers:
 | Open_vSwitch | bridge/port/interface lifecycle plus controller, manager, mirror, QoS, queue, flow table, NetFlow, sFlow, IPFIX, SSL, and AutoAttach fluent table APIs |
 | v2 intent | platform-neutral `VirtualNetwork`, `LogicalSwitchDNS`, `WorkloadAttachment`, `ProviderNetwork`, and `SecurityPolicy` with owner/label metadata, dry-run/reconcile, typed get/inspect, and delete helpers |
 | LinuxRouter | optional Linux-only namespace router model with DNSMasq, SNAT/MASQUERADE/DNAT/port-forward/destination-map, firewall rules, fake executor tests, and a Linux command backend |
+| Diagnostics | read-only `Diagnostics().Doctor` checks for OVSDB connectivity, schema, table counts, port bindings, localnet ports, and OVS bridge mappings |
 | Runtime | schema-aware `TableRef` create/ensure/update/delete/get/list/watch with optional columns and map/set mutations |
 
 ```go
@@ -97,6 +98,14 @@ err = client.ProviderNetwork("public-uplink").
     Execute(ctx)
 if err != nil {
     return err
+}
+
+report, err := client.Diagnostics().Doctor(ctx, ovnflow.DoctorOptions{})
+if err != nil {
+    return err
+}
+for _, finding := range report.Findings {
+    log.Printf("%s %s: %s", finding.Severity, finding.Component, finding.Message)
 }
 ```
 
