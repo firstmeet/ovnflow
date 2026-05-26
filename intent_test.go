@@ -262,6 +262,110 @@ func TestSecurityPolicyReconcileWritesPortGroupAndInlineACL(t *testing.T) {
 	}
 }
 
+func TestVirtualNetworkGetReadsLogicalSwitchIntentMetadata(t *testing.T) {
+	db := testNBDBClient(t)
+	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID:        uuidValue("ls-uuid"),
+		colName:        "net-a",
+		colPorts:       ovsSet(),
+		colOtherConfig: ovsMap(map[string]string{"subnet": "10.0.0.0/24", "gateway": "10.0.0.1"}),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:    "project",
+			ExternalIDOwnerNameKey:    "alpha",
+			ExternalIDLabelKey("env"): "test",
+		}),
+	}}}}}
+	got, err := (&NBClient{db: db}).VirtualNetwork("net-a").Get(context.Background())
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if got.Name != "net-a" || got.CIDRs[0] != "10.0.0.0/24" || got.Gateway != "10.0.0.1" || got.Owner.Name != "alpha" || got.Labels["env"] != "test" {
+		t.Fatalf("virtual network = %#v", got)
+	}
+}
+
+func TestLogicalSwitchDNSGetRestoresMultipleIPs(t *testing.T) {
+	db := testNBDBClient(t)
+	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID: uuidValue("dns-uuid"),
+		colRecords: ovsMap(map[string]string{
+			"api.service": "10.0.0.2 10.0.0.3",
+		}),
+		colExternalIDs: ovsMap(map[string]string{
+			dnsNameExternalID:      "net-a-dns",
+			ExternalIDOwnerKindKey: "project",
+			ExternalIDOwnerNameKey: "alpha",
+		}),
+	}}}}}
+	got, err := (&NBClient{db: db}).LogicalSwitchDNS("net-a-dns").Get(context.Background())
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if got.Name != "net-a-dns" || len(got.Records) != 1 || !reflect.DeepEqual(got.Records[0].IPs, []string{"10.0.0.2", "10.0.0.3"}) {
+		t.Fatalf("logical switch dns = %#v", got)
+	}
+}
+
+func TestWorkloadAttachmentGetReadsLogicalSwitchPort(t *testing.T) {
+	db := testNBDBClient(t)
+	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID:      uuidValue("lsp-uuid"),
+		colName:      "att-a",
+		colAddresses: stringSet([]string{"00:16:3e:11:22:33 10.0.0.10"}),
+		colOptions:   ovsMap(map[string]string{}),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:         "project",
+			ExternalIDOwnerNameKey:         "alpha",
+			ExternalIDPrefix + "workload":  "vm-a",
+			ExternalIDPrefix + "interface": "eth0",
+		}),
+	}}}}}
+	got, err := (&NBClient{db: db}).WorkloadAttachment("att-a").Get(context.Background())
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if got.Name != "att-a" || got.Workload != "vm-a" || got.InterfaceName != "eth0" || got.MAC != "00:16:3e:11:22:33" || got.IPs[0] != "10.0.0.10" {
+		t.Fatalf("workload attachment = %#v", got)
+	}
+}
+
+func TestSecurityPolicyGetReadsPortGroupMetadata(t *testing.T) {
+	db := testNBDBClient(t)
+	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID: uuidValue("pg-uuid"),
+		colName: "allow-web",
+		colACLs: ovsSet(uuidValue("acl-uuid")),
+		colExternalIDs: ovsMap(map[string]string{
+			ExternalIDOwnerKindKey:    "project",
+			ExternalIDOwnerNameKey:    "alpha",
+			ExternalIDLabelKey("env"): "test",
+		}),
+	}}}}}
+	got, err := (&NBClient{db: db}).SecurityPolicy("allow-web").Get(context.Background())
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if got.Name != "allow-web" || got.Owner.Name != "alpha" || got.Labels["env"] != "test" {
+		t.Fatalf("security policy = %#v", got)
+	}
+}
+
+func TestV2IntentDeleteUsesUnderlyingResources(t *testing.T) {
+	rec := &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{
+		colUUID:  uuidValue("lsp-uuid"),
+		colName:  "att-a",
+		colPorts: ovsSet(),
+	}}}, {Count: 1}}}
+	db := testNBDBClient(t)
+	db.executor = rec
+	if err := (&NBClient{db: db}).WorkloadAttachment("att-a").Delete(context.Background()); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	if op := findRecordedOp(rec.ops, libovsdb.OperationDelete, tableLogicalSwitchPort); op == nil {
+		t.Fatalf("missing Logical_Switch_Port delete: %#v", rec.ops)
+	}
+}
+
 func ovsMapStrings(t *testing.T, value any) map[string]string {
 	t.Helper()
 	switch typed := value.(type) {

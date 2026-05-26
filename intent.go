@@ -83,24 +83,48 @@ func (r *VirtualNetworkRef) Ensure() *VirtualNetworkBuilder {
 	return &VirtualNetworkBuilder{ref: r, spec: VirtualNetwork{Name: r.name, Labels: Labels{}}}
 }
 
+func (r *VirtualNetworkRef) Get(ctx context.Context) (*VirtualNetwork, error) {
+	if err := validateName("virtual network", r.name); err != nil {
+		return nil, err
+	}
+	if r.client == nil || r.client.db == nil {
+		return nil, ErrBackendUnavailable
+	}
+	ls, err := r.client.GetLogicalSwitch(ctx, r.name)
+	if err != nil {
+		return nil, err
+	}
+	return virtualNetworkFromLogicalSwitch(ls), nil
+}
+
 func (r *VirtualNetworkRef) Inspect(ctx context.Context) (InspectResult, error) {
 	if err := validateName("virtual network", r.name); err != nil {
 		return InspectResult{}, err
 	}
 	if r.client != nil && r.client.db != nil {
-		ls, err := r.client.GetLogicalSwitch(ctx, r.name)
+		vn, err := r.Get(ctx)
 		if err != nil {
 			return InspectResult{}, err
 		}
 		return InspectResult{Resource: "VirtualNetwork", Name: r.name, Status: map[string]any{
-			"state":        "present",
-			"uuid":         ls.UUID,
-			"external_ids": ls.ExternalIDs,
-			"other_config": ls.OtherConfig,
-			"ports":        ls.Ports,
+			"state":   "present",
+			"cidrs":   vn.CIDRs,
+			"gateway": vn.Gateway,
+			"owner":   vn.Owner,
+			"labels":  vn.Labels,
 		}}, nil
 	}
 	return InspectResult{Resource: "VirtualNetwork", Name: r.name, Status: "stub"}, nil
+}
+
+func (r *VirtualNetworkRef) Delete(ctx context.Context) error {
+	if err := validateName("virtual network", r.name); err != nil {
+		return err
+	}
+	if r.client == nil || r.client.db == nil {
+		return ErrBackendUnavailable
+	}
+	return r.client.LogicalSwitch(r.name).Delete().Execute(ctx)
 }
 
 type VirtualNetworkBuilder struct {
@@ -197,6 +221,38 @@ func (r *LogicalSwitchDNSRef) Ensure() *LogicalSwitchDNSBuilder {
 	return &LogicalSwitchDNSBuilder{ref: r, spec: LogicalSwitchDNS{Name: r.name, Labels: Labels{}}}
 }
 
+func (r *LogicalSwitchDNSRef) Get(ctx context.Context) (*LogicalSwitchDNS, error) {
+	if err := validateName("logical switch dns", r.name); err != nil {
+		return nil, err
+	}
+	if r.client == nil || r.client.db == nil {
+		return nil, ErrBackendUnavailable
+	}
+	dns, err := r.client.GetDNS(ctx, r.name)
+	if err != nil {
+		return nil, err
+	}
+	return logicalSwitchDNSFromDNS(r.name, dns), nil
+}
+
+func (r *LogicalSwitchDNSRef) Inspect(ctx context.Context) (InspectResult, error) {
+	dns, err := r.Get(ctx)
+	if err != nil {
+		return InspectResult{}, err
+	}
+	return InspectResult{Resource: "LogicalSwitchDNS", Name: r.name, Status: dns}, nil
+}
+
+func (r *LogicalSwitchDNSRef) Delete(ctx context.Context) error {
+	if err := validateName("logical switch dns", r.name); err != nil {
+		return err
+	}
+	if r.client == nil || r.client.db == nil {
+		return ErrBackendUnavailable
+	}
+	return r.client.DNS(r.name).Delete().Execute(ctx)
+}
+
 func (b *LogicalSwitchDNSBuilder) AddRecord(domain string, ips ...string) *LogicalSwitchDNSBuilder {
 	b.spec.Records = append(b.spec.Records, DNSRecord{Domain: domain, IPs: append([]string{}, ips...)})
 	return b
@@ -271,6 +327,38 @@ type WorkloadAttachmentRef struct {
 
 func (r *WorkloadAttachmentRef) Ensure() *WorkloadAttachmentBuilder {
 	return &WorkloadAttachmentBuilder{ref: r, spec: WorkloadAttachment{Name: r.name, Labels: Labels{}}}
+}
+
+func (r *WorkloadAttachmentRef) Get(ctx context.Context) (*WorkloadAttachment, error) {
+	if err := validateName("workload attachment", r.name); err != nil {
+		return nil, err
+	}
+	if r.client == nil || r.client.db == nil {
+		return nil, ErrBackendUnavailable
+	}
+	lsp, err := r.client.GetLogicalSwitchPort(ctx, r.name)
+	if err != nil {
+		return nil, err
+	}
+	return workloadAttachmentFromLogicalSwitchPort(lsp), nil
+}
+
+func (r *WorkloadAttachmentRef) Inspect(ctx context.Context) (InspectResult, error) {
+	attachment, err := r.Get(ctx)
+	if err != nil {
+		return InspectResult{}, err
+	}
+	return InspectResult{Resource: "WorkloadAttachment", Name: r.name, Status: attachment}, nil
+}
+
+func (r *WorkloadAttachmentRef) Delete(ctx context.Context) error {
+	if err := validateName("workload attachment", r.name); err != nil {
+		return err
+	}
+	if r.client == nil || r.client.db == nil {
+		return ErrBackendUnavailable
+	}
+	return r.client.TableLogicalSwitchPort(r.name).Delete().Execute(ctx)
 }
 
 type WorkloadAttachmentBuilder struct {
@@ -366,6 +454,38 @@ type SecurityPolicyRef struct {
 
 func (r *SecurityPolicyRef) Ensure() *SecurityPolicyBuilder {
 	return &SecurityPolicyBuilder{ref: r, spec: SecurityPolicy{Name: r.name, Labels: Labels{}}}
+}
+
+func (r *SecurityPolicyRef) Get(ctx context.Context) (*SecurityPolicy, error) {
+	if err := validateName("security policy", r.name); err != nil {
+		return nil, err
+	}
+	if r.client == nil || r.client.db == nil {
+		return nil, ErrBackendUnavailable
+	}
+	pg, err := r.client.GetPortGroup(ctx, r.name)
+	if err != nil {
+		return nil, err
+	}
+	return securityPolicyFromPortGroup(pg), nil
+}
+
+func (r *SecurityPolicyRef) Inspect(ctx context.Context) (InspectResult, error) {
+	policy, err := r.Get(ctx)
+	if err != nil {
+		return InspectResult{}, err
+	}
+	return InspectResult{Resource: "SecurityPolicy", Name: r.name, Status: policy}, nil
+}
+
+func (r *SecurityPolicyRef) Delete(ctx context.Context) error {
+	if err := validateName("security policy", r.name); err != nil {
+		return err
+	}
+	if r.client == nil || r.client.db == nil {
+		return ErrBackendUnavailable
+	}
+	return r.client.PortGroup(r.name).Delete().Execute(ctx)
 }
 
 type SecurityPolicyBuilder struct {
@@ -628,6 +748,97 @@ func (b *SecurityPolicyBuilder) reconcileOVSDB(ctx context.Context) error {
 		}
 	}
 	return pg.Execute(ctx)
+}
+
+func virtualNetworkFromLogicalSwitch(ls *LogicalSwitch) *VirtualNetwork {
+	if ls == nil {
+		return nil
+	}
+	owner, labels := ownerAndLabelsFromExternalIDs(ls.ExternalIDs)
+	vn := &VirtualNetwork{
+		Name:   ls.Name,
+		Owner:  owner,
+		Labels: labels,
+	}
+	if subnet := ls.OtherConfig["subnet"]; subnet != "" {
+		vn.CIDRs = []string{subnet}
+	}
+	if gateway := ls.OtherConfig["gateway"]; gateway != "" {
+		vn.Gateway = gateway
+	}
+	return vn
+}
+
+func logicalSwitchDNSFromDNS(name string, dns *DNS) *LogicalSwitchDNS {
+	if dns == nil {
+		return nil
+	}
+	owner, labels := ownerAndLabelsFromExternalIDs(dns.ExternalIDs)
+	out := &LogicalSwitchDNS{
+		Name:    name,
+		Owner:   owner,
+		Labels:  labels,
+		Records: make([]DNSRecord, 0, len(dns.Records)),
+	}
+	for domain, value := range dns.Records {
+		out.Records = append(out.Records, DNSRecord{Domain: domain, IPs: strings.Fields(value)})
+	}
+	sort.Slice(out.Records, func(i, j int) bool { return out.Records[i].Domain < out.Records[j].Domain })
+	return out
+}
+
+func workloadAttachmentFromLogicalSwitchPort(lsp *LogicalSwitchPort) *WorkloadAttachment {
+	if lsp == nil {
+		return nil
+	}
+	owner, labels := ownerAndLabelsFromExternalIDs(lsp.ExternalIDs)
+	out := &WorkloadAttachment{
+		Name:          lsp.Name,
+		Workload:      lsp.ExternalIDs[ExternalIDPrefix+"workload"],
+		InterfaceName: lsp.ExternalIDs[ExternalIDPrefix+"interface"],
+		Owner:         owner,
+		Labels:        labels,
+	}
+	for _, address := range lsp.Addresses {
+		fields := strings.Fields(address)
+		if len(fields) > 0 && out.MAC == "" {
+			out.MAC = fields[0]
+		}
+		if len(fields) > 1 {
+			out.IPs = append(out.IPs, fields[1:]...)
+		}
+	}
+	return out
+}
+
+func securityPolicyFromPortGroup(pg *PortGroup) *SecurityPolicy {
+	if pg == nil {
+		return nil
+	}
+	owner, labels := ownerAndLabelsFromExternalIDs(pg.ExternalIDs)
+	return &SecurityPolicy{
+		Name:   pg.Name,
+		Owner:  owner,
+		Labels: labels,
+	}
+}
+
+func ownerAndLabelsFromExternalIDs(externalIDs map[string]string) (OwnerRef, Labels) {
+	owner := OwnerRef{
+		Kind: externalIDs[ExternalIDOwnerKindKey],
+		Name: externalIDs[ExternalIDOwnerNameKey],
+		ID:   externalIDs[ExternalIDOwnerIDKey],
+	}
+	labels := Labels{}
+	for key, value := range externalIDs {
+		if label, ok := DecodeExternalIDLabelKey(key); ok {
+			labels[label] = value
+		}
+	}
+	if len(labels) == 0 {
+		labels = nil
+	}
+	return owner, labels
 }
 
 func intentExternalIDs(kind, name string, owner OwnerRef, labels Labels) (map[string]string, error) {
