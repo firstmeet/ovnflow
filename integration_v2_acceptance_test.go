@@ -189,6 +189,11 @@ func rowStringSet(t *testing.T, row map[string]json.RawMessage, column string) [
 		t.Fatalf("decode %s: %v", column, err)
 	}
 	if values, ok := raw.([]any); ok && len(values) == 2 {
+		if tag, ok := values[0].(string); ok && tag == "uuid" {
+			if value, ok := values[1].(string); ok {
+				return []string{value}
+			}
+		}
 		if tag, ok := values[0].(string); ok && tag == "set" {
 			if items, ok := values[1].([]any); ok {
 				out := make([]string, 0, len(items))
