@@ -39,8 +39,17 @@ type WorkloadAttachment struct {
 	InterfaceName string
 	MAC           string
 	IPs           []string
+	LocalOVS      WorkloadLocalOVS
 	Owner         OwnerRef
 	Labels        Labels
+}
+
+type WorkloadLocalOVS struct {
+	Bridge        string
+	PortName      string
+	InterfaceName string
+	InterfaceType string
+	Options       map[string]string
 }
 
 type SecurityPolicy struct {
@@ -118,6 +127,17 @@ func (n *NBClient) WorkloadAttachment(name string) *WorkloadAttachmentRef {
 
 func (n *NBClient) SecurityPolicy(name string) *SecurityPolicyRef {
 	return &SecurityPolicyRef{client: n, name: name}
+}
+
+func (c *Client) WorkloadAttachment(name string) *WorkloadAttachmentRef {
+	if c == nil {
+		return &WorkloadAttachmentRef{name: name}
+	}
+	return &WorkloadAttachmentRef{
+		client: &NBClient{db: c.nb},
+		ovs:    &OVSClient{db: c.ovs},
+		name:   name,
+	}
 }
 
 type VirtualNetworkRef struct {
@@ -510,6 +530,7 @@ func (d LogicalSwitchDNS) RecordMap() map[string][]string {
 
 type WorkloadAttachmentRef struct {
 	client *NBClient
+	ovs    *OVSClient
 	name   string
 }
 
@@ -528,7 +549,15 @@ func (r *WorkloadAttachmentRef) Get(ctx context.Context) (*WorkloadAttachment, e
 	if err != nil {
 		return nil, err
 	}
-	return workloadAttachmentFromLogicalSwitchPort(lsp), nil
+	attachment := workloadAttachmentFromLogicalSwitchPort(lsp)
+	if r.ovs != nil && r.ovs.db != nil {
+		if local, err := r.getLocalOVS(ctx); err == nil {
+			attachment.LocalOVS = local
+		} else if !IsKind(err, ErrorNotFound) {
+			return nil, err
+		}
+	}
+	return attachment, nil
 }
 
 func (r *WorkloadAttachmentRef) Inspect(ctx context.Context) (InspectResult, error) {
@@ -604,6 +633,75 @@ func (r *WorkloadAttachmentRef) Patch(ctx context.Context, patch WorkloadAttachm
 	return &next, nil
 }
 
+func (r *WorkloadAttachmentRef) DetachLocalOVS(ctx context.Context) error {
+	if err := validateName("workload attachment", r.name); err != nil {
+		return err
+	}
+	if r.ovs == nil || r.ovs.db == nil {
+		return ErrBackendUnavailable
+	}
+	portName := r.name
+	if r.client != nil && r.client.db != nil {
+		if current, err := r.Get(ctx); err == nil && current.LocalOVS.PortName != "" {
+			portName = current.LocalOVS.PortName
+		}
+	}
+	ports, err := r.ovs.selectPorts(ctx, portName)
+	if err != nil {
+		return err
+	}
+	if len(ports) == 0 {
+		return wrap(ErrorNotFound, dbOpenVSwitch, tablePort, "detach", portName, "port not found", nil)
+	}
+	if ports[0].ExternalIDs[ExternalIDKindKey] != "WorkloadAttachment" || ports[0].ExternalIDs[ExternalIDNameKey] != r.name {
+		return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tablePort, "detach", portName, "port is not owned by this workload attachment", nil)
+	}
+	bridges, err := r.ovs.ListBridges(ctx)
+	if err != nil {
+		return err
+	}
+	for _, bridge := range bridges {
+		if containsString(bridge.Ports, ports[0].UUID) {
+			return r.ovs.Bridge(bridge.Name).DeletePort(portName).Execute(ctx)
+		}
+	}
+	return wrap(ErrorNotFound, dbOpenVSwitch, tableBridge, "detach", portName, "owning bridge not found", nil)
+}
+
+func (r *WorkloadAttachmentRef) getLocalOVS(ctx context.Context) (WorkloadLocalOVS, error) {
+	ports, err := r.ovs.ListPorts(ctx)
+	if err != nil {
+		return WorkloadLocalOVS{}, err
+	}
+	for _, port := range ports {
+		if !ovsResourceOwnedBy(port.ExternalIDs, "WorkloadAttachment", r.name) {
+			continue
+		}
+		local := WorkloadLocalOVS{PortName: port.Name}
+		if len(port.Interfaces) > 0 {
+			iface, err := r.ovs.getInterfaceByUUID(ctx, port.Interfaces[0])
+			if err != nil {
+				return WorkloadLocalOVS{}, err
+			}
+			local.InterfaceName = iface.Name
+			local.InterfaceType = iface.Type
+			local.Options = cloneStringMap(iface.Options)
+		}
+		bridges, err := r.ovs.ListBridges(ctx)
+		if err != nil {
+			return WorkloadLocalOVS{}, err
+		}
+		for _, bridge := range bridges {
+			if containsString(bridge.Ports, port.UUID) {
+				local.Bridge = bridge.Name
+				break
+			}
+		}
+		return local, nil
+	}
+	return WorkloadLocalOVS{}, wrap(ErrorNotFound, dbOpenVSwitch, tablePort, "get", r.name, "local OVS workload port not found", nil)
+}
+
 type WorkloadAttachmentBuilder struct {
 	ref  *WorkloadAttachmentRef
 	spec WorkloadAttachment
@@ -631,6 +729,34 @@ func (b *WorkloadAttachmentBuilder) WithMAC(mac string) *WorkloadAttachmentBuild
 
 func (b *WorkloadAttachmentBuilder) WithIP(ip string) *WorkloadAttachmentBuilder {
 	b.spec.IPs = append(b.spec.IPs, ip)
+	return b
+}
+
+func (b *WorkloadAttachmentBuilder) SyncLocalOVS(bridge string) *WorkloadAttachmentBuilder {
+	b.spec.LocalOVS.Bridge = bridge
+	return b
+}
+
+func (b *WorkloadAttachmentBuilder) WithOVSPort(name string) *WorkloadAttachmentBuilder {
+	b.spec.LocalOVS.PortName = name
+	return b
+}
+
+func (b *WorkloadAttachmentBuilder) WithOVSInterface(name string) *WorkloadAttachmentBuilder {
+	b.spec.LocalOVS.InterfaceName = name
+	return b
+}
+
+func (b *WorkloadAttachmentBuilder) WithOVSInterfaceType(kind string) *WorkloadAttachmentBuilder {
+	b.spec.LocalOVS.InterfaceType = kind
+	return b
+}
+
+func (b *WorkloadAttachmentBuilder) WithOVSOption(key, value string) *WorkloadAttachmentBuilder {
+	if b.spec.LocalOVS.Options == nil {
+		b.spec.LocalOVS.Options = map[string]string{}
+	}
+	b.spec.LocalOVS.Options[key] = value
 	return b
 }
 
@@ -680,6 +806,9 @@ func (b *WorkloadAttachmentBuilder) Reconcile(ctx context.Context) (ReconcileRes
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	if err := b.validateLocalOVSTarget(ctx); err != nil {
+		return ReconcileResult{}, err
+	}
 	diff, err := b.diff(ctx)
 	if err != nil {
 		return ReconcileResult{}, err
@@ -691,6 +820,9 @@ func (b *WorkloadAttachmentBuilder) Reconcile(ctx context.Context) (ReconcileRes
 		return ReconcileResult{Plan: plan, Diff: diff, Applied: false}, nil
 	}
 	if err := b.reconcileOVSDB(ctx); err != nil {
+		return ReconcileResult{}, err
+	}
+	if err := b.reconcileLocalOVS(ctx); err != nil {
 		return ReconcileResult{}, err
 	}
 	return ReconcileResult{Plan: plan, Diff: diff, Applied: !diff.Empty()}, nil
@@ -946,7 +1078,39 @@ func (w WorkloadAttachment) Validate() error {
 			return err
 		}
 	}
+	if err := w.LocalOVS.Validate(); err != nil {
+		return err
+	}
 	return w.Labels.Validate()
+}
+
+func (o WorkloadLocalOVS) Validate() error {
+	if o.Empty() {
+		return nil
+	}
+	if err := validateName("bridge", o.Bridge); err != nil {
+		return err
+	}
+	if o.PortName != "" {
+		if err := validateName("port", o.PortName); err != nil {
+			return err
+		}
+	}
+	if o.InterfaceName != "" {
+		if err := validateName("interface", o.InterfaceName); err != nil {
+			return err
+		}
+	}
+	for key := range o.Options {
+		if err := validateExternalID(key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (o WorkloadLocalOVS) Empty() bool {
+	return o.Bridge == "" && o.PortName == "" && o.InterfaceName == "" && o.InterfaceType == "" && len(o.Options) == 0
 }
 
 func (p SecurityPolicy) Validate() error {
@@ -1195,6 +1359,95 @@ func (b *WorkloadAttachmentBuilder) reconcileOVSDB(ctx context.Context) error {
 	return port.Execute(ctx)
 }
 
+func (b *WorkloadAttachmentBuilder) reconcileLocalOVS(ctx context.Context) error {
+	if b.spec.LocalOVS.Empty() {
+		return nil
+	}
+	externalIDs, err := intentExternalIDs("WorkloadAttachment", b.spec.Name, b.spec.Owner, b.spec.Labels)
+	if err != nil {
+		return err
+	}
+	externalIDs[ExternalIDPrefix+"network"] = b.spec.Network
+	if b.spec.Workload != "" {
+		externalIDs[ExternalIDPrefix+"workload"] = b.spec.Workload
+	}
+	if b.spec.InterfaceName != "" {
+		externalIDs[ExternalIDPrefix+"logical-interface"] = b.spec.InterfaceName
+	}
+	portName := b.localOVSPortName()
+	interfaceName := b.localOVSInterfaceName()
+	if err := b.validateLocalOVSTarget(ctx); err != nil {
+		return err
+	}
+	port := b.ref.ovs.Bridge(b.spec.LocalOVS.Bridge).Ensure().AddPort(portName).
+		WithInterfaceName(interfaceName).
+		WithInterfaceExternalID("iface-id", b.spec.Name)
+	for key, value := range externalIDs {
+		port.WithExternalID(key, value)
+		port.WithInterfaceExternalID(key, value)
+	}
+	if b.spec.LocalOVS.InterfaceType != "" {
+		port.WithInterfaceType(b.spec.LocalOVS.InterfaceType)
+	}
+	for key, value := range b.spec.LocalOVS.Options {
+		port.WithInterfaceOption(key, value)
+	}
+	return port.Execute(ctx)
+}
+
+func (b *WorkloadAttachmentBuilder) validateLocalOVSTarget(ctx context.Context) error {
+	if b.spec.LocalOVS.Empty() {
+		return nil
+	}
+	if b.ref == nil || b.ref.ovs == nil || b.ref.ovs.db == nil {
+		return ErrBackendUnavailable
+	}
+	portName := b.localOVSPortName()
+	interfaceName := b.localOVSInterfaceName()
+	if _, err := b.ref.ovs.GetBridge(ctx, b.spec.LocalOVS.Bridge); err != nil {
+		return err
+	}
+	existingPorts, err := b.ref.ovs.selectPorts(ctx, portName)
+	if err != nil {
+		return err
+	}
+	if len(existingPorts) > 0 && !ovsResourceOwnedBy(existingPorts[0].ExternalIDs, "WorkloadAttachment", b.spec.Name) {
+		return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tablePort, "ensure", portName, "port is already managed by another owner", nil)
+	}
+	iface, err := b.ref.ovs.GetInterface(ctx, interfaceName)
+	if err != nil {
+		if IsKind(err, ErrorNotFound) {
+			return nil
+		}
+		return err
+	}
+	if !ovsResourceOwnedBy(iface.ExternalIDs, "WorkloadAttachment", b.spec.Name) {
+		return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tableInterface, "ensure", interfaceName, "interface is already managed by another owner", nil)
+	}
+	if iface.ExternalIDs["iface-id"] != "" && iface.ExternalIDs["iface-id"] != b.spec.Name {
+		return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tableInterface, "ensure", interfaceName, "interface iface-id does not match workload attachment", nil)
+	}
+	return nil
+}
+
+func (b *WorkloadAttachmentBuilder) localOVSPortName() string {
+	if b.spec.LocalOVS.PortName != "" {
+		return b.spec.LocalOVS.PortName
+	}
+	return b.spec.Name
+}
+
+func (b *WorkloadAttachmentBuilder) localOVSInterfaceName() string {
+	if b.spec.LocalOVS.InterfaceName != "" {
+		return b.spec.LocalOVS.InterfaceName
+	}
+	return b.localOVSPortName()
+}
+
+func ovsResourceOwnedBy(externalIDs map[string]string, kind, name string) bool {
+	return externalIDs[ExternalIDManagedByKey] == "ovnflow" && externalIDs[ExternalIDKindKey] == kind && externalIDs[ExternalIDNameKey] == name
+}
+
 func (b *WorkloadAttachmentBuilder) diff(ctx context.Context) (Diff, error) {
 	desired := normalizeWorkloadAttachment(b.spec)
 	diff := Diff{Resource: "WorkloadAttachment", Name: desired.Name}
@@ -1211,6 +1464,7 @@ func (b *WorkloadAttachmentBuilder) diff(ctx context.Context) (Diff, error) {
 	appendFieldDiff(&diff, "interface", current.InterfaceName, desired.InterfaceName)
 	appendFieldDiff(&diff, "mac", current.MAC, desired.MAC)
 	appendFieldDiff(&diff, "ips", current.IPs, desired.IPs)
+	appendFieldDiff(&diff, "localOVS", current.LocalOVS, desired.LocalOVS)
 	appendFieldDiff(&diff, "owner", current.Owner, desired.Owner)
 	appendFieldDiff(&diff, "labels", current.Labels, desired.Labels)
 	return diff, nil
@@ -1597,7 +1851,14 @@ func cloneWorkloadAttachment(in *WorkloadAttachment) WorkloadAttachment {
 	}
 	out := *in
 	out.IPs = append([]string{}, in.IPs...)
+	out.LocalOVS = cloneWorkloadLocalOVS(in.LocalOVS)
 	out.Labels = cloneLabels(in.Labels)
+	return out
+}
+
+func cloneWorkloadLocalOVS(in WorkloadLocalOVS) WorkloadLocalOVS {
+	out := in
+	out.Options = cloneStringMap(in.Options)
 	return out
 }
 
@@ -1660,7 +1921,25 @@ func normalizeWorkloadAttachment(in WorkloadAttachment) WorkloadAttachment {
 	out := cloneWorkloadAttachment(&in)
 	out.IPs = uniqueStrings(out.IPs)
 	sort.Strings(out.IPs)
+	out.LocalOVS = normalizeWorkloadLocalOVS(out.LocalOVS, out.Name, out.InterfaceName)
 	out.Labels = normalizeLabels(out.Labels)
+	return out
+}
+
+func normalizeWorkloadLocalOVS(in WorkloadLocalOVS, attachmentName, logicalInterface string) WorkloadLocalOVS {
+	if in.Empty() {
+		return WorkloadLocalOVS{}
+	}
+	out := cloneWorkloadLocalOVS(in)
+	if out.PortName == "" {
+		out.PortName = attachmentName
+	}
+	if out.InterfaceName == "" {
+		out.InterfaceName = out.PortName
+	}
+	if len(out.Options) == 0 {
+		out.Options = nil
+	}
 	return out
 }
 

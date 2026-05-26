@@ -562,6 +562,172 @@ func TestWorkloadAttachmentPatchUpdatesIPsAndMetadata(t *testing.T) {
 	}
 }
 
+func TestWorkloadAttachmentSyncLocalOVSWritesPortInterfaceMetadata(t *testing.T) {
+	nbDB := testNBDBClient(t)
+	nbRec := &nbRecordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: nil},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("ls-uuid"), colPorts: ovsSet()}}},
+		{Rows: nil},
+		{Count: 1},
+		{Count: 1},
+	}}
+	nbDB.executor = nbRec
+	ovsDB := testOVSDBClient(t)
+	ovsDB.schema.schema.Tables[tableInterface].Columns[colOptions] = columnSchemaFromJSON(t, `{"type":{"key":"string","value":"string","min":0,"max":"unlimited"}}`)
+	bridgeRow := libovsdb.Row{colUUID: uuidValue("br-uuid"), colName: "br-int", colPorts: ovsSet()}
+	ovsRec := &recordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{bridgeRow}},
+		{Rows: nil},
+		{Rows: nil},
+		{Rows: []libovsdb.Row{bridgeRow}},
+		{Rows: nil},
+		{Rows: nil},
+		{Rows: []libovsdb.Row{bridgeRow}},
+		{Rows: nil},
+		{Count: 1},
+		{Count: 1},
+		{Count: 1},
+	}}
+	ovsDB.executor = ovsRec
+	ref := &WorkloadAttachmentRef{client: &NBClient{db: nbDB}, ovs: &OVSClient{db: ovsDB}, name: "att-a"}
+
+	result, err := ref.Ensure().
+		OnNetwork("net-a").
+		WithWorkload("vm-a").
+		WithInterface("eth0").
+		WithMAC("00:16:3e:11:22:33").
+		WithIP("10.0.0.10").
+		WithOwner("project", "alpha").
+		SyncLocalOVS("br-int").
+		WithOVSPort("vnet0").
+		WithOVSInterface("tap0").
+		WithOVSInterfaceType("internal").
+		WithOVSOption("mtu_request", "1450").
+		Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	if !result.Applied {
+		t.Fatalf("Reconcile did not report applied")
+	}
+	portOp := findRecordedOp(ovsRec.ops, libovsdb.OperationInsert, tablePort)
+	if portOp == nil {
+		t.Fatalf("missing OVS Port insert: %#v", ovsRec.ops)
+	}
+	portIDs := ovsMapStrings(t, portOp.Row[colExternalIDs])
+	if portIDs[ExternalIDKindKey] != "WorkloadAttachment" || portIDs[ExternalIDNameKey] != "att-a" {
+		t.Fatalf("port external_ids = %#v", portIDs)
+	}
+	if portIDs[ExternalIDOwnerNameKey] != "alpha" || portIDs[ExternalIDPrefix+"network"] != "net-a" || portIDs[ExternalIDPrefix+"workload"] != "vm-a" {
+		t.Fatalf("port external_ids missing workload metadata: %#v", portIDs)
+	}
+	ifaceOp := findRecordedOp(ovsRec.ops, libovsdb.OperationInsert, tableInterface)
+	if ifaceOp == nil {
+		t.Fatalf("missing OVS Interface insert: %#v", ovsRec.ops)
+	}
+	if ifaceOp.Row[colName] != "tap0" {
+		t.Fatalf("interface row = %#v, want name tap0", ifaceOp.Row)
+	}
+	if ifaceOp.Row[colType] != "internal" {
+		t.Fatalf("interface row = %#v, want type internal", ifaceOp.Row)
+	}
+	options := ovsMapStrings(t, ifaceOp.Row[colOptions])
+	if options["mtu_request"] != "1450" {
+		t.Fatalf("interface options = %#v", options)
+	}
+	ifaceIDs := ovsMapStrings(t, ifaceOp.Row[colExternalIDs])
+	if ifaceIDs["iface-id"] != "att-a" || ifaceIDs[ExternalIDKindKey] != "WorkloadAttachment" || ifaceIDs[ExternalIDNameKey] != "att-a" {
+		t.Fatalf("interface external_ids = %#v", ifaceIDs)
+	}
+}
+
+func TestWorkloadAttachmentSyncLocalOVSRejectsUnownedPort(t *testing.T) {
+	nbDB := testNBDBClient(t)
+	nbRec := &nbRecordingExecutor{}
+	nbDB.executor = nbRec
+	ovsDB := testOVSDBClient(t)
+	ovsRec := &recordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("br-uuid"), colName: "br-int", colPorts: ovsSet()}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("port-uuid"), colName: "vnet0", colInterfaces: ovsSet()}}},
+	}}
+	ovsDB.executor = ovsRec
+	ref := &WorkloadAttachmentRef{client: &NBClient{db: nbDB}, ovs: &OVSClient{db: ovsDB}, name: "att-a"}
+
+	_, err := ref.Ensure().
+		OnNetwork("net-a").
+		WithOwner("project", "alpha").
+		SyncLocalOVS("br-int").
+		WithOVSPort("vnet0").
+		Reconcile(context.Background())
+	if !IsKind(err, ErrorOwnershipViolation) {
+		t.Fatalf("Reconcile error = %v, want ownership violation", err)
+	}
+	if len(nbRec.ops) != 0 {
+		t.Fatalf("NB ops = %#v, want none before local OVS ownership passes", nbRec.ops)
+	}
+}
+
+func TestWorkloadAttachmentSyncLocalOVSRequiresBackendBeforeNBWrite(t *testing.T) {
+	nbDB := testNBDBClient(t)
+	nbRec := &nbRecordingExecutor{}
+	nbDB.executor = nbRec
+	ref := &WorkloadAttachmentRef{client: &NBClient{db: nbDB}, name: "att-a"}
+
+	_, err := ref.Ensure().
+		OnNetwork("net-a").
+		SyncLocalOVS("br-int").
+		Reconcile(context.Background())
+	if !IsKind(err, ErrorBackendUnavailable) {
+		t.Fatalf("Reconcile error = %v, want backend unavailable", err)
+	}
+	if len(nbRec.ops) != 0 {
+		t.Fatalf("NB ops = %#v, want none without local OVS backend", nbRec.ops)
+	}
+}
+
+func TestWorkloadAttachmentLocalOVSDefaultsUseAttachmentName(t *testing.T) {
+	builder := (&WorkloadAttachmentRef{name: "lp-vm-a-eth0"}).
+		Ensure().
+		OnNetwork("net-a").
+		WithInterface("eth0").
+		SyncLocalOVS("br-int")
+
+	desired := normalizeWorkloadAttachment(builder.spec)
+	if desired.LocalOVS.PortName != "lp-vm-a-eth0" || desired.LocalOVS.InterfaceName != "lp-vm-a-eth0" {
+		t.Fatalf("local OVS defaults = %#v, want attachment name for port/interface", desired.LocalOVS)
+	}
+}
+
+func TestWorkloadAttachmentSyncLocalOVSRejectsUnownedInterface(t *testing.T) {
+	nbDB := testNBDBClient(t)
+	nbRec := &nbRecordingExecutor{}
+	nbDB.executor = nbRec
+	ovsDB := testOVSDBClient(t)
+	ovsRec := &recordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("br-uuid"), colName: "br-int", colPorts: ovsSet()}}},
+		{Rows: nil},
+		{Rows: []libovsdb.Row{{
+			colUUID:        uuidValue("iface-uuid"),
+			colName:        "tap0",
+			colExternalIDs: ovsMap(map[string]string{"iface-id": "other-att"}),
+		}}},
+	}}
+	ovsDB.executor = ovsRec
+	ref := &WorkloadAttachmentRef{client: &NBClient{db: nbDB}, ovs: &OVSClient{db: ovsDB}, name: "att-a"}
+
+	_, err := ref.Ensure().
+		OnNetwork("net-a").
+		SyncLocalOVS("br-int").
+		WithOVSInterface("tap0").
+		Reconcile(context.Background())
+	if !IsKind(err, ErrorOwnershipViolation) {
+		t.Fatalf("Reconcile error = %v, want ownership violation", err)
+	}
+	if len(nbRec.ops) != 0 {
+		t.Fatalf("NB ops = %#v, want none before local OVS interface ownership passes", nbRec.ops)
+	}
+}
+
 func TestSecurityPolicyGetReadsPortGroupMetadata(t *testing.T) {
 	db := testNBDBClient(t)
 	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{

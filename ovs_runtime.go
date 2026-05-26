@@ -154,6 +154,21 @@ func (o *OVSClient) GetInterface(ctx context.Context, name string) (*OVSInterfac
 	}, nil
 }
 
+func (o *OVSClient) getInterfaceByUUID(ctx context.Context, uuid string) (*OVSInterface, error) {
+	rows, err := o.Table(tableInterface).WhereCondition(colUUID, libovsdb.ConditionEqual, uuidValue(uuid)).Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &OVSInterface{
+		UUID:        anyString(rows[colUUID]),
+		Name:        anyString(rows[colName]),
+		Type:        anyString(rows[colType]),
+		Options:     anyStringMap(rows[colOptions]),
+		ExternalIDs: anyStringMap(rows[colExternalIDs]),
+		OtherConfig: anyStringMap(rows[colOtherConfig]),
+	}, nil
+}
+
 func (o *OVSClient) ListInterfaces(ctx context.Context) ([]OVSInterface, error) {
 	rows, err := o.Table(tableInterface).List(ctx)
 	if err != nil {
