@@ -10,15 +10,20 @@ import (
 type ErrorKind string
 
 const (
-	ErrorAlreadyExists ErrorKind = "already_exists"
-	ErrorNotFound      ErrorKind = "not_found"
-	ErrorConflict      ErrorKind = "conflict"
-	ErrorUnavailable   ErrorKind = "unavailable"
-	ErrorInvalidSchema ErrorKind = "invalid_schema"
-	ErrorTimeout       ErrorKind = "timeout"
-	ErrorCanceled      ErrorKind = "canceled"
-	ErrorPartial       ErrorKind = "partial_success"
-	ErrorValidation    ErrorKind = "validation"
+	ErrorAlreadyExists      ErrorKind = "already_exists"
+	ErrorNotFound           ErrorKind = "not_found"
+	ErrorConflict           ErrorKind = "conflict"
+	ErrorUnavailable        ErrorKind = "unavailable"
+	ErrorInvalidSchema      ErrorKind = "invalid_schema"
+	ErrorTimeout            ErrorKind = "timeout"
+	ErrorCanceled           ErrorKind = "canceled"
+	ErrorPartial            ErrorKind = "partial_success"
+	ErrorValidation         ErrorKind = "validation"
+	ErrorUnsupported        ErrorKind = "unsupported"
+	ErrorPermissionDenied   ErrorKind = "permission_denied"
+	ErrorAmbiguous          ErrorKind = "ambiguous"
+	ErrorOwnershipViolation ErrorKind = "ownership_violation"
+	ErrorBackendUnavailable ErrorKind = "backend_unavailable"
 )
 
 // Error is a typed error suitable for controller retry and branching logic.
@@ -68,15 +73,20 @@ func (e *Error) Is(target error) bool {
 }
 
 var (
-	ErrAlreadyExists = &Error{Kind: ErrorAlreadyExists}
-	ErrNotFound      = &Error{Kind: ErrorNotFound}
-	ErrConflict      = &Error{Kind: ErrorConflict}
-	ErrUnavailable   = &Error{Kind: ErrorUnavailable}
-	ErrInvalidSchema = &Error{Kind: ErrorInvalidSchema}
-	ErrTimeout       = &Error{Kind: ErrorTimeout}
-	ErrCanceled      = &Error{Kind: ErrorCanceled}
-	ErrPartial       = &Error{Kind: ErrorPartial}
-	ErrValidation    = &Error{Kind: ErrorValidation}
+	ErrAlreadyExists      = &Error{Kind: ErrorAlreadyExists}
+	ErrNotFound           = &Error{Kind: ErrorNotFound}
+	ErrConflict           = &Error{Kind: ErrorConflict}
+	ErrUnavailable        = &Error{Kind: ErrorUnavailable}
+	ErrInvalidSchema      = &Error{Kind: ErrorInvalidSchema}
+	ErrTimeout            = &Error{Kind: ErrorTimeout}
+	ErrCanceled           = &Error{Kind: ErrorCanceled}
+	ErrPartial            = &Error{Kind: ErrorPartial}
+	ErrValidation         = &Error{Kind: ErrorValidation}
+	ErrUnsupported        = &Error{Kind: ErrorUnsupported}
+	ErrPermissionDenied   = &Error{Kind: ErrorPermissionDenied}
+	ErrAmbiguous          = &Error{Kind: ErrorAmbiguous}
+	ErrOwnershipViolation = &Error{Kind: ErrorOwnershipViolation}
+	ErrBackendUnavailable = &Error{Kind: ErrorBackendUnavailable}
 )
 
 // IsKind reports whether err is an ovnflow error of kind.
