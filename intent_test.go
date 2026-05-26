@@ -728,6 +728,68 @@ func TestWorkloadAttachmentSyncLocalOVSRejectsUnownedInterface(t *testing.T) {
 	}
 }
 
+func TestWorkloadAttachmentDetachLocalOVSFindsOwnedCustomPort(t *testing.T) {
+	ovsDB := testOVSDBClient(t)
+	ovsRec := &recordingExecutor{results: []libovsdb.OperationResult{
+		{Rows: []libovsdb.Row{{
+			colUUID:       uuidValue("port-uuid"),
+			colName:       "vnet0",
+			colInterfaces: uuidSet("iface-uuid"),
+			colExternalIDs: ovsMap(map[string]string{
+				ExternalIDManagedByKey: "ovnflow",
+				ExternalIDKindKey:      "WorkloadAttachment",
+				ExternalIDNameKey:      "att-a",
+			}),
+		}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("br-uuid"), colName: "br-int", colPorts: uuidSet("port-uuid")}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("br-uuid"), colName: "br-int", colPorts: uuidSet("port-uuid")}}},
+		{Rows: []libovsdb.Row{{
+			colUUID:       uuidValue("port-uuid"),
+			colName:       "vnet0",
+			colInterfaces: uuidSet("iface-uuid"),
+			colExternalIDs: ovsMap(map[string]string{
+				ExternalIDManagedByKey: "ovnflow",
+				ExternalIDKindKey:      "WorkloadAttachment",
+				ExternalIDNameKey:      "att-a",
+			}),
+		}}},
+		{Rows: []libovsdb.Row{{colUUID: uuidValue("br-uuid"), colName: "br-int", colPorts: uuidSet("port-uuid")}}},
+		{Rows: []libovsdb.Row{{
+			colUUID:       uuidValue("port-uuid"),
+			colName:       "vnet0",
+			colInterfaces: uuidSet("iface-uuid"),
+			colExternalIDs: ovsMap(map[string]string{
+				ExternalIDManagedByKey: "ovnflow",
+				ExternalIDKindKey:      "WorkloadAttachment",
+				ExternalIDNameKey:      "att-a",
+			}),
+		}}},
+		{Count: 1},
+		{Count: 1},
+		{Count: 1},
+	}}
+	ovsDB.executor = ovsRec
+	ref := &WorkloadAttachmentRef{ovs: &OVSClient{db: ovsDB}, name: "att-a"}
+
+	if err := ref.DetachLocalOVS(context.Background()); err != nil {
+		t.Fatalf("DetachLocalOVS returned error: %v", err)
+	}
+	var deletedPort bool
+	for _, op := range ovsRec.ops {
+		if op.Op == libovsdb.OperationDelete && op.Table == tablePort && len(op.Where) == 1 {
+			if op.Where[0].Column == colUUID {
+				deletedPort = true
+			}
+		}
+		if op.Op == libovsdb.OperationSelect && op.Table == tablePort && len(op.Where) == 1 && op.Where[0].Column == colName && op.Where[0].Value == "att-a" {
+			t.Fatalf("DetachLocalOVS selected by attachment name instead of ownership: %#v", op)
+		}
+	}
+	if !deletedPort {
+		t.Fatalf("missing delete of owned custom OVS port: %#v", ovsRec.ops)
+	}
+}
+
 func TestSecurityPolicyGetReadsPortGroupMetadata(t *testing.T) {
 	db := testNBDBClient(t)
 	db.executor = &nbRecordingExecutor{results: []libovsdb.OperationResult{{Rows: []libovsdb.Row{{

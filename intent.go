@@ -640,32 +640,30 @@ func (r *WorkloadAttachmentRef) DetachLocalOVS(ctx context.Context) error {
 	if r.ovs == nil || r.ovs.db == nil {
 		return ErrBackendUnavailable
 	}
-	portName := r.name
-	if r.client != nil && r.client.db != nil {
-		if current, err := r.Get(ctx); err == nil && current.LocalOVS.PortName != "" {
-			portName = current.LocalOVS.PortName
-		}
-	}
-	ports, err := r.ovs.selectPorts(ctx, portName)
+	ports, err := r.ovs.ListPorts(ctx)
 	if err != nil {
 		return err
 	}
-	if len(ports) == 0 {
-		return wrap(ErrorNotFound, dbOpenVSwitch, tablePort, "detach", portName, "port not found", nil)
+	var ownedPort *OVSPort
+	for i := range ports {
+		if ovsResourceOwnedBy(ports[i].ExternalIDs, "WorkloadAttachment", r.name) {
+			ownedPort = &ports[i]
+			break
+		}
 	}
-	if ports[0].ExternalIDs[ExternalIDKindKey] != "WorkloadAttachment" || ports[0].ExternalIDs[ExternalIDNameKey] != r.name {
-		return wrap(ErrorOwnershipViolation, dbOpenVSwitch, tablePort, "detach", portName, "port is not owned by this workload attachment", nil)
+	if ownedPort == nil {
+		return wrap(ErrorNotFound, dbOpenVSwitch, tablePort, "detach", r.name, "local OVS workload port not found", nil)
 	}
 	bridges, err := r.ovs.ListBridges(ctx)
 	if err != nil {
 		return err
 	}
 	for _, bridge := range bridges {
-		if containsString(bridge.Ports, ports[0].UUID) {
-			return r.ovs.Bridge(bridge.Name).DeletePort(portName).Execute(ctx)
+		if containsString(bridge.Ports, ownedPort.UUID) {
+			return r.ovs.Bridge(bridge.Name).DeletePort(ownedPort.Name).Execute(ctx)
 		}
 	}
-	return wrap(ErrorNotFound, dbOpenVSwitch, tableBridge, "detach", portName, "owning bridge not found", nil)
+	return wrap(ErrorNotFound, dbOpenVSwitch, tableBridge, "detach", ownedPort.Name, "owning bridge not found", nil)
 }
 
 func (r *WorkloadAttachmentRef) getLocalOVS(ctx context.Context) (WorkloadLocalOVS, error) {
