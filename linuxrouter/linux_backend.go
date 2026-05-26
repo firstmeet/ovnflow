@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/firstmeet/ovnflow"
@@ -301,7 +302,7 @@ func firewallVerdict(rule FirewallRule) string {
 }
 
 func nftComment(name string) string {
-	return "ovnflow:" + name
+	return strconv.Quote("ovnflow:" + name)
 }
 
 func iptablesComment(name string) string {

@@ -2,8 +2,12 @@ package linuxrouter
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"hash/fnv"
 	"net"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -29,15 +33,17 @@ type Spec struct {
 }
 
 type Status struct {
-	Exists          bool
-	Namespace       string
-	Interfaces      []InterfaceStatus
-	DNSMasq         DNSMasqStatus
-	NATBackend      string
-	InstalledNAT    []string
-	ResourceVersion string
-	ObservedHash    string
-	LastError       string
+	Exists            bool
+	Namespace         string
+	Interfaces        []InterfaceStatus
+	Routes            []RouteStatus
+	DNSMasq           DNSMasqStatus
+	NATBackend        string
+	InstalledNAT      []string
+	InstalledFirewall []string
+	ResourceVersion   string
+	ObservedHash      string
+	LastError         string
 }
 
 type InterfaceRole string
@@ -66,6 +72,12 @@ type InterfaceStatus struct {
 
 type Route struct {
 	Name        string
+	Destination string
+	Gateway     string
+	Interface   string
+}
+
+type RouteStatus struct {
 	Destination string
 	Gateway     string
 	Interface   string
@@ -180,6 +192,16 @@ type Renderer interface {
 	RenderApply(Router) ([]Command, error)
 }
 
+type Observer interface {
+	Observe(context.Context, Router) (Status, error)
+}
+
+type ObserverFunc func(context.Context, Router) (Status, error)
+
+func (f ObserverFunc) Observe(ctx context.Context, router Router) (Status, error) {
+	return f(ctx, router)
+}
+
 type FakeExecutor struct {
 	mu       sync.Mutex
 	commands []Command
@@ -202,6 +224,7 @@ type Client struct {
 	mu       sync.RWMutex
 	executor Executor
 	renderer Renderer
+	observer Observer
 	store    map[string]Router
 }
 
@@ -216,17 +239,58 @@ type RouterRef interface {
 }
 
 func NewClient(executor Executor, renderer Renderer) *Client {
+	return NewObservedClient(executor, renderer, nil)
+}
+
+func NewObservedClient(executor Executor, renderer Renderer, observer Observer) *Client {
 	if renderer == nil {
 		renderer = CommandRenderer{}
 	}
 	if executor == nil {
 		executor = &FakeExecutor{}
 	}
-	return &Client{executor: executor, renderer: renderer, store: map[string]Router{}}
+	return &Client{executor: executor, renderer: renderer, observer: observer, store: map[string]Router{}}
 }
 
 func (c *Client) Router(name string) RouterRef {
 	return &Ref{client: c, name: name}
+}
+
+func (c *Client) refreshStoredStatus(ctx context.Context, name string) (Router, error) {
+	c.mu.RLock()
+	router, ok := c.store[name]
+	observer := c.observer
+	c.mu.RUnlock()
+	if !ok {
+		return Router{}, ovnflow.ErrNotFound
+	}
+	router = cloneRouter(router)
+	if observer == nil {
+		return router, nil
+	}
+	status, err := observer.Observe(ctx, router)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return Router{}, err
+		}
+		status = cloneStatus(router.Status)
+		status.Namespace = router.Spec.namespaceOrDefault(router.Name)
+		status.LastError = err.Error()
+	} else {
+		status.LastError = ""
+	}
+	status = normalizeObservedStatus(status)
+	router.Status = status
+
+	c.mu.Lock()
+	if current, ok := c.store[name]; ok {
+		if reflect.DeepEqual(current.Spec, router.Spec) {
+			current.Status = cloneStatus(status)
+			c.store[name] = current
+		}
+	}
+	c.mu.Unlock()
+	return cloneRouter(router), nil
 }
 
 type Ref struct {
@@ -241,13 +305,7 @@ func (r *Ref) Get(ctx context.Context) (Router, error) {
 	if r.client == nil {
 		return Router{}, ovnflow.ErrBackendUnavailable
 	}
-	r.client.mu.RLock()
-	defer r.client.mu.RUnlock()
-	router, ok := r.client.store[r.name]
-	if !ok {
-		return Router{}, ovnflow.ErrNotFound
-	}
-	return cloneRouter(router), nil
+	return r.client.refreshStoredStatus(ctx, r.name)
 }
 
 func (r *Ref) Apply(ctx context.Context, router Router) error {
@@ -266,14 +324,20 @@ func (r *Ref) Apply(ctx context.Context, router Router) error {
 	if err != nil {
 		return err
 	}
-	r.client.mu.Lock()
-	defer r.client.mu.Unlock()
-	for _, command := range commands {
-		if err := r.client.executor.Run(ctx, command); err != nil {
-			return err
+	if err := func() error {
+		r.client.mu.Lock()
+		defer r.client.mu.Unlock()
+		for _, command := range commands {
+			if err := r.client.executor.Run(ctx, command); err != nil {
+				return err
+			}
 		}
+		r.client.store[router.Name] = cloneRouter(router)
+		return nil
+	}(); err != nil {
+		return err
 	}
-	r.client.store[router.Name] = cloneRouter(router)
+	_, _ = r.client.refreshStoredStatus(ctx, router.Name)
 	return nil
 }
 
@@ -284,33 +348,39 @@ func (r *Ref) Patch(ctx context.Context, patch Patch) (Router, error) {
 	if r.client == nil {
 		return Router{}, ovnflow.ErrBackendUnavailable
 	}
-	r.client.mu.Lock()
-	defer r.client.mu.Unlock()
-	current, ok := r.client.store[r.name]
-	if !ok {
-		return Router{}, ovnflow.ErrNotFound
-	}
-	current = cloneRouter(current)
-	if err := patch.Validate(current); err != nil {
-		return Router{}, err
-	}
-	if err := patch.ApplyTo(&current); err != nil {
-		return Router{}, err
-	}
-	if err := current.Validate(); err != nil {
-		return Router{}, err
-	}
-	commands, err := r.client.renderer.RenderApply(current)
-	if err != nil {
-		return Router{}, err
-	}
-	for _, command := range commands {
-		if err := r.client.executor.Run(ctx, command); err != nil {
-			return Router{}, err
+	var current Router
+	if err := func() error {
+		r.client.mu.Lock()
+		defer r.client.mu.Unlock()
+		stored, ok := r.client.store[r.name]
+		if !ok {
+			return ovnflow.ErrNotFound
 		}
+		current = cloneRouter(stored)
+		if err := patch.Validate(current); err != nil {
+			return err
+		}
+		if err := patch.ApplyTo(&current); err != nil {
+			return err
+		}
+		if err := current.Validate(); err != nil {
+			return err
+		}
+		commands, err := r.client.renderer.RenderApply(current)
+		if err != nil {
+			return err
+		}
+		for _, command := range commands {
+			if err := r.client.executor.Run(ctx, command); err != nil {
+				return err
+			}
+		}
+		r.client.store[current.Name] = cloneRouter(current)
+		return nil
+	}(); err != nil {
+		return Router{}, err
 	}
-	r.client.store[current.Name] = cloneRouter(current)
-	return cloneRouter(current), nil
+	return r.client.refreshStoredStatus(ctx, current.Name)
 }
 
 type Patch struct {
@@ -863,7 +933,9 @@ func cloneSpec(in Spec) Spec {
 func cloneStatus(in Status) Status {
 	out := in
 	out.Interfaces = cloneInterfaceStatuses(in.Interfaces)
+	out.Routes = cloneRouteStatuses(in.Routes)
 	out.InstalledNAT = append([]string{}, in.InstalledNAT...)
+	out.InstalledFirewall = append([]string{}, in.InstalledFirewall...)
 	return out
 }
 
@@ -896,6 +968,10 @@ func cloneInterfaceStatuses(in []InterfaceStatus) []InterfaceStatus {
 
 func cloneRoutes(in []Route) []Route {
 	return append([]Route{}, in...)
+}
+
+func cloneRouteStatuses(in []RouteStatus) []RouteStatus {
+	return append([]RouteStatus{}, in...)
 }
 
 func cloneDNSMasq(in DNSMasq) DNSMasq {
@@ -946,6 +1022,50 @@ func cloneCommands(in []Command) []Command {
 	for i := range out {
 		out[i].Args = append([]string{}, in[i].Args...)
 	}
+	return out
+}
+
+func normalizeObservedStatus(status Status) Status {
+	status.Interfaces = cloneInterfaceStatuses(status.Interfaces)
+	status.Routes = cloneRouteStatuses(status.Routes)
+	status.InstalledNAT = uniqueSortedStrings(status.InstalledNAT)
+	status.InstalledFirewall = uniqueSortedStrings(status.InstalledFirewall)
+	status.ObservedHash = observedHash(status)
+	if status.ResourceVersion == "" {
+		status.ResourceVersion = status.ObservedHash
+	}
+	return status
+}
+
+func observedHash(status Status) string {
+	copy := status
+	copy.ResourceVersion = ""
+	copy.ObservedHash = ""
+	copy.LastError = ""
+	data, err := json.Marshal(copy)
+	if err != nil {
+		return ""
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(data)
+	return fmt.Sprintf("%x", h.Sum64())
+}
+
+func uniqueSortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
 	return out
 }
 

@@ -144,6 +144,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.linuxrouter == 'true'
     runs-on: ubuntu-22.04
     needs: unit-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        nat-backend: [auto, nftables, iptables]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -158,4 +162,4 @@ jobs:
         run: sudo -E go test -tags=integration -count=1 -v ./linuxrouter
         env:
           OVNFLOW_LINUX_ROUTER_CHECKS: "1"
-          OVNFLOW_NAT_BACKEND: auto
+          OVNFLOW_NAT_BACKEND: ${{ matrix.nat-backend }}

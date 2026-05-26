@@ -49,12 +49,12 @@ func TestLinuxRendererRendersNamespaceInterfacesDNSMasqAndNFTables(t *testing.T)
 	assertCommandContains(t, commands, "ip", "dnsmasq", "--conf-file=/run/ovnflow/edge/dnsmasq.conf", "--host-record=api.service,172.16.100.6")
 	assertCommandContains(t, commands, "ip", "nft", "delete", "table", "ip", "ovnflow_nat")
 	assertCommandContains(t, commands, "ip", "nft", "add", "table", "ip", "ovnflow_nat")
-	assertCommandContains(t, commands, "ip", "masquerade", "comment", "ovnflow:masq-lan")
+	assertCommandContains(t, commands, "ip", "masquerade", "comment", `"ovnflow:masq-lan"`)
 	assertCommandContains(t, commands, "ip", "snat", "to", "172.17.100.29")
 	assertCommandContains(t, commands, "ip", "tcp", "dport", "8080", "dnat", "to", "172.16.100.6:80")
 	assertCommandContains(t, commands, "ip", "saddr", "172.16.100.0/24", "iifname", "lan0", "ip", "daddr", "192.168.9.2", "dnat", "to", "192.168.0.1")
 	assertCommandContains(t, commands, "ip", "table", "inet", "ovnflow_filter")
-	assertCommandContains(t, commands, "ip", "accept", "comment", "ovnflow:allow-web")
+	assertCommandContains(t, commands, "ip", "accept", "comment", `"ovnflow:allow-web"`)
 }
 
 func TestLinuxRendererRendersIPTablesBackend(t *testing.T) {

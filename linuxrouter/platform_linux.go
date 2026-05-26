@@ -9,5 +9,6 @@ import (
 )
 
 func NewPlatformClient() PlatformClient {
-	return NewClient(SystemExecutor{}, LinuxRenderer{NATBackend: os.Getenv(ovnflow.EnvLinuxRouterNATBackend)})
+	backend := os.Getenv(ovnflow.EnvLinuxRouterNATBackend)
+	return NewObservedClient(SystemExecutor{}, LinuxRenderer{NATBackend: backend}, LinuxObserver{NATBackend: backend})
 }

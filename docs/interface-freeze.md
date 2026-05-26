@@ -2,9 +2,9 @@
 
 This document records the first v2.0.0 interface-freeze PR scope and the
 follow-up implementation progress. The initial freeze added public shapes and
-fake planning only. Later v2 work has started real OVSDB reconciliation and a
-Linux-only command backend, but privileged end-to-end LinuxRouter validation is
-still tracked separately.
+fake planning only. Later v2 work added real OVSDB reconciliation, a Linux-only
+command backend, runtime LinuxRouter observation, and a release-blocking
+privileged LinuxRouter smoke gate.
 
 ## Frozen foundations
 
@@ -40,7 +40,7 @@ flat strings.
 
 LinuxRouter lives in the `linuxrouter` package. It defines `Spec`, `Status`,
 interfaces, routes, DNSMasq, NAT, firewall, `Get`, `Apply`, and `Patch`
-surfaces, plus executor and renderer interfaces for future host command
+surfaces, plus executor, renderer, and observer interfaces for host command
 implementations.
 
 The current implementation keeps ordinary tests fake-safe while Linux builds can
@@ -52,16 +52,22 @@ use a host command backend:
   uses them to render and execute `ip`, `ovs-vsctl`, `dnsmasq`, `nft`, and
   `iptables` commands.
 - Non-Linux builds return typed `unsupported` errors through the same interface.
+- Linux builds now attach a `LinuxObserver` to the platform client. `Get`
+  observes namespace existence, interface addresses, routes, dnsmasq pidfile
+  state, NAT backend, SDK-owned NAT rules, SDK-owned firewall rules, observed
+  hash, and resource version.
 
 NAT rule types include stable names for SNAT, MASQUERADE, DNAT, port forwarding,
 and destination mapping. Single WAN or LAN inference is allowed only when there
 is exactly one candidate; otherwise planning returns the typed `ambiguous`
 error.
 
-LinuxRouter still needs privileged integration tests before release completion:
-real namespace lifecycle, OVS port movement, dnsmasq process management,
-nftables/iptables rule installation, rule cleanup, and detailed runtime status
-must be proven under `OVNFLOW_LINUX_ROUTER_CHECKS=1`.
+The current privileged smoke gate proves namespace lifecycle, loopback
+configuration, nftables and iptables owned rule installation, and detailed
+runtime status readback under `OVNFLOW_LINUX_ROUTER_CHECKS=1`. Broader
+end-to-end checks are still tracked for later hardening: OVS port movement,
+dnsmasq process management, packet-level NAT translation, and rule cleanup
+reconciliation.
 
 ## CI gate placeholders
 
@@ -72,5 +78,5 @@ The first freeze also reserves environment constants for later CI expansion:
 - `OVNFLOW_LINUX_ROUTER_CHECKS`
 - `OVNFLOW_NAT_BACKEND=auto|nftables|iptables`
 
-These are constants and validation helpers only. The interface-freeze PR does
-not add privileged CI jobs or invoke host-networking tools.
+`release.yml` includes a privileged LinuxRouter matrix for nftables and
+iptables, so the GitHub Release job waits for both backends before publishing.

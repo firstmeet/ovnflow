@@ -489,6 +489,107 @@ func TestGetAndApplyDeepCopyRouterState(t *testing.T) {
 	}
 }
 
+func TestGetRefreshesObservedStatus(t *testing.T) {
+	ctx := context.Background()
+	observerCalls := 0
+	client := NewObservedClient(nil, nil, ObserverFunc(func(context.Context, Router) (Status, error) {
+		observerCalls++
+		return Status{
+			Exists:            true,
+			Namespace:         "ovnflow-edge",
+			Interfaces:        []InterfaceStatus{{Name: "wan0", Role: InterfaceWAN, Addresses: []string{"192.0.2.2/24"}, Up: true}},
+			Routes:            []RouteStatus{{Destination: "0.0.0.0/0", Gateway: "192.0.2.1", Interface: "wan0"}},
+			DNSMasq:           DNSMasqStatus{Running: true, PID: 1234},
+			NATBackend:        ovnflow.NATBackendNFTables,
+			InstalledNAT:      []string{"egress", "egress"},
+			InstalledFirewall: []string{"allow-web"},
+		}, nil
+	}))
+	ref := client.Router("edge")
+	if err := ref.Apply(ctx, Router{Name: "edge", Spec: Spec{Interfaces: []Interface{{Name: "wan0", Role: InterfaceWAN}}}}); err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	got, err := ref.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if observerCalls == 0 {
+		t.Fatalf("observer was not called")
+	}
+	if !got.Status.Exists || got.Status.Namespace != "ovnflow-edge" || got.Status.Interfaces[0].Role != InterfaceWAN || got.Status.Routes[0].Gateway != "192.0.2.1" || !got.Status.DNSMasq.Running {
+		t.Fatalf("unexpected observed status: %#v", got.Status)
+	}
+	if got.Status.ObservedHash == "" || got.Status.ResourceVersion == "" {
+		t.Fatalf("observed status missing hashes: %#v", got.Status)
+	}
+	if len(got.Status.InstalledNAT) != 1 || got.Status.InstalledNAT[0] != "egress" {
+		t.Fatalf("installed nat was not normalized: %#v", got.Status.InstalledNAT)
+	}
+	got.Status.Interfaces[0].Addresses[0] = "mutated"
+	again, err := ref.Get(ctx)
+	if err != nil {
+		t.Fatalf("second Get returned error: %v", err)
+	}
+	if again.Status.Interfaces[0].Addresses[0] != "192.0.2.2/24" {
+		t.Fatalf("observed status aliases returned value: %#v", again.Status)
+	}
+}
+
+func TestGetStoresObserverErrorInStatus(t *testing.T) {
+	ctx := context.Background()
+	client := NewObservedClient(nil, nil, ObserverFunc(func(context.Context, Router) (Status, error) {
+		return Status{}, errors.New("probe failed")
+	}))
+	ref := client.Router("edge")
+	if err := ref.Apply(ctx, Router{Name: "edge"}); err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	got, err := ref.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if got.Status.LastError == "" || got.Status.Namespace != "ovnflow-edge" {
+		t.Fatalf("observer error was not captured in status: %#v", got.Status)
+	}
+}
+
+func TestStaleObserverResultDoesNotOverwriteNewerSpec(t *testing.T) {
+	ctx := context.Background()
+	observing := make(chan struct{})
+	release := make(chan struct{})
+	client := NewObservedClient(nil, nil, ObserverFunc(func(context.Context, Router) (Status, error) {
+		close(observing)
+		<-release
+		return Status{Exists: true, Namespace: "old-observation"}, nil
+	}))
+	ref := client.Router("edge")
+	client.store["edge"] = Router{Name: "edge"}
+	errs := make(chan error, 1)
+	go func() {
+		_, err := ref.Get(ctx)
+		errs <- err
+	}()
+	<-observing
+	client.mu.Lock()
+	current := client.store["edge"]
+	current.Spec.Labels = ovnflow.Labels{"version": "new"}
+	client.store["edge"] = current
+	client.mu.Unlock()
+	close(release)
+	if err := <-errs; err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	client.mu.RLock()
+	stored := cloneRouter(client.store["edge"])
+	client.mu.RUnlock()
+	if stored.Spec.Labels["version"] != "new" {
+		t.Fatalf("newer spec was overwritten: %#v", stored)
+	}
+	if stored.Status.Namespace == "old-observation" {
+		t.Fatalf("stale observer status overwrote newer spec: %#v", stored.Status)
+	}
+}
+
 func TestOwnerAndLabelsValidate(t *testing.T) {
 	router := Router{Name: "edge", Spec: Spec{
 		Owner:  ovnflow.OwnerRef{Kind: "project"},
