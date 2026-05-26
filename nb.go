@@ -316,9 +316,9 @@ func (b *LogicalSwitchBuilder) executeCreateOnce(ctx context.Context, ensure boo
 	if len(ops) == 0 {
 		return nil
 	}
-	results, err := b.client.db.raw.Transact(ctx, ops...)
+	results, err := b.client.db.transact(ctx, tableLogicalSwitch, string(b.mode), b.name, ops...)
 	if err != nil {
-		return classifyTransactError(err, dbOVNNorthbound, tableLogicalSwitch, string(b.mode), b.name)
+		return err
 	}
 	return ensureAffected(results, mustAffectNonInsertOps(ops), dbOVNNorthbound, tableLogicalSwitch, string(b.mode), b.name)
 }
@@ -364,24 +364,21 @@ func (b *LogicalSwitchBuilder) executeDelete(ctx context.Context) error {
 		})
 		mustAffect = append(mustAffect, len(ops)-1)
 	}
-	results, err := b.client.db.raw.Transact(ctx, ops...)
+	results, err := b.client.db.transact(ctx, tableLogicalSwitch, "delete", b.name, ops...)
 	if err != nil {
-		return classifyTransactError(err, dbOVNNorthbound, tableLogicalSwitch, "delete", b.name)
+		return err
 	}
 	return ensureAffected(results, mustAffect, dbOVNNorthbound, tableLogicalSwitch, "delete", b.name)
 }
 
 func (n *NBClient) selectLogicalSwitches(ctx context.Context, name string) ([]LogicalSwitch, error) {
-	results, err := n.db.raw.Transact(ctx, libovsdb.Operation{
+	results, err := n.db.transact(ctx, tableLogicalSwitch, "select", name, libovsdb.Operation{
 		Op:      libovsdb.OperationSelect,
 		Table:   tableLogicalSwitch,
 		Where:   conditionName(name),
 		Columns: []string{colUUID, colName, colPorts, colExternalIDs, colOtherConfig},
 	})
 	if err != nil {
-		return nil, classifyTransactError(err, dbOVNNorthbound, tableLogicalSwitch, "select", name)
-	}
-	if err := checkOperationResults(results, dbOVNNorthbound, tableLogicalSwitch, "select", name); err != nil {
 		return nil, err
 	}
 	if len(results) == 0 {
@@ -401,16 +398,13 @@ func (n *NBClient) selectLogicalSwitches(ctx context.Context, name string) ([]Lo
 }
 
 func (n *NBClient) selectLogicalSwitchPorts(ctx context.Context, name string) ([]LogicalSwitchPort, error) {
-	results, err := n.db.raw.Transact(ctx, libovsdb.Operation{
+	results, err := n.db.transact(ctx, tableLogicalSwitchPort, "select", name, libovsdb.Operation{
 		Op:      libovsdb.OperationSelect,
 		Table:   tableLogicalSwitchPort,
 		Where:   conditionName(name),
 		Columns: []string{colUUID, colName, colAddresses, colExternalIDs, colOptions, colType},
 	})
 	if err != nil {
-		return nil, classifyTransactError(err, dbOVNNorthbound, tableLogicalSwitchPort, "select", name)
-	}
-	if err := checkOperationResults(results, dbOVNNorthbound, tableLogicalSwitchPort, "select", name); err != nil {
 		return nil, err
 	}
 	rows := make([]LogicalSwitchPort, 0, len(results[0].Rows))

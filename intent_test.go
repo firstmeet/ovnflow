@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
+
+	libovsdb "github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 func TestOwnerExternalIDsEncodeReservedLabels(t *testing.T) {
@@ -119,5 +122,157 @@ func TestTypedErrorsIncludeV2Kinds(t *testing.T) {
 	err := &Error{Kind: ErrorAmbiguous}
 	if !errors.Is(err, ErrAmbiguous) {
 		t.Fatalf("errors.Is did not match ambiguous")
+	}
+}
+
+func TestV2IntentRequiresOwnerForRealMutation(t *testing.T) {
+	db := testNBDBClient(t)
+	db.executor = &nbRecordingExecutor{}
+	_, err := (&NBClient{db: db}).VirtualNetwork("net-a").Ensure().WithCIDR("10.0.0.0/24").Reconcile(context.Background())
+	if !IsKind(err, ErrorOwnershipViolation) {
+		t.Fatalf("Reconcile error = %v, want ownership violation", err)
+	}
+}
+
+func TestVirtualNetworkReconcileWritesLogicalSwitchAndDNS(t *testing.T) {
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{Count: 1},
+			{Rows: nil},
+			{Count: 1},
+		},
+	}
+	db := testNBDBClient(t)
+	db.executor = rec
+	nb := &NBClient{db: db}
+
+	result, err := nb.VirtualNetwork("net-a").
+		Ensure().
+		WithCIDR("10.0.0.0/24").
+		WithOwner("project", "alpha").
+		WithLabel("env", "test").
+		WithDNS("net-a-dns", func(d *LogicalSwitchDNSBuilder) {
+			d.AddRecord("api.service", "10.0.0.3", "10.0.0.2")
+		}).
+		Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	if !result.Applied {
+		t.Fatalf("Reconcile did not report applied")
+	}
+	lsOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableLogicalSwitch)
+	if lsOp == nil {
+		t.Fatalf("missing Logical_Switch insert in ops: %#v", rec.ops)
+	}
+	externalIDs := ovsMapStrings(t, lsOp.Row[colExternalIDs])
+	if externalIDs[ExternalIDKindKey] != "VirtualNetwork" || externalIDs[ExternalIDOwnerNameKey] != "alpha" {
+		t.Fatalf("logical switch external_ids = %#v", externalIDs)
+	}
+	dnsOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableDNS)
+	if dnsOp == nil {
+		t.Fatalf("missing DNS insert in ops: %#v", rec.ops)
+	}
+	records := ovsMapStrings(t, dnsOp.Row[colRecords])
+	if records["api.service"] != "10.0.0.2 10.0.0.3" {
+		t.Fatalf("DNS records = %#v", records)
+	}
+}
+
+func TestWorkloadAttachmentReconcileWritesLogicalSwitchPort(t *testing.T) {
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: []libovsdb.Row{{colUUID: uuidValue("ls-uuid"), colPorts: ovsSet()}}},
+			{Rows: nil},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db := testNBDBClient(t)
+	db.executor = rec
+	nb := &NBClient{db: db}
+
+	result, err := nb.WorkloadAttachment("att-a").
+		Ensure().
+		OnNetwork("net-a").
+		WithWorkload("vm-a").
+		WithInterface("eth0").
+		WithMAC("00:16:3e:11:22:33").
+		WithIP("10.0.0.10").
+		WithOwner("project", "alpha").
+		Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	if !result.Applied {
+		t.Fatalf("Reconcile did not report applied")
+	}
+	lspOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableLogicalSwitchPort)
+	if lspOp == nil {
+		t.Fatalf("missing Logical_Switch_Port insert in ops: %#v", rec.ops)
+	}
+	if lspOp.Row[colName] != "att-a" {
+		t.Fatalf("lsp row = %#v", lspOp.Row)
+	}
+	externalIDs := ovsMapStrings(t, lspOp.Row[colExternalIDs])
+	if externalIDs[ExternalIDKindKey] != "WorkloadAttachment" || externalIDs[ExternalIDPrefix+"workload"] != "vm-a" {
+		t.Fatalf("lsp external_ids = %#v", externalIDs)
+	}
+}
+
+func TestSecurityPolicyReconcileWritesPortGroupAndInlineACL(t *testing.T) {
+	rec := &nbRecordingExecutor{
+		results: []libovsdb.OperationResult{
+			{Rows: nil},
+			{Rows: nil},
+			{Count: 1},
+			{Count: 1},
+		},
+	}
+	db := testNBDBClient(t)
+	db.executor = rec
+	nb := &NBClient{db: db}
+
+	result, err := nb.SecurityPolicy("allow-web").
+		Ensure().
+		ForSubject("pg-web").
+		WithOwner("project", "alpha").
+		AddRule(SecurityRule{Name: "web", Action: "allow", Protocol: "tcp", CIDRs: []string{"10.0.0.0/24"}, Ports: []int{80}}).
+		Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	if !result.Applied {
+		t.Fatalf("Reconcile did not report applied")
+	}
+	aclOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tableACL)
+	if aclOp == nil {
+		t.Fatalf("missing ACL insert in ops: %#v", rec.ops)
+	}
+	if aclOp.Row[colAction] != "allow" {
+		t.Fatalf("acl row = %#v", aclOp.Row)
+	}
+	if match := aclOp.Row[colMatch].(string); match == "" || !strings.Contains(match, "tcp.dst == 80") {
+		t.Fatalf("acl match = %q", match)
+	}
+	pgOp := findRecordedOp(rec.ops, libovsdb.OperationInsert, tablePortGroup)
+	if pgOp == nil {
+		t.Fatalf("missing Port_Group insert in ops: %#v", rec.ops)
+	}
+}
+
+func ovsMapStrings(t *testing.T, value any) map[string]string {
+	t.Helper()
+	switch typed := value.(type) {
+	case libovsdb.OvsMap:
+		out := map[string]string{}
+		for key, value := range typed.GoMap {
+			out[anyString(key)] = anyString(value)
+		}
+		return out
+	default:
+		t.Fatalf("value %T is not ovs map: %#v", value, value)
+		return nil
 	}
 }

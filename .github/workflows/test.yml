@@ -78,6 +78,7 @@ jobs:
           OVNFLOW_OVN_SB_ADDR: tcp:127.0.0.1:6642
           OVNFLOW_REQUIRE_INTEGRATION: "1"
           OVNFLOW_V1_SCHEMA_CHECKS: "1"
+          OVNFLOW_V2_SCHEMA_CHECKS: "1"
       - if: always()
         run: docker compose logs
       - if: always()
@@ -120,13 +121,14 @@ jobs:
           wait_db tcp:127.0.0.1:6640 Open_vSwitch
           wait_db tcp:127.0.0.1:6641 OVN_Northbound
           wait_db tcp:127.0.0.1:6642 OVN_Southbound
-      - run: go test -tags=integration -count=1 -v -run 'TestIntegrationV1MutationScenariosAreEnvGated' ./...
+      - run: go test -tags=integration -count=1 -v -run 'TestIntegration(V1MutationScenariosAreEnvGated|V2MutationGateIsEnvGated)' ./...
         env:
           OVNFLOW_OVS_ADDR: tcp:127.0.0.1:6640
           OVNFLOW_OVN_NB_ADDR: tcp:127.0.0.1:6641
           OVNFLOW_OVN_SB_ADDR: tcp:127.0.0.1:6642
           OVNFLOW_REQUIRE_INTEGRATION: "1"
           OVNFLOW_V1_MUTATION_CHECKS: "1"
+          OVNFLOW_V2_MUTATION_CHECKS: "1"
       - if: always()
         run: docker compose logs
       - if: always()
