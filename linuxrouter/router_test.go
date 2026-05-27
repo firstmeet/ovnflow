@@ -88,6 +88,27 @@ func TestMultipleWANInferenceIsAmbiguous(t *testing.T) {
 	}
 }
 
+func TestInterfaceRejectsInvalidExternalIDs(t *testing.T) {
+	tests := []struct {
+		name  string
+		iface Interface
+	}{
+		{name: "empty port key", iface: Interface{Name: "lan0", PortExternalIDs: map[string]string{"": "value"}}},
+		{name: "empty port value", iface: Interface{Name: "lan0", PortExternalIDs: map[string]string{"iface-id": ""}}},
+		{name: "reserved port key", iface: Interface{Name: "lan0", PortExternalIDs: map[string]string{"ovnflow.io/kind": "other"}}},
+		{name: "empty interface key", iface: Interface{Name: "lan0", InterfaceExternalIDs: map[string]string{" ": "value"}}},
+		{name: "empty interface value", iface: Interface{Name: "lan0", InterfaceExternalIDs: map[string]string{"iface-id": " "}}},
+		{name: "reserved interface key", iface: Interface{Name: "lan0", InterfaceExternalIDs: map[string]string{"ovnflow.io/name": "other"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.iface.Validate(); !ovnflow.IsKind(err, ovnflow.ErrorValidation) {
+				t.Fatalf("Validate() = %v, want validation", err)
+			}
+		})
+	}
+}
+
 func TestZeroWANInferenceIsAmbiguous(t *testing.T) {
 	router := Router{
 		Name: "edge",

@@ -54,13 +54,15 @@ const (
 )
 
 type Interface struct {
-	Name       string
-	Role       InterfaceRole
-	Bridge     string
-	OVSPort    string
-	Addresses  []string
-	Gateway    string
-	DHCPClient bool
+	Name                 string
+	Role                 InterfaceRole
+	Bridge               string
+	OVSPort              string
+	Addresses            []string
+	Gateway              string
+	DHCPClient           bool
+	PortExternalIDs      map[string]string `json:"port_external_ids,omitempty"`
+	InterfaceExternalIDs map[string]string `json:"interface_external_ids,omitempty"`
 }
 
 type InterfaceStatus struct {
@@ -225,6 +227,7 @@ type Client struct {
 	executor Executor
 	renderer Renderer
 	observer Observer
+	ovs      routerOVSManager
 	store    map[string]Router
 }
 
@@ -243,13 +246,17 @@ func NewClient(executor Executor, renderer Renderer) *Client {
 }
 
 func NewObservedClient(executor Executor, renderer Renderer, observer Observer) *Client {
+	return newObservedClient(executor, renderer, observer, nil)
+}
+
+func newObservedClient(executor Executor, renderer Renderer, observer Observer, ovs routerOVSManager) *Client {
 	if renderer == nil {
 		renderer = CommandRenderer{}
 	}
 	if executor == nil {
 		executor = &FakeExecutor{}
 	}
-	return &Client{executor: executor, renderer: renderer, observer: observer, store: map[string]Router{}}
+	return &Client{executor: executor, renderer: renderer, observer: observer, ovs: ovs, store: map[string]Router{}}
 }
 
 func (c *Client) Router(name string) RouterRef {
@@ -324,17 +331,7 @@ func (r *Ref) Apply(ctx context.Context, router Router) error {
 	if err != nil {
 		return err
 	}
-	if err := func() error {
-		r.client.mu.Lock()
-		defer r.client.mu.Unlock()
-		for _, command := range commands {
-			if err := r.client.executor.Run(ctx, command); err != nil {
-				return err
-			}
-		}
-		r.client.store[router.Name] = cloneRouter(router)
-		return nil
-	}(); err != nil {
+	if err := r.client.executeApply(ctx, router, commands); err != nil {
 		return err
 	}
 	_, _ = r.client.refreshStoredStatus(ctx, router.Name)
@@ -370,10 +367,8 @@ func (r *Ref) Patch(ctx context.Context, patch Patch) (Router, error) {
 		if err != nil {
 			return err
 		}
-		for _, command := range commands {
-			if err := r.client.executor.Run(ctx, command); err != nil {
-				return err
-			}
+		if err := r.client.executeApplyLocked(ctx, current, commands); err != nil {
+			return err
 		}
 		r.client.store[current.Name] = cloneRouter(current)
 		return nil
@@ -381,6 +376,41 @@ func (r *Ref) Patch(ctx context.Context, patch Patch) (Router, error) {
 		return Router{}, err
 	}
 	return r.client.refreshStoredStatus(ctx, current.Name)
+}
+
+func (c *Client) executeApply(ctx context.Context, router Router, commands []Command) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.executeApplyLocked(ctx, router, commands); err != nil {
+		return err
+	}
+	c.store[router.Name] = cloneRouter(router)
+	return nil
+}
+
+func (c *Client) executeApplyLocked(ctx context.Context, router Router, commands []Command) error {
+	if c.ovs == nil {
+		for _, command := range commands {
+			if err := c.executor.Run(ctx, command); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(commands) > 0 {
+		if err := c.executor.Run(ctx, commands[0]); err != nil {
+			return err
+		}
+	}
+	if err := c.ovs.EnsureRouter(ctx, router); err != nil {
+		return err
+	}
+	for _, command := range commands[1:] {
+		if err := c.executor.Run(ctx, command); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type Patch struct {
@@ -619,6 +649,12 @@ func (i Interface) Validate() error {
 	}
 	if i.Gateway != "" && net.ParseIP(i.Gateway) == nil {
 		return wrapValidation("interface", i.Name, "invalid gateway", nil)
+	}
+	if err := validateExternalIDs("interface port", i.Name, i.PortExternalIDs); err != nil {
+		return err
+	}
+	if err := validateExternalIDs("interface", i.Name, i.InterfaceExternalIDs); err != nil {
+		return err
 	}
 	return nil
 }
@@ -954,6 +990,8 @@ func cloneInterfaces(in []Interface) []Interface {
 	out := append([]Interface{}, in...)
 	for i := range out {
 		out[i].Addresses = append([]string{}, in[i].Addresses...)
+		out[i].PortExternalIDs = cloneStringMap(in[i].PortExternalIDs)
+		out[i].InterfaceExternalIDs = cloneStringMap(in[i].InterfaceExternalIDs)
 	}
 	return out
 }
@@ -968,6 +1006,29 @@ func cloneInterfaceStatuses(in []InterfaceStatus) []InterfaceStatus {
 
 func cloneRoutes(in []Route) []Route {
 	return append([]Route{}, in...)
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func sortedMapKeys(values map[string]string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func cloneRouteStatuses(in []RouteStatus) []RouteStatus {
@@ -1101,6 +1162,21 @@ func validateRuleName(name string, names map[string]bool) error {
 func validateName(kind, name string) error {
 	if strings.TrimSpace(name) == "" {
 		return wrapValidation(kind, name, "name must not be empty", nil)
+	}
+	return nil
+}
+
+func validateExternalIDs(kind, name string, values map[string]string) error {
+	for key, value := range values {
+		if strings.TrimSpace(key) == "" {
+			return wrapValidation(kind, name, "external id key must not be empty", nil)
+		}
+		if strings.TrimSpace(value) == "" {
+			return wrapValidation(kind, name, "external id value must not be empty", nil)
+		}
+		if strings.HasPrefix(key, ovnflow.ExternalIDPrefix) {
+			return wrapValidation(kind, name, "external id key uses reserved ovnflow.io/ prefix", nil)
+		}
 	}
 	return nil
 }

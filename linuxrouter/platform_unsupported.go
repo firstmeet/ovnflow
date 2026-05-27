@@ -14,6 +14,10 @@ func NewPlatformClient() PlatformClient {
 	return &UnsupportedClient{}
 }
 
+func NewPlatformClientWithOVS(*ovnflow.OVSClient) PlatformClient {
+	return &UnsupportedClient{}
+}
+
 func (UnsupportedClient) Router(name string) RouterRef {
 	return &UnsupportedRef{name: name}
 }

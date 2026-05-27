@@ -100,6 +100,26 @@ if err != nil {
     return err
 }
 
+routerClient := linuxrouter.NewPlatformClientWithOVS(client.LocalOVS())
+err = routerClient.Router("edge").Apply(ctx, linuxrouter.Router{
+    Spec: linuxrouter.Spec{
+        Namespace: "ovnflow-edge",
+        Interfaces: []linuxrouter.Interface{{
+            Name:    "lan0",
+            Role:    linuxrouter.InterfaceLAN,
+            Bridge:  "br-int",
+            OVSPort: "edge-lan",
+            Addresses: []string{"172.16.100.1/24"},
+            InterfaceExternalIDs: map[string]string{
+                "iface-id": "nsr-router-switch-00000001",
+            },
+        }},
+    },
+})
+if err != nil {
+    return err
+}
+
 report, err := client.Diagnostics().Doctor(ctx, ovnflow.DoctorOptions{})
 if err != nil {
     return err

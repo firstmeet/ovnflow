@@ -5,6 +5,7 @@ package linuxrouter
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/firstmeet/ovnflow/v2"
@@ -57,6 +58,40 @@ func TestLinuxRendererRendersNamespaceInterfacesDNSMasqAndNFTables(t *testing.T)
 	assertCommandContains(t, commands, "ip", "saddr", "172.16.100.0/24", "iifname", "lan0", "ip", "daddr", "192.168.9.2", "dnat", "to", "192.168.0.1")
 	assertCommandContains(t, commands, "ip", "table", "inet", nftFilterTable(scope))
 	assertCommandContains(t, commands, "ip", "accept", "comment", scopedNftComment(scope, "allow-web"))
+}
+
+func TestLinuxRendererRendersCustomOVSExternalIDs(t *testing.T) {
+	router := Router{Name: "edge", Spec: Spec{
+		Namespace: "ovnflow-edge",
+		Interfaces: []Interface{{
+			Name:                 "lan0",
+			Bridge:               "br-int",
+			OVSPort:              "edge-lan",
+			PortExternalIDs:      map[string]string{"owner": "router-port"},
+			InterfaceExternalIDs: map[string]string{"iface-id": "nsr-xxx"},
+		}},
+	}}
+	commands, err := (LinuxRenderer{}).RenderApply(router)
+	if err != nil {
+		t.Fatalf("RenderApply returned error: %v", err)
+	}
+	assertCommandContains(t, commands, "ovs-vsctl", "set", "Port", "edge-lan", "external_ids:owner=router-port")
+	assertCommandContains(t, commands, "ovs-vsctl", "set", "Interface", "edge-lan", "type=internal", "external_ids:iface-id=nsr-xxx")
+}
+
+func TestLinuxRendererOVSDBManagedSkipsOVSVSCTL(t *testing.T) {
+	router := Router{Name: "edge", Spec: Spec{
+		Namespace:  "ovnflow-edge",
+		Interfaces: []Interface{{Name: "lan0", Bridge: "br-int", OVSPort: "edge-lan"}},
+	}}
+	commands, err := (LinuxRenderer{OVSDBManaged: true}).RenderApply(router)
+	if err != nil {
+		t.Fatalf("RenderApply returned error: %v", err)
+	}
+	assertNoProgram(t, commands, "ovs-vsctl")
+	assertCommand(t, commands, "ip", "netns", "add", "ovnflow-edge")
+	assertCommandContains(t, commands, "ip", "link", "set", "edge-lan", "netns", "ovnflow-edge")
+	assertCommandContains(t, commands, "ip", "link", "set", "lan0", "up")
 }
 
 func TestLinuxRendererRendersIPTablesBackend(t *testing.T) {
@@ -197,6 +232,20 @@ func assertCommandContains(t *testing.T, commands []Command, program string, tok
 		}
 	}
 	t.Fatalf("missing command %s containing %#v in %#v", program, tokens, commands)
+}
+
+func assertNoProgram(t *testing.T, commands []Command, program string) {
+	t.Helper()
+	for _, command := range commands {
+		if command.Program == program {
+			t.Fatalf("unexpected command %s %#v in %#v", program, command.Args, commands)
+		}
+		for _, arg := range command.Args {
+			if strings.Contains(arg, program) {
+				t.Fatalf("unexpected command arg containing %s in %#v", program, command)
+			}
+		}
+	}
 }
 
 func containsSubsequence(values, tokens []string) bool {

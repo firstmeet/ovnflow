@@ -38,7 +38,8 @@ func (SystemExecutor) Run(ctx context.Context, cmd Command) error {
 }
 
 type LinuxRenderer struct {
-	NATBackend string
+	NATBackend   string
+	OVSDBManaged bool
 }
 
 func (r LinuxRenderer) RenderApply(router Router) ([]Command, error) {
@@ -56,7 +57,7 @@ func (r LinuxRenderer) RenderApply(router Router) ([]Command, error) {
 	var commands []Command
 	commands = append(commands, Command{Program: "ip", Args: []string{"netns", "add", ns}, IgnoreAlreadyExists: true})
 	for _, iface := range router.Spec.Interfaces {
-		commands = append(commands, renderInterfaceCommands(router.Name, ns, iface)...)
+		commands = append(commands, renderInterfaceCommands(router.Name, ns, iface, r.OVSDBManaged)...)
 	}
 	for _, route := range router.Spec.Routes {
 		commands = append(commands, renderRouteCommand(ns, route))
@@ -70,31 +71,16 @@ func (r LinuxRenderer) RenderApply(router Router) ([]Command, error) {
 	return commands, nil
 }
 
-func renderInterfaceCommands(routerName, ns string, iface Interface) []Command {
+func renderInterfaceCommands(routerName, ns string, iface Interface, ovsdbManaged bool) []Command {
 	var commands []Command
 	if iface.Bridge != "" && iface.OVSPort != "" {
-		commands = append(commands,
-			linuxRouterOVSOwnershipGuardCommand("Port", iface.OVSPort, ns),
-			linuxRouterOVSOwnershipGuardCommand("Interface", iface.OVSPort, ns),
-		)
-		commands = append(commands, Command{Program: "ovs-vsctl", Args: []string{
-			"--may-exist", "add-port", iface.Bridge, iface.OVSPort,
-			"--", "set", "Port", iface.OVSPort,
-			"external_ids:ovnflow.io/managed-by=ovnflow",
-			"external_ids:ovnflow.io/api-version=v2",
-			"external_ids:ovnflow.io/kind=LinuxRouter",
-			"external_ids:ovnflow.io/name=" + routerName,
-			"external_ids:ovnflow.io/linux-router-ns=" + ns,
-			"external_ids:ovnflow.io/linux-router-iface=" + iface.Name,
-			"--", "set", "Interface", iface.OVSPort,
-			"type=internal",
-			"external_ids:ovnflow.io/managed-by=ovnflow",
-			"external_ids:ovnflow.io/api-version=v2",
-			"external_ids:ovnflow.io/kind=LinuxRouter",
-			"external_ids:ovnflow.io/name=" + routerName,
-			"external_ids:ovnflow.io/linux-router-ns=" + ns,
-			"external_ids:ovnflow.io/linux-router-iface=" + iface.Name,
-		}})
+		if !ovsdbManaged {
+			commands = append(commands,
+				linuxRouterOVSOwnershipGuardCommand("Port", iface.OVSPort, ns),
+				linuxRouterOVSOwnershipGuardCommand("Interface", iface.OVSPort, ns),
+			)
+			commands = append(commands, Command{Program: "ovs-vsctl", Args: linuxRouterOVSVSCTLArgs(routerName, ns, iface)})
+		}
 		commands = append(commands,
 			Command{Program: "ip", Args: []string{"link", "set", iface.OVSPort, "netns", ns}, IgnoreNotFound: true},
 			Command{Program: "ip", Args: []string{"netns", "exec", ns, "ip", "link", "set", iface.OVSPort, "name", iface.Name}, IgnoreNotFound: true},
@@ -111,6 +97,38 @@ func renderInterfaceCommands(routerName, ns string, iface Interface) []Command {
 		commands = append(commands, Command{Program: "ip", Args: []string{"netns", "exec", ns, "dhclient", "-v", iface.Name}})
 	}
 	return commands
+}
+
+func linuxRouterOVSVSCTLArgs(routerName, ns string, iface Interface) []string {
+	args := []string{
+		"--may-exist", "add-port", iface.Bridge, iface.OVSPort,
+		"--", "set", "Port", iface.OVSPort,
+		"external_ids:ovnflow.io/managed-by=ovnflow",
+		"external_ids:ovnflow.io/api-version=v2",
+		"external_ids:ovnflow.io/kind=LinuxRouter",
+		"external_ids:ovnflow.io/name=" + routerName,
+		"external_ids:ovnflow.io/linux-router-ns=" + ns,
+		"external_ids:ovnflow.io/linux-router-iface=" + iface.Name,
+	}
+	args = appendExternalIDArgs(args, iface.PortExternalIDs)
+	args = append(args,
+		"--", "set", "Interface", iface.OVSPort,
+		"type=internal",
+		"external_ids:ovnflow.io/managed-by=ovnflow",
+		"external_ids:ovnflow.io/api-version=v2",
+		"external_ids:ovnflow.io/kind=LinuxRouter",
+		"external_ids:ovnflow.io/name="+routerName,
+		"external_ids:ovnflow.io/linux-router-ns="+ns,
+		"external_ids:ovnflow.io/linux-router-iface="+iface.Name,
+	)
+	return appendExternalIDArgs(args, iface.InterfaceExternalIDs)
+}
+
+func appendExternalIDArgs(args []string, values map[string]string) []string {
+	for _, key := range sortedMapKeys(values) {
+		args = append(args, "external_ids:"+key+"="+values[key])
+	}
+	return args
 }
 
 func renderRouteCommand(ns string, route Route) Command {
