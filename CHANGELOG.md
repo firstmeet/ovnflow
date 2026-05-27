@@ -2,6 +2,25 @@
 
 All notable changes to `ovnflow` are tracked here.
 
+## v2.0.1 - 2026-05-27
+
+### Added
+
+- LinuxRouter interfaces can now attach custom OVS `external_ids` to both
+  Port and Interface rows through `PortExternalIDs` and
+  `InterfaceExternalIDs`.
+- Linux builds now expose `linuxrouter.NewPlatformClientWithOVS`, allowing
+  callers to inject `client.LocalOVS()` so LinuxRouter manages OVS
+  Port/Interface rows through the SDK OVSDB API while keeping namespace,
+  DNSMasq, NAT, and firewall operations on the Linux command backend.
+
+### Fixed
+
+- LinuxRouter OVS Interfaces can now set `external_ids:iface-id`, allowing
+  namespace router interfaces to bind to OVN logical switch ports.
+- Custom LinuxRouter OVS external IDs are validated and cannot override
+  reserved `ovnflow.io/*` ownership metadata.
+
 ## v2.0.0 - 2026-05-27
 
 ### Added
