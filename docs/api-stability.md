@@ -11,6 +11,9 @@
   IPFIX, and AutoAttach.
 - Runtime `TableRef` and `TableBuilder` methods for schema-aware CRUD,
   map/set mutation, list/get, and watch.
+- Native `OpenFlowClient` protocol and fluent owned-rule surfaces.
+- `SDWANBackend`, `SDWANNetwork`, agent/control-plane primitives, and the
+  Linux-only `sdwanlinux` backend injection surface.
 - Error kinds and helpers: `Error`, `ErrorKind`, `IsKind`, and `KindOf`.
 
 Compatibility rules:

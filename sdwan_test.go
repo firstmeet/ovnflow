@@ -150,6 +150,39 @@ func TestSDWANFullMeshAutoPlansEveryPair(t *testing.T) {
 	}
 }
 
+func TestSDWANFullMeshPreservesExplicitDisabledLink(t *testing.T) {
+	network, err := NewSDWANClient(nil).Network("wan").Ensure().
+		TopologyFullMesh().
+		AddSite("edge-a", SDWANSite{Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}}).
+		AddSite("edge-b", SDWANSite{Router: "edge-b", CIDRs: []string{"10.1.0.0/24"}}).
+		AddSite("edge-c", SDWANSite{Router: "edge-c", CIDRs: []string{"10.2.0.0/24"}}).
+		AddLink(SDWANLink{From: "edge-a", To: "edge-b", Disabled: true}).
+		networkForTest(context.Background())
+	if err != nil {
+		t.Fatalf("networkForTest() = %v", err)
+	}
+	if len(network.Links) != 3 {
+		t.Fatalf("links = %d, want 3: %#v", len(network.Links), network.Links)
+	}
+	for _, link := range network.Links {
+		if link.StableName() != "edge-a--edge-b" {
+			continue
+		}
+		if !link.Disabled || link.Enabled {
+			t.Fatalf("explicit disabled link was overwritten: %#v", link)
+		}
+	}
+	plan := planSDWANApply(network)
+	if hasSDWANOperation(plan, "WireGuardTunnel", "edge-a--edge-b") || hasSDWANOperation(plan, "RoutePolicy", "edge-a--edge-b") {
+		t.Fatalf("disabled full-mesh link was planned: %#v", plan.Operations)
+	}
+	for _, name := range []string{"edge-a--edge-c", "edge-b--edge-c"} {
+		if !hasSDWANOperation(plan, "WireGuardTunnel", name) {
+			t.Fatalf("plan missing enabled full-mesh tunnel %s: %#v", name, plan.Operations)
+		}
+	}
+}
+
 func TestSDWANInMemoryBackendPreservesObservedStatus(t *testing.T) {
 	backend := NewInMemorySDWANBackend()
 	ctx := context.Background()
@@ -200,6 +233,15 @@ func TestClientSDWANBackendInjection(t *testing.T) {
 	if _, ok := backend.LastPlan("wan"); !ok {
 		t.Fatal("custom backend did not receive ApplySDWAN")
 	}
+}
+
+func (b *SDWANNetworkBuilder) networkForTest(ctx context.Context) (SDWANNetwork, error) {
+	plan, err := b.ApplyPlan(ctx)
+	if err != nil {
+		return SDWANNetwork{}, err
+	}
+	_ = plan
+	return normalizeSDWANNetwork(b.network), nil
 }
 
 func hasSDWANOperation(plan SDWANApplyPlan, resource, name string) bool {

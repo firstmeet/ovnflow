@@ -3,9 +3,12 @@
 package ovnflow
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -346,6 +349,155 @@ func TestIntegrationSouthboundSDKQueryAndWatch(t *testing.T) {
 	}
 }
 
+func TestIntegrationOpenFlowEndpointLifecycle(t *testing.T) {
+	if !EnvGateEnabled(os.Getenv(EnvOpenFlowChecks)) {
+		t.Skipf("set %s=1 and %s to run live OpenFlow endpoint checks", EnvOpenFlowChecks, EnvOpenFlowAddr)
+	}
+	cfg := requireIntegrationConfig(t)
+	if strings.TrimSpace(cfg.OpenFlowAddr) == "" {
+		skipOrFailIntegration(t, "OpenFlow endpoint is not configured: set %s, for example $env:%s=\"tcp:172.27.192.120:6653\"", EnvOpenFlowAddr, EnvOpenFlowAddr)
+	}
+	sdk := connectSDKOrSkip(t, cfg)
+	t.Cleanup(sdk.Close)
+
+	raw := dialOVSDBOrSkip(t, cfg.OVSAddr)
+	t.Cleanup(func() {
+		_ = raw.Close()
+	})
+
+	suffix := uniqueSuffix()
+	bridgeName := cfg.BridgeName + "-of-" + suffix
+	flowName := cfg.ResourcePrefix + "of-" + suffix
+	ctx := testContext(t)
+	requireSafeBridgeTarget(t, raw, bridgeName)
+	cleanupOVS(ctx, t, raw, bridgeName, "", "")
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cleanupOVS(cleanupCtx, t, raw, bridgeName, "", "")
+	})
+
+	controllerTarget := openFlowControllerTargetForIntegration(cfg.OpenFlowAddr)
+	if err := sdk.LocalOVS().Bridge(bridgeName).Ensure().
+		WithExternalID(testMarkerKey, testMarkerValue).
+		WithControllerTarget(controllerTarget).
+		Execute(ctx); err != nil {
+		t.Fatalf("configure OVS bridge OpenFlow controller: %v", err)
+	}
+	if err := sdk.LocalOVS().TableBy(tableBridge, colName, bridgeName).Update().
+		WithOptionalColumn("protocols", ovsSet("OpenFlow13", "OpenFlow15")).
+		Execute(ctx); err != nil {
+		t.Fatalf("configure OVS bridge OpenFlow protocols: %v", err)
+	}
+
+	of := sdk.OpenFlow().WithEndpoint(cfg.OpenFlowAddr).WithVersions(OpenFlow15, OpenFlow13)
+	session, err := dialOpenFlowEventually(ctx, of)
+	if err != nil {
+		skipOrFailIntegration(t, "OpenFlow endpoint %s is not reachable after configuring %s on bridge %s: %v", cfg.OpenFlowAddr, controllerTarget, bridgeName, err)
+	}
+	defer session.Close()
+
+	flow := OpenFlowFlow{
+		Name:       flowName,
+		Bridge:     bridgeName,
+		Cookie:     openFlowCookieForName(bridgeName, flowName),
+		CookieMask: ^uint64(0),
+		TableID:    0,
+		Priority:   100,
+		Actions:    []OpenFlowAction{{Type: OpenFlowActionOutput, Port: OpenFlowControllerPort}},
+	}
+	if err := session.AddFlow(ctx, flow); err != nil {
+		t.Fatalf("add live OpenFlow rule: %v", err)
+	}
+	if !openFlowDumpContainsCookie(t, ctx, session, flow.Cookie) {
+		t.Fatalf("live OpenFlow dump did not contain added cookie %#x", flow.Cookie)
+	}
+	if err := session.DeleteFlow(ctx, flow); err != nil {
+		t.Fatalf("delete live OpenFlow rule: %v", err)
+	}
+	if openFlowDumpContainsCookie(t, ctx, session, flow.Cookie) {
+		t.Fatalf("live OpenFlow dump still contains deleted cookie %#x", flow.Cookie)
+	}
+}
+
+func TestIntegrationOpenFlowFluentEndpointLifecycle(t *testing.T) {
+	if !EnvGateEnabled(os.Getenv(EnvOpenFlowChecks)) {
+		t.Skipf("set %s=1 and %s to run live OpenFlow fluent endpoint checks", EnvOpenFlowChecks, EnvOpenFlowAddr)
+	}
+	cfg := requireIntegrationConfig(t)
+	if strings.TrimSpace(cfg.OpenFlowAddr) == "" {
+		skipOrFailIntegration(t, "OpenFlow endpoint is not configured: set %s, for example $env:%s=\"tcp:172.27.192.120:6653\"", EnvOpenFlowAddr, EnvOpenFlowAddr)
+	}
+	sdk := connectSDKOrSkip(t, cfg)
+	t.Cleanup(sdk.Close)
+
+	raw := dialOVSDBOrSkip(t, cfg.OVSAddr)
+	t.Cleanup(func() {
+		_ = raw.Close()
+	})
+
+	suffix := uniqueSuffix()
+	bridgeName := cfg.BridgeName + "-offluent-" + suffix
+	flowName := cfg.ResourcePrefix + "offluent-" + suffix
+	ctx := testContext(t)
+	requireSafeBridgeTarget(t, raw, bridgeName)
+	cleanupOVS(ctx, t, raw, bridgeName, "", "")
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cleanupOVS(cleanupCtx, t, raw, bridgeName, "", "")
+	})
+
+	controllerTarget := openFlowControllerTargetForIntegration(cfg.OpenFlowAddr)
+	if err := sdk.LocalOVS().Bridge(bridgeName).Ensure().
+		WithExternalID(testMarkerKey, testMarkerValue).
+		WithControllerTarget(controllerTarget).
+		Execute(ctx); err != nil {
+		t.Fatalf("configure OVS bridge OpenFlow controller: %v", err)
+	}
+	if err := sdk.LocalOVS().TableBy(tableBridge, colName, bridgeName).Update().
+		WithOptionalColumn("protocols", ovsSet("OpenFlow13", "OpenFlow15")).
+		Execute(ctx); err != nil {
+		t.Fatalf("configure OVS bridge OpenFlow protocols: %v", err)
+	}
+
+	of := sdk.OpenFlow().WithEndpoint(cfg.OpenFlowAddr).WithVersions(OpenFlow15, OpenFlow13)
+	probeSession, err := dialOpenFlowEventually(ctx, of)
+	if err != nil {
+		skipOrFailIntegration(t, "OpenFlow endpoint %s is not reachable after configuring %s on bridge %s: %v", cfg.OpenFlowAddr, controllerTarget, bridgeName, err)
+	}
+	_ = probeSession.Close()
+	if err := of.Bridge(bridgeName).EnsureFlow(flowName).
+		Table(0).
+		Priority(101).
+		Actions().Output(OpenFlowControllerPort).
+		Execute(ctx); err != nil {
+		t.Fatalf("fluent add live OpenFlow rule: %v", err)
+	}
+	cookie := openFlowCookieForName(bridgeName, flowName)
+	session, err := dialOpenFlowEventually(ctx, of)
+	if err != nil {
+		t.Fatalf("dial OpenFlow endpoint for fluent dump: %v", err)
+	}
+	if !openFlowDumpContainsCookie(t, ctx, session, cookie) {
+		_ = session.Close()
+		t.Fatalf("live OpenFlow dump did not contain fluent cookie %#x", cookie)
+	}
+	_ = session.Close()
+
+	if err := of.Bridge(bridgeName).DeleteFlow(flowName).Execute(ctx); err != nil {
+		t.Fatalf("fluent delete live OpenFlow rule: %v", err)
+	}
+	session, err = dialOpenFlowEventually(ctx, of)
+	if err != nil {
+		t.Fatalf("dial OpenFlow endpoint after fluent delete: %v", err)
+	}
+	defer session.Close()
+	if openFlowDumpContainsCookie(t, ctx, session, cookie) {
+		t.Fatalf("live OpenFlow dump still contains fluent cookie %#x", cookie)
+	}
+}
+
 func requireIntegrationConfig(t *testing.T) IntegrationConfig {
 	t.Helper()
 	cfg := LoadIntegrationConfigFromEnv()
@@ -398,7 +550,57 @@ func skipOrFailIntegration(t *testing.T, format string, args ...any) {
 }
 
 func integrationTroubleshootingHint() string {
-	return "Check WSL with `ss -lntp | grep -E '6640|6641|6642'` and expose services with `ovs-vsctl set-manager ptcp:6640:0.0.0.0`, `ovn-nbctl set-connection ptcp:6641:0.0.0.0`, `ovn-sbctl set-connection ptcp:6642:0.0.0.0`."
+	return "Check WSL with `ss -lntp | grep -E '6640|6641|6642|6653'` and expose services with `ovs-vsctl set-manager ptcp:6640:0.0.0.0`, `ovn-nbctl set-connection ptcp:6641:0.0.0.0`, `ovn-sbctl set-connection ptcp:6642:0.0.0.0`; live OpenFlow checks also need ovs-vswitchd and a bridge controller target such as `ptcp:6653:0.0.0.0`."
+}
+
+func dialOpenFlowEventually(ctx context.Context, client *OpenFlowClient) (*OpenFlowSession, error) {
+	var lastErr error
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		session, err := client.Dial(ctx)
+		if err == nil {
+			return session, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, lastErr
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func openFlowDumpContainsCookie(t *testing.T, ctx context.Context, session *OpenFlowSession, cookie uint64) bool {
+	t.Helper()
+	replies, err := session.DumpFlows(ctx, OpenFlowFlowStatsRequest{Cookie: cookie, CookieMask: ^uint64(0)})
+	if err != nil {
+		t.Fatalf("dump live OpenFlow rules: %v", err)
+	}
+	want := make([]byte, 8)
+	binary.BigEndian.PutUint64(want, cookie)
+	for _, reply := range replies {
+		_, _, body, err := ParseOpenFlowMultipartReply(reply)
+		if err != nil {
+			t.Fatalf("parse live OpenFlow multipart reply: %v", err)
+		}
+		if bytes.Contains(body, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func openFlowControllerTargetForIntegration(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if strings.HasPrefix(endpoint, "tcp:") {
+		parts := strings.Split(strings.TrimPrefix(endpoint, "tcp:"), ":")
+		if len(parts) == 2 {
+			return "ptcp:" + parts[1] + ":0.0.0.0"
+		}
+	}
+	return controllerTargetFromEndpoint(endpoint)
 }
 
 func requireDatabase(t *testing.T, client *ovsdbjson.Client, expected string) {

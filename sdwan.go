@@ -93,6 +93,8 @@ type SDWANLink struct {
 	AllowedIPs []string
 	Cost       int
 	Enabled    bool
+	Disabled   bool
+	Attributes map[string]string
 }
 
 type SDWANPolicy struct {
@@ -255,6 +257,34 @@ func (b *SDWANNetworkBuilder) AddLink(link SDWANLink) *SDWANNetworkBuilder {
 func (b *SDWANNetworkBuilder) AddPolicy(name string, policy SDWANPolicy) *SDWANNetworkBuilder {
 	policy.Name = name
 	b.network.Policies = replaceSDWANPolicy(b.network.Policies, policy)
+	return b
+}
+
+func (b *SDWANNetworkBuilder) WithSiteAttribute(siteName, key, value string) *SDWANNetworkBuilder {
+	for i := range b.network.Sites {
+		if b.network.Sites[i].Name != siteName {
+			continue
+		}
+		if b.network.Sites[i].Attributes == nil {
+			b.network.Sites[i].Attributes = map[string]string{}
+		}
+		b.network.Sites[i].Attributes[key] = value
+		return b
+	}
+	return b
+}
+
+func (b *SDWANNetworkBuilder) WithLinkAttribute(linkName, key, value string) *SDWANNetworkBuilder {
+	for i := range b.network.Links {
+		if b.network.Links[i].StableName() != linkName && b.network.Links[i].Name != linkName {
+			continue
+		}
+		if b.network.Links[i].Attributes == nil {
+			b.network.Links[i].Attributes = map[string]string{}
+		}
+		b.network.Links[i].Attributes[key] = value
+		return b
+	}
 	return b
 }
 
@@ -527,6 +557,9 @@ func planSDWANApply(network SDWANNetwork) SDWANApplyPlan {
 		ops = append(ops, SDWANOperation{Action: IntentActionEnsure, Resource: "SDWANSite", Name: site.Name, Description: "ensure SD-WAN site identity and route inventory"})
 	}
 	for _, link := range links {
+		if link.Disabled || !link.Enabled {
+			continue
+		}
 		resource := "SDWANTunnel"
 		switch link.Transport {
 		case SDWANTransportWireGuard:
@@ -582,7 +615,7 @@ func normalizeSDWANLinks(network SDWANNetwork) []SDWANLink {
 		sites := normalizeSDWANSites(network.Sites)
 		for i := 0; i < len(sites); i++ {
 			for j := i + 1; j < len(sites); j++ {
-				links = replaceSDWANLink(links, SDWANLink{From: sites[i].Name, To: sites[j].Name, Transport: network.Transport, Enabled: true})
+				links = ensureAutoSDWANLink(links, SDWANLink{From: sites[i].Name, To: sites[j].Name, Transport: network.Transport, Enabled: true})
 			}
 		}
 	case SDWANTopologyHubSpoke:
@@ -595,7 +628,7 @@ func normalizeSDWANLinks(network SDWANNetwork) []SDWANLink {
 				if spoke.Name == hub.Name || strings.EqualFold(spoke.Role, "hub") || spoke.Transit || spoke.Relay {
 					continue
 				}
-				links = replaceSDWANLink(links, SDWANLink{From: hub.Name, To: spoke.Name, Transport: network.Transport, Enabled: true})
+				links = ensureAutoSDWANLink(links, SDWANLink{From: hub.Name, To: spoke.Name, Transport: network.Transport, Enabled: true})
 			}
 		}
 	}
@@ -606,13 +639,26 @@ func normalizeSDWANLinks(network SDWANNetwork) []SDWANLink {
 		if links[i].Transport == "" {
 			links[i].Transport = network.Transport
 		}
-		if !links[i].Enabled {
+		if links[i].Disabled {
+			links[i].Enabled = false
+		} else if !links[i].Enabled {
 			links[i].Enabled = true
 		}
 		links[i].AllowedIPs = uniqueStrings(links[i].AllowedIPs)
+		links[i].Attributes = cloneStringMap(links[i].Attributes)
 	}
 	sort.Slice(links, func(i, j int) bool { return links[i].StableName() < links[j].StableName() })
 	return links
+}
+
+func ensureAutoSDWANLink(base []SDWANLink, link SDWANLink) []SDWANLink {
+	name := link.StableName()
+	for i := range base {
+		if base[i].StableName() == name {
+			return base
+		}
+	}
+	return replaceSDWANLink(base, link)
 }
 
 func replaceSDWANSite(base []SDWANSite, site SDWANSite) []SDWANSite {
@@ -726,6 +772,7 @@ func cloneSDWANNetwork(in SDWANNetwork) SDWANNetwork {
 	out.Links = append([]SDWANLink{}, in.Links...)
 	for i := range out.Links {
 		out.Links[i].AllowedIPs = append([]string{}, in.Links[i].AllowedIPs...)
+		out.Links[i].Attributes = cloneStringMap(in.Links[i].Attributes)
 	}
 	out.Policies = append([]SDWANPolicy{}, in.Policies...)
 	for i := range out.Policies {

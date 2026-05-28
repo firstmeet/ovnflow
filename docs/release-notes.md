@@ -1,3 +1,49 @@
+# ovnflow v2.3.0
+
+`ovnflow` v2.3.0 completes the first production-facing SD-WAN backend layer and
+adds a live OpenFlow endpoint gate while keeping business orchestration outside
+the SDK.
+
+Install after release with:
+
+```sh
+go get github.com/firstmeet/ovnflow/v2@v2.3.0
+```
+
+## Highlights
+
+- Added live OpenFlow integration against real `ovs-vswitchd` bridge controller
+  endpoints: add a native flow, dump flow stats, delete it, and verify the
+  named cookie is gone.
+- Added the Linux-only `sdwanlinux` backend for WireGuard command execution,
+  Linux route/policy-rule installation, OVS Geneve/VXLAN tunnel rows, and
+  optional L2 OpenFlow rule installation.
+- Added open SD-WAN agent/control-plane primitives for registration,
+  capabilities, heartbeat, assignment, and assignment ACK/status.
+- Added SD-WAN site/link attributes and disabled-link semantics without
+  changing the existing `SDWANBackend` interface.
+
+## Boundaries
+
+- Default SD-WAN remains in-memory; production callers explicitly inject the
+  `sdwanlinux` backend or their own backend.
+- HA election, failover policy, tenant/user models, scheduling, approval, and
+  private controller loops remain caller responsibilities.
+- Ordinary tests still do not require OVS, WSL, Docker, WireGuard, root, or
+  Linux tools.
+
+## Validation
+
+- `go test -count=1 ./...`
+- `go vet ./...`
+- `go -C tools/sdkcheck test -count=1 ./...`
+- `GOOS=linux GOARCH=amd64 go test -c ./sdwanlinux`
+- Docker OVN/OVS integration, live OpenFlow endpoint checks, SD-WAN OVS tunnel
+  and OpenFlow hook checks, mutation gates, privileged SD-WAN WireGuard/route checks, and
+  privileged LinuxRouter matrix in GitHub Actions.
+
+---
+
 # ovnflow v2.2.0
 
 `ovnflow` v2.2.0 adds the native flow-programming and SD-WAN foundation layer

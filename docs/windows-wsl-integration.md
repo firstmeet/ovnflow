@@ -26,7 +26,7 @@ Inside WSL, confirm that the OVSDB endpoints are listening on the WSL network
 interface or on all interfaces, not only on `127.0.0.1`:
 
 ```bash
-ss -lntp | grep -E '6640|6641|6642'
+ss -lntp | grep -E '6640|6641|6642|6653'
 sudo ovs-vsctl set-manager ptcp:6640:0.0.0.0
 ovn-nbctl set-connection ptcp:6641:0.0.0.0
 ovn-sbctl set-connection ptcp:6642:0.0.0.0
@@ -38,6 +38,7 @@ From Windows, verify TCP reachability before running integration tests:
 Test-NetConnection 172.27.192.120 -Port 6640
 Test-NetConnection 172.27.192.120 -Port 6641
 Test-NetConnection 172.27.192.120 -Port 6642
+Test-NetConnection 172.27.192.120 -Port 6653
 ```
 
 If any endpoint is missing or unreachable, integration tests skip and print the
@@ -79,6 +80,7 @@ the same TCP ports:
 - Open_vSwitch OVSDB: `6640`
 - OVN Northbound: `6641`
 - OVN Southbound: `6642`
+- OVS OpenFlow endpoint: `6653`
 
 The same Go test code works for a long-running WSL setup and for a disposable
 Docker setup because both modes are configured only through endpoint
@@ -94,4 +96,49 @@ OVNFLOW_OVN_SB_ADDR=tcp:127.0.0.1:6642 \
 OVNFLOW_REQUIRE_INTEGRATION=1 \
 go test -tags=integration ./...
 docker compose down -v
+```
+
+Live OpenFlow checks are gated separately because they require `ovs-vswitchd`
+and a bridge controller endpoint:
+
+```powershell
+$env:OVNFLOW_OPENFLOW_ADDR="tcp:172.27.192.120:6653"
+$env:OVNFLOW_OPENFLOW_CHECKS="1"
+go test -tags=integration -run 'TestIntegrationOpenFlow(Endpoint|FluentEndpoint)Lifecycle' ./...
+```
+
+## SD-WAN backend gates
+
+Ordinary Windows tests compile the public surface and use fake executors; they
+do not modify host networking. Linux/WSL runs can opt into backend checks with
+explicit gates:
+
+| Gate | Test | Needs root | Dependencies |
+| --- | --- | --- | --- |
+| `OVNFLOW_SDWAN_BACKEND_CHECKS=1` + `OVNFLOW_OVS_TUNNEL_CHECKS=1` | `TestIntegrationSDWANOVSTunnelLifecycle` | No | reachable OVSDB `6640/6641/6642` |
+| `OVNFLOW_SDWAN_BACKEND_CHECKS=1` + `OVNFLOW_OVS_TUNNEL_CHECKS=1` + `OVNFLOW_OPENFLOW_CHECKS=1` | `TestIntegrationSDWANOpenFlowHookLifecycle` | No | reachable OVSDB and OpenFlow `6653` |
+| `OVNFLOW_SDWAN_BACKEND_CHECKS=1` + `OVNFLOW_SDWAN_PRIVILEGED_CHECKS=1` + `OVNFLOW_WIREGUARD_CHECKS=1` + `OVNFLOW_LINUX_ROUTE_CHECKS=1` | `TestIntegrationSDWANWireGuardLinuxRouteLifecycle` | Yes | `iproute2`, `wireguard-tools`, WireGuard kernel support |
+
+From WSL/Linux with OVSDB endpoints available:
+
+```bash
+OVNFLOW_OVS_ADDR=tcp:127.0.0.1:6640 \
+OVNFLOW_OVN_NB_ADDR=tcp:127.0.0.1:6641 \
+OVNFLOW_OVN_SB_ADDR=tcp:127.0.0.1:6642 \
+OVNFLOW_OPENFLOW_ADDR=tcp:127.0.0.1:6653 \
+OVNFLOW_SDWAN_BACKEND_CHECKS=1 \
+OVNFLOW_OVS_TUNNEL_CHECKS=1 \
+OVNFLOW_OPENFLOW_CHECKS=1 \
+go test -tags=integration -count=1 -v -run 'TestIntegrationSDWAN(OVSTunnel|OpenFlowHook)Lifecycle' ./sdwanlinux
+```
+
+Privileged WireGuard/Linux route validation:
+
+```bash
+sudo -E env \
+  OVNFLOW_SDWAN_BACKEND_CHECKS=1 \
+  OVNFLOW_SDWAN_PRIVILEGED_CHECKS=1 \
+  OVNFLOW_WIREGUARD_CHECKS=1 \
+  OVNFLOW_LINUX_ROUTE_CHECKS=1 \
+  go test -tags=integration -count=1 -v -run TestIntegrationSDWANWireGuardLinuxRouteLifecycle ./sdwanlinux
 ```

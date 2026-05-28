@@ -110,9 +110,10 @@ func (c IntegrationConfig) Validate() error {
 		return fmt.Errorf("%s=br-int requires %s=1", EnvTestBridge, EnvAllowBRInt)
 	}
 	for name, endpoint := range map[string]string{
-		EnvOVSAddr:   c.OVSAddr,
-		EnvOVNNBAddr: c.OVNNBAddr,
-		EnvOVNSBAddr: c.OVNSBAddr,
+		EnvOVSAddr:      c.OVSAddr,
+		EnvOVNNBAddr:    c.OVNNBAddr,
+		EnvOVNSBAddr:    c.OVNSBAddr,
+		EnvOpenFlowAddr: c.OpenFlowAddr,
 	} {
 		if strings.TrimSpace(endpoint) != "" && !strings.HasPrefix(strings.TrimSpace(endpoint), "tcp:") {
 			return fmt.Errorf("%s must use a tcp: endpoint for Windows/WSL integration tests", name)

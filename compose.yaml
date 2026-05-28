@@ -6,6 +6,7 @@ services:
       - "6640:6640"
       - "6641:6641"
       - "6642:6642"
+      - "6653:6653"
     command:
       - /bin/sh
       - -c
@@ -18,6 +19,7 @@ services:
         test -f /etc/openvswitch/conf.db || ovsdb-tool create /etc/openvswitch/conf.db /usr/share/openvswitch/vswitch.ovsschema
         ovsdb-server --remote=punix:/var/run/openvswitch/db.sock --remote=ptcp:6640:0.0.0.0 --pidfile --detach /etc/openvswitch/conf.db
         ovs-vsctl --no-wait init
+        ovs-vswitchd unix:/var/run/openvswitch/db.sock --pidfile --detach --log-file=/var/log/openvswitch/ovs-vswitchd.log
         mkdir -p /var/run/ovn /var/log/ovn /etc/ovn
         test -f /etc/ovn/ovnnb_db.db || ovsdb-tool create /etc/ovn/ovnnb_db.db /usr/share/ovn/ovn-nb.ovsschema
         test -f /etc/ovn/ovnsb_db.db || ovsdb-tool create /etc/ovn/ovnsb_db.db /usr/share/ovn/ovn-sb.ovsschema

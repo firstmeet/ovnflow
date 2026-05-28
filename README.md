@@ -15,8 +15,8 @@ The current SDK surface covers:
 | OVN Northbound | logical switch/port plus router, router port, ACL, NAT, load balancer, DHCP, DNS, QoS, meter, port group, address set, OVN gateway, HA chassis group, and BFD table builders |
 | OVN Southbound | typed list/get/watch for chassis, port binding, datapath, logical flow, MAC/FDB, multicast, service monitor, RBAC, meter, DNS, and BFD |
 | Open_vSwitch | bridge/port/interface lifecycle plus controller, manager, mirror, QoS, queue, flow table, NetFlow, sFlow, IPFIX, SSL, and AutoAttach fluent table APIs |
-| OpenFlow | native OpenFlow 1.5/1.3 negotiation, message codec, flow add/delete/dump primitives, and fluent owned-rule builders without shelling out to `ovs-ofctl` |
-| SD-WAN | open Site/Link/Tunnel/Policy primitives with explicit Partial Mesh links, Hub-Spoke/Full Mesh planning, L2/L3 overlay modes, WireGuard/Geneve/VXLAN transports, and pluggable Apply backends |
+| OpenFlow | native OpenFlow 1.5/1.3 negotiation, message codec, flow add/delete/dump primitives, fluent owned-rule builders without shelling out to `ovs-ofctl`, and live OVS endpoint integration gates |
+| SD-WAN | open Site/Link/Tunnel/Policy primitives with explicit Partial Mesh links, Hub-Spoke/Full Mesh planning, disabled links, L2/L3 overlay modes, WireGuard/Geneve/VXLAN transports, Linux route/OVS tunnel/OpenFlow backend hooks, agent/control-plane primitives, and pluggable Apply backends |
 | v2 intent | platform-neutral `VirtualNetwork`, `LogicalSwitchDNS`, `WorkloadAttachment`, `ProviderNetwork`, `SecurityPolicy`, `NetworkService`, and `QoSPolicy` with owner/label metadata, dry-run/reconcile, typed get/inspect, and delete helpers |
 | IPAM | pure Go IPv4 CIDR planning, gateway/reserved/excluded address handling, allocation, release, availability, and overlap checks without running a persistent IPAM service |
 | LinuxRouter | optional Linux-only namespace router model with DNSMasq, SNAT/MASQUERADE/DNAT/port-forward/destination-map, firewall rules, fake executor tests, and a Linux command backend |
@@ -112,6 +112,30 @@ err = client.SDWAN().
 if err != nil {
     return err
 }
+
+agentPlane := ovnflow.NewInMemorySDWANControlPlane()
+_, err = agentPlane.RegisterAgent(ctx, ovnflow.SDWANAgent{
+    ID:   "edge-a-agent",
+    Site: "edge-a",
+    Capabilities: ovnflow.SDWANAgentCapabilities{
+        Transports: []ovnflow.SDWANTransport{ovnflow.SDWANTransportWireGuard},
+        Layers:     []ovnflow.SDWANLayer{ovnflow.SDWANLayerL3},
+        Features:   []string{ovnflow.SDWANAgentFeatureWireGuard, ovnflow.SDWANAgentFeatureLinuxRoute},
+    },
+})
+if err != nil {
+    return err
+}
+
+linuxWAN, err := sdwanlinux.NewBackend(sdwanlinux.Config{
+    LocalSite: "edge-a",
+    OVS:       sdwanlinux.NewOVSManager(client.LocalOVS()),
+    OpenFlow:  sdwanlinux.NewOpenFlowManager(client.OpenFlow().WithEndpoint("tcp:127.0.0.1:6653")),
+})
+if err != nil {
+    return err
+}
+client.UseSDWANBackend(linuxWAN)
 
 network, err := client.OVN().NB().VirtualNetwork("net-web").Get(ctx)
 if err != nil {
@@ -261,6 +285,26 @@ $env:OVNFLOW_V2_MUTATION_CHECKS="1"
 go test -tags=integration ./...
 ```
 
+Live OpenFlow checks require `ovs-vswitchd` and an OpenFlow endpoint:
+
+```powershell
+$env:OVNFLOW_OPENFLOW_ADDR="tcp:172.27.192.120:6653"
+$env:OVNFLOW_OPENFLOW_CHECKS="1"
+go test -tags=integration -run 'TestIntegrationOpenFlow(Endpoint|FluentEndpoint)Lifecycle' ./...
+```
+
+Linux SD-WAN backend checks are explicit gates. OVS tunnel checks use OVSDB;
+WireGuard and Linux route checks require root or `CAP_NET_ADMIN`:
+
+```bash
+OVNFLOW_SDWAN_BACKEND_CHECKS=1 OVNFLOW_OVS_TUNNEL_CHECKS=1 OVNFLOW_OPENFLOW_CHECKS=1 \
+  go test -tags=integration -run 'TestIntegrationSDWAN(OVSTunnel|OpenFlowHook)Lifecycle' ./sdwanlinux
+
+sudo -E env OVNFLOW_SDWAN_BACKEND_CHECKS=1 OVNFLOW_SDWAN_PRIVILEGED_CHECKS=1 \
+  OVNFLOW_WIREGUARD_CHECKS=1 OVNFLOW_LINUX_ROUTE_CHECKS=1 \
+  go test -tags=integration -run TestIntegrationSDWANWireGuardLinuxRouteLifecycle ./sdwanlinux
+```
+
 CI and release validation set `OVNFLOW_REQUIRE_INTEGRATION=1`, which turns
 missing or unreachable endpoints into test failures instead of skips.
 
@@ -282,5 +326,6 @@ surface. The [v0.1 scope](docs/v0.1-scope.md) and
 The delivered v2.0.0 high-level, platform-neutral intent APIs are recorded in
 [v2.0 acceptance](docs/v2.0-plan.md). The v2.1 implementation boundary is in
 [v2.1 plan](docs/v2.1-plan.md). The native OpenFlow and SD-WAN foundation
-boundary is in [v2.2 plan](docs/v2.2-plan.md). Future v2.x candidates and
+boundary is in [v2.2 plan](docs/v2.2-plan.md). The v2.3 production backend
+scope is in [v2.3 plan](docs/v2.3-plan.md). Future v2.x candidates and
 deeper hardening work are tracked in [roadmap](docs/roadmap.md).
