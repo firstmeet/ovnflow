@@ -1019,18 +1019,6 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
-func sortedMapKeys(values map[string]string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
 func cloneRouteStatuses(in []RouteStatus) []RouteStatus {
 	return append([]RouteStatus{}, in...)
 }

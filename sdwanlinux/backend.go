@@ -452,10 +452,6 @@ func (b *Backend) tunnelInterface(network ovnflow.SDWANNetwork, link ovnflow.SDW
 	}
 }
 
-func (b *Backend) siteInterface(network ovnflow.SDWANNetwork, site ovnflow.SDWANSite) string {
-	return interfaceName(b.ifacePrefix, "st", network.Name, site.Name)
-}
-
 type sdkOVSManager struct {
 	ovs *ovnflow.OVSClient
 }

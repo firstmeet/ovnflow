@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -129,6 +130,18 @@ func appendExternalIDArgs(args []string, values map[string]string) []string {
 		args = append(args, "external_ids:"+key+"="+values[key])
 	}
 	return args
+}
+
+func sortedMapKeys(values map[string]string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func renderRouteCommand(ns string, route Route) Command {
