@@ -20,6 +20,10 @@ const (
 	// tcp:172.27.192.120:6642.
 	EnvOVNSBAddr = "OVNFLOW_OVN_SB_ADDR"
 
+	// EnvOpenFlowAddr points at an OpenFlow controller endpoint exposed by OVS,
+	// for example tcp:127.0.0.1:6653.
+	EnvOpenFlowAddr = "OVNFLOW_OPENFLOW_ADDR"
+
 	// EnvTestResourcePrefix controls the prefix used for all integration-test
 	// rows created in OVN and OVS.
 	EnvTestResourcePrefix = "OVNFLOW_TEST_PREFIX"
@@ -49,6 +53,7 @@ type IntegrationConfig struct {
 	OVSAddr        string
 	OVNNBAddr      string
 	OVNSBAddr      string
+	OpenFlowAddr   string
 	ResourcePrefix string
 	BridgeName     string
 	AllowBRInt     bool
@@ -62,6 +67,7 @@ func LoadIntegrationConfigFromEnv() IntegrationConfig {
 		OVSAddr:        strings.TrimSpace(os.Getenv(EnvOVSAddr)),
 		OVNNBAddr:      strings.TrimSpace(os.Getenv(EnvOVNNBAddr)),
 		OVNSBAddr:      strings.TrimSpace(os.Getenv(EnvOVNSBAddr)),
+		OpenFlowAddr:   strings.TrimSpace(os.Getenv(EnvOpenFlowAddr)),
 		ResourcePrefix: envOrDefault(EnvTestResourcePrefix, DefaultIntegrationResourcePrefix),
 		BridgeName:     envOrDefault(EnvTestBridge, DefaultIntegrationBridge),
 		AllowBRInt:     parseEnvBool(os.Getenv(EnvAllowBRInt)),

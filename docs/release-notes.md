@@ -1,3 +1,53 @@
+# ovnflow v2.2.0
+
+`ovnflow` v2.2.0 adds the native flow-programming and SD-WAN foundation layer
+while keeping controller-specific policy outside the SDK.
+
+Install after release with:
+
+```sh
+go get github.com/firstmeet/ovnflow/v2@v2.2.0
+```
+
+## Highlights
+
+- Added a pure Go OpenFlow 1.5/1.3 codec and thin client for hello/version
+  negotiation, features request/reply, flow-mod, multipart flow dump envelopes,
+  protocol errors, OXM basic matches, output actions, and set-field actions.
+- Added `client.OpenFlow()` bridge-scoped fluent owned-rule builders with
+  deterministic ovnflow cookie ownership and optional OVS controller endpoint
+  setup.
+- Added SD-WAN foundation APIs for Site, Link, Policy, L2/L3 overlay mode,
+  explicit Partial Mesh links, Hub-Spoke/Full Mesh planning,
+  WireGuard/Geneve/VXLAN transports, dry-run, Apply, Get, Delete, and
+  pluggable backends.
+- Added a public SD-WAN backend injection path through `Config.SDWAN`,
+  `Client.UseSDWANBackend`, and `NewSDWANClient(customBackend)`.
+- Hardened OpenFlow wire encoding for flow stats requests, set-field action
+  alignment, OXM VLAN parsing, and exact named-flow deletes.
+
+## Boundaries
+
+- OpenFlow is native socket protocol code and does not shell out to
+  `ovs-ofctl`.
+- SD-WAN remains an open foundation layer. Private tenant/user models,
+  schedulers, HA election, and full controller policy loops stay in the
+  caller's control plane.
+- Live OpenFlow bridge-controller integration tests and production SD-WAN
+  backends are future hardening items; v2.2.0 ships the protocol, planning
+  model, fluent API, and backend contract.
+
+## Validation
+
+- `go test -count=1 ./...`
+- `go vet ./...`
+- `go -C tools/sdkcheck test -count=1 ./...`
+- Docker OVN/OVS integration and mutation gates in GitHub Actions
+- Release workflow privileged LinuxRouter matrix for `auto`, `nftables`, and
+  `iptables`
+
+---
+
 # ovnflow v2.1.0
 
 `ovnflow` v2.1.0 expands the open v2 foundation with pure planning helpers,

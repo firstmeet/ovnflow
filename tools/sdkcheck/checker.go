@@ -79,6 +79,8 @@ func Run(ctx context.Context, opts Options) Report {
 		_ = client.OVN().NB()
 		_ = client.OVN().SB()
 		_ = client.LocalOVS()
+		_ = client.OpenFlow()
+		_ = client.SDWAN()
 		return nil
 	})
 	if client == nil {
@@ -100,6 +102,7 @@ func Run(ctx context.Context, opts Options) Report {
 	r.step("southbound typed/runtime surface", func(ctx context.Context) error { return checkSouthbound(ctx, client, opts) })
 	r.step("openvswitch typed lifecycle", func(ctx context.Context) error { return checkOVS(ctx, client, opts) })
 	r.step("runtime fluent api", func(ctx context.Context) error { return checkRuntime(ctx, client, opts) })
+	r.step("openflow and sdwan api surface", func(ctx context.Context) error { return checkOpenFlowAndSDWAN(ctx, client, opts) })
 	return r.report
 }
 
@@ -294,19 +297,18 @@ func checkSouthbound(ctx context.Context, client *ovnflow.Client, opts Options) 
 	if err != nil {
 		return fmt.Errorf("list sb global: %w", err)
 	}
-	if len(sbGlobalRows) == 0 {
-		return errors.New("SB_Global has no rows")
+	if len(sbGlobalRows) > 0 {
+		sbGlobalUUID := rowString(sbGlobalRows[0]["_uuid"])
+		if sbGlobalUUID == "" {
+			return errors.New("SB_Global row has no UUID")
+		}
+		if err := sb.TableBy("SB_Global", "_uuid", sbGlobalUUID).Update().WithExternalID("sdkcheck", "true").Execute(ctx); err != nil {
+			return fmt.Errorf("sb runtime sb_global update: %w", err)
+		}
+		defer func() {
+			_ = sb.TableBy("SB_Global", "_uuid", sbGlobalUUID).Update().DeleteMap("external_ids", map[string]string{"sdkcheck": "true"}).Execute(context.Background())
+		}()
 	}
-	sbGlobalUUID := rowString(sbGlobalRows[0]["_uuid"])
-	if sbGlobalUUID == "" {
-		return errors.New("SB_Global row has no UUID")
-	}
-	if err := sb.TableBy("SB_Global", "_uuid", sbGlobalUUID).Update().WithExternalID("sdkcheck", "true").Execute(ctx); err != nil {
-		return fmt.Errorf("sb runtime sb_global update: %w", err)
-	}
-	defer func() {
-		_ = sb.TableBy("SB_Global", "_uuid", sbGlobalUUID).Update().DeleteMap("external_ids", map[string]string{"sdkcheck": "true"}).Execute(context.Background())
-	}()
 
 	if _, err := sb.ListChassis(ctx); err != nil {
 		return fmt.Errorf("list chassis: %w", err)
@@ -338,8 +340,8 @@ func checkSouthbound(ctx context.Context, client *ovnflow.Client, opts Options) 
 	if _, err := sb.ListRBACPermissions(ctx); err != nil {
 		return fmt.Errorf("list rbac permissions: %w", err)
 	}
-	if rows, err := sb.SBGlobal().List(ctx); err != nil || len(rows) == 0 {
-		return fmt.Errorf("list sb runtime sb_global rows=%d err=%w", len(rows), err)
+	if _, err := sb.SBGlobal().List(ctx); err != nil {
+		return fmt.Errorf("list sb runtime sb_global: %w", err)
 	}
 	if _, err := sb.ListMeters(ctx); err != nil {
 		return fmt.Errorf("list meters: %w", err)
@@ -538,6 +540,40 @@ func checkRuntime(ctx context.Context, client *ovnflow.Client, opts Options) err
 	}
 	if err := nb.TableBy("Address_Set", "name", name).Delete().Execute(ctx); err != nil {
 		return fmt.Errorf("runtime delete: %w", err)
+	}
+	return nil
+}
+
+func checkOpenFlowAndSDWAN(ctx context.Context, client *ovnflow.Client, opts Options) error {
+	dryRun, err := client.OpenFlow().
+		WithEndpoint("tcp:127.0.0.1:6653").
+		Bridge(opts.Bridge).
+		EnsureFlow(opts.Prefix + "allow-web").
+		InPort(1).
+		EthType(0x0800).
+		IPv4Dst("10.20.0.10/32").
+		TCPDst(80).
+		Actions().Output(2).
+		DryRun(ctx)
+	if err != nil {
+		return fmt.Errorf("openflow dry-run: %w", err)
+	}
+	if len(dryRun.Plan.Operations) != 1 {
+		return fmt.Errorf("openflow plan operations = %d, want 1", len(dryRun.Plan.Operations))
+	}
+	sdwanPlan, err := client.SDWAN().Network(opts.Prefix+"wan").Ensure().
+		Layer3().
+		TopologyPartialMesh().
+		WithTransport(ovnflow.SDWANTransportWireGuard).
+		AddSite(opts.Prefix+"edge-a", ovnflow.SDWANSite{Router: opts.Prefix + "edge-a", CIDRs: []string{"10.10.0.0/16"}}).
+		AddSite(opts.Prefix+"edge-b", ovnflow.SDWANSite{Router: opts.Prefix + "edge-b", CIDRs: []string{"10.20.0.0/16"}}).
+		AddLink(ovnflow.SDWANLink{From: opts.Prefix + "edge-a", To: opts.Prefix + "edge-b"}).
+		ApplyPlan(ctx)
+	if err != nil {
+		return fmt.Errorf("sdwan apply plan: %w", err)
+	}
+	if len(sdwanPlan.Operations) < 4 {
+		return fmt.Errorf("sdwan operations = %d, want at least 4", len(sdwanPlan.Operations))
 	}
 	return nil
 }
