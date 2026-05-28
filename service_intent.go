@@ -497,14 +497,20 @@ func serviceVIPsFromMap(vips map[string]string) []ServiceVIP {
 }
 
 func staleServiceVIPKeys(current, desired []ServiceVIP) []string {
-	want := map[string]struct{}{}
+	want := serviceVIPComparable(desired)
+	have := serviceVIPComparable(current)
+	keys := map[string]struct{}{}
 	for _, vip := range desired {
-		want[vip.String()] = struct{}{}
+		keys[vip.String()] = struct{}{}
 	}
 	var remove []string
 	for _, vip := range current {
 		key := vip.String()
-		if _, ok := want[key]; !ok {
+		if _, ok := keys[key]; !ok {
+			remove = append(remove, key)
+			continue
+		}
+		if strings.Join(have[key], ",") != strings.Join(want[key], ",") {
 			remove = append(remove, key)
 		}
 	}

@@ -195,7 +195,7 @@ func TestNetworkServiceReconcileRemovesStaleVIPs(t *testing.T) {
 	existingRow := libovsdb.Row{
 		colUUID:        "lb-uuid",
 		colName:        "svc-web",
-		colVIPs:        ovsMap(map[string]string{"192.0.2.10:80": "10.0.0.2:8080", "192.0.2.20:80": "10.0.0.9:8080"}),
+		colVIPs:        ovsMap(map[string]string{"192.0.2.10:80": "10.0.0.2:8080,10.0.0.3:8080", "192.0.2.20:80": "10.0.0.9:8080"}),
 		colProtocol:    "tcp",
 		colExternalIDs: ovsMap(ownerIDs),
 	}
@@ -220,18 +220,30 @@ func TestNetworkServiceReconcileRemovesStaleVIPs(t *testing.T) {
 	}
 
 	var removedStale bool
+	var removedChanged bool
 	for _, op := range rec.ops {
 		if op.Op != libovsdb.OperationMutate || op.Table != tableLoadBalancer {
 			continue
 		}
 		for _, mutation := range op.Mutations {
 			if mutation.Column == colVIPs && mutation.Mutator == libovsdb.MutateOperationDelete {
-				removedStale = true
+				keys := mutation.Value.(libovsdb.OvsSet).GoSet
+				for _, key := range keys {
+					if key == "192.0.2.20:80" {
+						removedStale = true
+					}
+					if key == "192.0.2.10:80" {
+						removedChanged = true
+					}
+				}
 			}
 		}
 	}
 	if !removedStale {
 		t.Fatalf("ops did not delete stale VIP: %#v", rec.ops)
+	}
+	if !removedChanged {
+		t.Fatalf("ops did not delete changed VIP before reinserting: %#v", rec.ops)
 	}
 }
 
