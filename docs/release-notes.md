@@ -1,4 +1,4 @@
-# ovnflow v2.1.0 draft
+# ovnflow v2.1.0
 
 `ovnflow` v2.1.0 expands the open v2 foundation with pure planning helpers,
 service and QoS intents, and read-only operational plans.
