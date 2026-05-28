@@ -85,6 +85,16 @@ The v2 gates use these environment constants:
 - `OVNFLOW_V2_MUTATION_CHECKS`
 - `OVNFLOW_LINUX_ROUTER_CHECKS`
 - `OVNFLOW_NAT_BACKEND=auto|nftables|iptables`
+- `OVNFLOW_OPENFLOW_CHECKS`
+- `OVNFLOW_SDWAN_BACKEND_CHECKS`
+- `OVNFLOW_SDWAN_PRIVILEGED_CHECKS`
+- `OVNFLOW_WIREGUARD_CHECKS`
+- `OVNFLOW_OVS_TUNNEL_CHECKS`
+- `OVNFLOW_LINUX_ROUTE_CHECKS`
 
 `release.yml` includes a privileged LinuxRouter matrix for nftables and
 iptables, so the GitHub Release job waits for both backends before publishing.
+
+v2.3 keeps the original `SDWANBackend` interface stable and adds production
+runtime support through the injectable Linux-only `sdwanlinux` package plus
+neutral SD-WAN agent/control-plane primitives in the root package.

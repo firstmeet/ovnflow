@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/firstmeet/ovnflow/v2"
+	"github.com/firstmeet/ovnflow/v2/sdwanlinux"
 )
 
 const (
@@ -575,6 +576,31 @@ func checkOpenFlowAndSDWAN(ctx context.Context, client *ovnflow.Client, opts Opt
 	if len(sdwanPlan.Operations) < 4 {
 		return fmt.Errorf("sdwan operations = %d, want at least 4", len(sdwanPlan.Operations))
 	}
+	controlPlane := ovnflow.NewInMemorySDWANControlPlane()
+	if _, err := controlPlane.RegisterAgent(ctx, ovnflow.SDWANAgent{
+		ID:   opts.Prefix + "agent-a",
+		Site: opts.Prefix + "edge-a",
+		Capabilities: ovnflow.SDWANAgentCapabilities{
+			Transports: []ovnflow.SDWANTransport{ovnflow.SDWANTransportWireGuard},
+			Layers:     []ovnflow.SDWANLayer{ovnflow.SDWANLayerL3},
+			Features:   []string{ovnflow.SDWANAgentFeatureWireGuard, ovnflow.SDWANAgentFeatureLinuxRoute},
+		},
+	}); err != nil {
+		return fmt.Errorf("sdwan agent register: %w", err)
+	}
+	if _, err := controlPlane.AssignSDWAN(ctx, opts.Prefix+"agent-a", ovnflow.SDWANNetwork{
+		Name:      opts.Prefix + "agent-wan",
+		Layer:     ovnflow.SDWANLayerL3,
+		Transport: ovnflow.SDWANTransportWireGuard,
+		Sites: []ovnflow.SDWANSite{
+			{Name: opts.Prefix + "edge-a", Router: opts.Prefix + "edge-a", CIDRs: []string{"10.30.0.0/16"}},
+			{Name: opts.Prefix + "edge-b", Router: opts.Prefix + "edge-b", CIDRs: []string{"10.40.0.0/16"}},
+		},
+		Links: []ovnflow.SDWANLink{{From: opts.Prefix + "edge-a", To: opts.Prefix + "edge-b"}},
+	}, sdwanPlan); err != nil {
+		return fmt.Errorf("sdwan assignment: %w", err)
+	}
+	_ = sdwanlinux.Config{LocalSite: opts.Prefix + "edge-a"}
 	return nil
 }
 

@@ -2,6 +2,25 @@
 
 All notable changes to `ovnflow` are tracked here.
 
+## v2.3.0 - unreleased
+
+### Added
+
+- Live OpenFlow endpoint integration gate against real `ovs-vswitchd` bridge
+  controllers, covering add, dump, delete, and named-cookie verification.
+- Linux-only `sdwanlinux` backend with WireGuard, Linux route/policy-rule, OVS
+  Geneve/VXLAN tunnel, and optional OpenFlow rule hooks.
+- SD-WAN agent/control-plane primitives for agent registration, capabilities,
+  heartbeat, assignment, and ACK/status.
+- SD-WAN site/link attributes and disabled-link semantics without changing the
+  existing `SDWANBackend` interface.
+
+### Hardened
+
+- Docker integration now starts `ovs-vswitchd` and exposes OpenFlow `6653`.
+- OVS tunnel cleanup verifies ovnflow SD-WAN ownership markers before deleting
+  tunnel ports.
+
 ## v2.2.0 - 2026-05-28
 
 ### Added

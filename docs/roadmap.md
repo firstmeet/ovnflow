@@ -63,6 +63,19 @@ Those business models stay outside the foundation SDK.
   Partial Mesh links, Hub-Spoke/Full Mesh planning, WireGuard/Geneve/VXLAN
   transports, dry-run, Apply, Get, Delete, and pluggable backends.
 
+## Delivered in v2.3.0
+
+- Live OpenFlow integration tests against a real OVS bridge controller endpoint,
+  including add, dump, delete, and cookie disappearance checks.
+- Linux-only `sdwanlinux` production backend hooks for WireGuard interfaces,
+  Linux routes and policy rules, OVS Geneve/VXLAN tunnel rows, and optional L2
+  OpenFlow rules.
+- Open SD-WAN agent/control-plane primitives for registration, capabilities,
+  heartbeat, assignments, and assignment ACK/status without embedding private
+  business scheduling logic.
+- SD-WAN disabled-link semantics and site/link attributes for backend-specific
+  runtime settings while preserving the existing backend interface.
+
 ## v2.x Candidates
 
 The next feature work should build on the delivered v2 primitives:
@@ -83,10 +96,10 @@ The next feature work should build on the delivered v2 primitives:
   provider-network changes.
 - Service and load-balancer hardening over health metadata and richer port
   mappings.
-- Live OpenFlow integration tests against a real OVS bridge controller,
-  including add/delete/dump, protocol error replies, and version fallback.
-- Production SD-WAN backends for Linux routes, WireGuard, OVS tunnel rows, and
-  OpenFlow rule installation.
+- Broader live OpenFlow compatibility checks, including explicit protocol error
+  replies and multi-version fallback matrices.
+- Privileged packet-level SD-WAN backend integration across WireGuard, Linux
+  route tables, OVS tunnels, and OpenFlow forwarding.
 - OVS QoS/Queue high-level intent to complement the OVN QoS policy intent.
 - Traffic mirror, capture, and debug-flow helpers over OVS mirror/sampling and
   OVN/SB runtime state.

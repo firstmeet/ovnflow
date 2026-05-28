@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       linuxrouter:
-        description: "Run privileged LinuxRouter integration checks"
+        description: "Run privileged LinuxRouter and SD-WAN backend integration checks"
         required: false
         default: "false"
 
@@ -38,6 +38,7 @@ jobs:
       - run: go test -count=1 ./...
       - run: go vet ./...
       - run: go -C tools/sdkcheck test -count=1 ./...
+      - run: go test -c ./sdwanlinux
       - run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
       - run: go test -race -count=1 ./...
@@ -79,6 +80,16 @@ jobs:
           wait_db tcp:127.0.0.1:6640 Open_vSwitch
           wait_db tcp:127.0.0.1:6641 OVN_Northbound
           wait_db tcp:127.0.0.1:6642 OVN_Southbound
+          for i in $(seq 1 60); do
+            if docker compose exec -T ovs-ovn sh -c "pgrep ovs-vswitchd >/dev/null && ovs-vsctl --timeout=2 show >/dev/null"; then
+              echo "ovs-vswitchd is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::ovs-vswitchd did not become ready"
+          docker compose logs ovs-ovn || true
+          exit 1
       - run: go test -tags=integration -count=1 -v ./...
         env:
           OVNFLOW_OVS_ADDR: tcp:127.0.0.1:6640
@@ -87,6 +98,24 @@ jobs:
           OVNFLOW_REQUIRE_INTEGRATION: "1"
           OVNFLOW_V1_SCHEMA_CHECKS: "1"
           OVNFLOW_V2_SCHEMA_CHECKS: "1"
+      - run: go test -tags=integration -count=1 -v -run 'TestIntegrationOpenFlow(Endpoint|FluentEndpoint)Lifecycle' ./...
+        env:
+          OVNFLOW_OVS_ADDR: tcp:127.0.0.1:6640
+          OVNFLOW_OVN_NB_ADDR: tcp:127.0.0.1:6641
+          OVNFLOW_OVN_SB_ADDR: tcp:127.0.0.1:6642
+          OVNFLOW_OPENFLOW_ADDR: tcp:127.0.0.1:6653
+          OVNFLOW_REQUIRE_INTEGRATION: "1"
+          OVNFLOW_OPENFLOW_CHECKS: "1"
+      - run: go test -tags=integration -count=1 -v -run 'TestIntegrationSDWAN(OVSTunnel|OpenFlowHook)Lifecycle' ./sdwanlinux
+        env:
+          OVNFLOW_OVS_ADDR: tcp:127.0.0.1:6640
+          OVNFLOW_OVN_NB_ADDR: tcp:127.0.0.1:6641
+          OVNFLOW_OVN_SB_ADDR: tcp:127.0.0.1:6642
+          OVNFLOW_OPENFLOW_ADDR: tcp:127.0.0.1:6653
+          OVNFLOW_TEST_BRIDGE: br-ovnflow-it
+          OVNFLOW_SDWAN_BACKEND_CHECKS: "1"
+          OVNFLOW_OVS_TUNNEL_CHECKS: "1"
+          OVNFLOW_OPENFLOW_CHECKS: "1"
       - run: go -C tools/sdkcheck test -count=1 -v ./...
         env:
           OVNFLOW_OVS_ADDR: tcp:127.0.0.1:6640
@@ -134,6 +163,16 @@ jobs:
           wait_db tcp:127.0.0.1:6640 Open_vSwitch
           wait_db tcp:127.0.0.1:6641 OVN_Northbound
           wait_db tcp:127.0.0.1:6642 OVN_Southbound
+          for i in $(seq 1 60); do
+            if docker compose exec -T ovs-ovn sh -c "pgrep ovs-vswitchd >/dev/null && ovs-vsctl --timeout=2 show >/dev/null"; then
+              echo "ovs-vswitchd is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::ovs-vswitchd did not become ready"
+          docker compose logs ovs-ovn || true
+          exit 1
       - run: go test -tags=integration -count=1 -v -run 'TestIntegration(V1MutationScenariosAreEnvGated|V2MutationGateIsEnvGated)' ./...
         env:
           OVNFLOW_OVS_ADDR: tcp:127.0.0.1:6640
@@ -170,3 +209,25 @@ jobs:
         env:
           OVNFLOW_LINUX_ROUTER_CHECKS: "1"
           OVNFLOW_NAT_BACKEND: ${{ matrix.nat-backend }}
+
+  sdwan-privileged:
+    if: github.event_name == 'workflow_dispatch' && inputs.linuxrouter == 'true'
+    runs-on: ubuntu-22.04
+    needs: unit-linux
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - name: Install SD-WAN backend tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 wireguard-tools openvswitch-switch
+      - name: Run privileged SD-WAN WireGuard/route integration
+        run: sudo -E go test -tags=integration -count=1 -v -run TestIntegrationSDWANWireGuardLinuxRouteLifecycle ./sdwanlinux
+        env:
+          OVNFLOW_SDWAN_BACKEND_CHECKS: "1"
+          OVNFLOW_SDWAN_PRIVILEGED_CHECKS: "1"
+          OVNFLOW_WIREGUARD_CHECKS: "1"
+          OVNFLOW_LINUX_ROUTE_CHECKS: "1"
