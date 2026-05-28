@@ -3,7 +3,6 @@ package ovnflow
 import (
 	"context"
 	"net"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -609,8 +608,4 @@ func serviceVIPComparable(vips []ServiceVIP) map[string][]string {
 		return nil
 	}
 	return out
-}
-
-func serviceVIPsEqual(a, b []ServiceVIP) bool {
-	return reflect.DeepEqual(serviceVIPComparable(a), serviceVIPComparable(b))
 }
