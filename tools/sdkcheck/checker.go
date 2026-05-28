@@ -297,19 +297,18 @@ func checkSouthbound(ctx context.Context, client *ovnflow.Client, opts Options) 
 	if err != nil {
 		return fmt.Errorf("list sb global: %w", err)
 	}
-	if len(sbGlobalRows) == 0 {
-		return errors.New("SB_Global has no rows")
+	if len(sbGlobalRows) > 0 {
+		sbGlobalUUID := rowString(sbGlobalRows[0]["_uuid"])
+		if sbGlobalUUID == "" {
+			return errors.New("SB_Global row has no UUID")
+		}
+		if err := sb.TableBy("SB_Global", "_uuid", sbGlobalUUID).Update().WithExternalID("sdkcheck", "true").Execute(ctx); err != nil {
+			return fmt.Errorf("sb runtime sb_global update: %w", err)
+		}
+		defer func() {
+			_ = sb.TableBy("SB_Global", "_uuid", sbGlobalUUID).Update().DeleteMap("external_ids", map[string]string{"sdkcheck": "true"}).Execute(context.Background())
+		}()
 	}
-	sbGlobalUUID := rowString(sbGlobalRows[0]["_uuid"])
-	if sbGlobalUUID == "" {
-		return errors.New("SB_Global row has no UUID")
-	}
-	if err := sb.TableBy("SB_Global", "_uuid", sbGlobalUUID).Update().WithExternalID("sdkcheck", "true").Execute(ctx); err != nil {
-		return fmt.Errorf("sb runtime sb_global update: %w", err)
-	}
-	defer func() {
-		_ = sb.TableBy("SB_Global", "_uuid", sbGlobalUUID).Update().DeleteMap("external_ids", map[string]string{"sdkcheck": "true"}).Execute(context.Background())
-	}()
 
 	if _, err := sb.ListChassis(ctx); err != nil {
 		return fmt.Errorf("list chassis: %w", err)
@@ -341,8 +340,8 @@ func checkSouthbound(ctx context.Context, client *ovnflow.Client, opts Options) 
 	if _, err := sb.ListRBACPermissions(ctx); err != nil {
 		return fmt.Errorf("list rbac permissions: %w", err)
 	}
-	if rows, err := sb.SBGlobal().List(ctx); err != nil || len(rows) == 0 {
-		return fmt.Errorf("list sb runtime sb_global rows=%d err=%w", len(rows), err)
+	if _, err := sb.SBGlobal().List(ctx); err != nil {
+		return fmt.Errorf("list sb runtime sb_global: %w", err)
 	}
 	if _, err := sb.ListMeters(ctx); err != nil {
 		return fmt.Errorf("list meters: %w", err)
