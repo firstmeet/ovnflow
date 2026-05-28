@@ -35,29 +35,42 @@ Private platform packages can map their own tenant, project, namespace,
 account, organization, department, or user models onto `OwnerRef` and `Labels`.
 Those business models stay outside the foundation SDK.
 
+## Delivered on `codex/v2-next-network-foundation`
+
+- `IPAM helpers` for pure Go IPv4 planning, default gateway handling,
+  reserved/excluded addresses, allocation, release, availability, and CIDR
+  overlap checks. This is intentionally not a persistent IPAM service.
+- `NetworkService` intent over OVN `Load_Balancer` VIPs and backend sets with
+  owner/label metadata, dry-run, reconcile, get, patch, and owned-only delete.
+- `QoSPolicy` intent over OVN `QoS` rules with owner/label metadata,
+  desired-rule cleanup, map-field reconciliation, dry-run, reconcile, get, and
+  owned-only delete.
+- Read-only status aggregation through network, provider-network, and workload
+  path summaries that degrade into typed findings when a backend is missing.
+- Read-only cleanup and adopt/import plans built from ownership audit data.
+  Execution remains out of scope for this planning layer.
+
 ## v2.x Candidates
 
 The next feature work should build on the delivered v2 primitives:
 
-- `IPAM helpers`: CIDR planning, reserved addresses, gateway conflict checks,
-  basic allocation, and release helpers without becoming a full IPAM service.
 - `Diagnostics`: correlate OVN Northbound intent, Southbound bindings, local
   OVS interfaces, LinuxRouter state, NAT/firewall rules, and flow-level
   troubleshooting output.
-- `Safe cleanup`: explicit SDK-owned pruning for orphaned logical switch ports,
-  DNS rows, ACLs, Port Groups, OVS Ports/Interfaces, LinuxRouter rules, and
-  incomplete references. Automatic pruning should remain owned-only and
-  opt-in.
-- `Adopt` / `Import`: explicit, audited adoption of existing OVN/OVS resources
-  into ovnflow ownership, separate from normal `Ensure` semantics.
-- `Status` aggregation: higher-level read-only APIs such as network status,
-  workload path, provider-network status, router status, and diagnostics-ready
-  summaries for UI/controller workflows.
+- Executable safe cleanup: explicit SDK-owned pruning for orphaned logical
+  switch ports, DNS rows, ACLs, Port Groups, OVS Ports/Interfaces, LinuxRouter
+  rules, and incomplete references. Automatic pruning should remain owned-only
+  and opt-in.
+- Executable `Adopt` / `Import`: explicit, audited adoption of existing
+  OVN/OVS resources into ovnflow ownership, separate from normal `Ensure`
+  semantics.
+- Router-aware status aggregation and LinuxRouter diagnostics summaries for
+  UI/controller workflows.
 - Batched planning and execution for large network, port, ACL, DNS, and
   provider-network changes.
-- Service and load-balancer abstractions over OVN Load_Balancer, VIPs, backend
-  sets, health metadata, and port mappings.
-- Bandwidth and QoS policy abstractions over OVN QoS and OVS QoS/Queue tables.
+- Service and load-balancer hardening over health metadata and richer port
+  mappings.
+- OVS QoS/Queue high-level intent to complement the OVN QoS policy intent.
 - Traffic mirror, capture, and debug-flow helpers over OVS mirror/sampling and
   OVN/SB runtime state.
 

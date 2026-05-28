@@ -69,6 +69,8 @@ func TestIntegrationV2MutationGateIsEnvGated(t *testing.T) {
 		dns:            prefix + "dns",
 		attachment:     prefix + "att",
 		policy:         prefix + "policy",
+		service:        prefix + "svc",
+		qosPolicy:      prefix + "qos",
 		provider:       prefix + "provider",
 		providerSwitch: prefix + "provider-sw",
 		localnetPort:   prefix + "localnet",
@@ -160,7 +162,41 @@ func TestIntegrationV2MutationGateIsEnvGated(t *testing.T) {
 		AddRule(SecurityRule{Name: "allow-web", Action: "allow", Protocol: "tcp", CIDRs: []string{"10.230.0.0/24"}, Ports: []int{80}}).
 		Execute(ctx), "ensure security policy")
 
+	must(t, sdk.OVN().NB().NetworkService(resources.service).
+		Ensure().
+		WithProtocol("tcp").
+		WithOwner("project", "v2-"+suffix).
+		WithLabel("suite", "v2").
+		WithVIP("192.0.2.230", 80,
+			ServiceBackend{Address: "10.230.0.10", Port: 8080},
+			ServiceBackend{Address: "10.230.0.11", Port: 8080},
+		).
+		Execute(ctx), "ensure network service")
+	must(t, sdk.OVN().NB().NetworkService(resources.service).
+		Ensure().
+		WithProtocol("tcp").
+		WithOwner("project", "v2-"+suffix).
+		WithLabel("suite", "v2").
+		WithVIP("192.0.2.230", 80,
+			ServiceBackend{Address: "10.230.0.10", Port: 8080},
+		).
+		Execute(ctx), "repeat ensure network service")
+
+	must(t, sdk.OVN().NB().QoSPolicy(resources.qosPolicy).
+		Ensure().
+		WithOwner("project", "v2-"+suffix).
+		WithLabel("suite", "v2").
+		AddRule(QoSRule{Name: "limit-web", Direction: "from-lport", Priority: 100, Match: `inport == "` + resources.attachment + `"`, Rate: 1000000, Burst: 200000, Switch: resources.virtualNetwork}).
+		Execute(ctx), "ensure qos policy")
+	must(t, sdk.OVN().NB().QoSPolicy(resources.qosPolicy).
+		Ensure().
+		WithOwner("project", "v2-"+suffix).
+		WithLabel("suite", "v2").
+		AddRule(QoSRule{Name: "limit-web", Direction: "from-lport", Priority: 100, Match: `inport == "` + resources.attachment + `"`, Switch: resources.virtualNetwork}).
+		Execute(ctx), "repeat ensure qos policy")
+
 	assertV2Readback(t, rawNB, resources, "v2-"+suffix)
+	assertV2ServiceAndQoSReadback(t, rawNB, resources, "v2-"+suffix)
 	assertV2ProviderNetworkReadback(t, rawNB, rawOVS, resources, "v2-"+suffix)
 	assertV2LocalOVSReadback(t, rawOVS, resources, "v2-"+suffix)
 	assertV2DoctorReport(t, sdk, resources)
@@ -187,6 +223,8 @@ type v2Resources struct {
 	dns            string
 	attachment     string
 	policy         string
+	service        string
+	qosPolicy      string
 	provider       string
 	providerSwitch string
 	localnetPort   string
@@ -202,12 +240,16 @@ func cleanupV2(ctx context.Context, t *testing.T, sdk *Client, rawNB, rawOVS *ov
 		cleanupOVS(ctx, t, rawOVS, resources.bridge, resources.ovsPort, resources.ovsInterface)
 	}
 	_ = sdk.OVN().NB().PortGroup(resources.policy).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().NetworkService(resources.service).Delete().Execute(ctx)
+	_ = sdk.OVN().NB().QoSPolicy(resources.qosPolicy).Delete(ctx)
 	_ = sdk.OVN().NB().DNS(resources.dns).Delete().Execute(ctx)
 	_ = sdk.ProviderNetwork(resources.provider).Delete(ctx)
 	_ = sdk.OVN().NB().LogicalSwitch(resources.virtualNetwork).Delete().Execute(ctx)
 	_, err := rawNB.Transact(ctx, nbDatabase,
 		map[string]any{"op": "delete", "table": tableACL, "where": externalIDWhere(ExternalIDNameKey, resources.policy)},
 		map[string]any{"op": "delete", "table": tablePortGroup, "where": nameWhere(resources.policy)},
+		map[string]any{"op": "delete", "table": tableLoadBalancer, "where": nameWhere(resources.service)},
+		map[string]any{"op": "delete", "table": tableQoS, "where": externalIDWhere(ExternalIDNameKey, resources.qosPolicy)},
 		map[string]any{"op": "delete", "table": tableDNS, "where": externalIDWhere(dnsNameExternalID, resources.dns)},
 		map[string]any{"op": "delete", "table": tableLogicalSwitch, "where": nameWhere(resources.providerSwitch)},
 		map[string]any{"op": "delete", "table": tableLogicalSwitchPort, "where": nameWhere(resources.localnetPort)},
@@ -254,6 +296,28 @@ func assertV2Readback(t *testing.T, raw *ovsdbjson.Client, resources v2Resources
 	acls := rowStringSet(t, pg, colACLs)
 	if len(acls) == 0 {
 		t.Fatalf("v2 policy has no ACL refs: %s", string(pg[colACLs]))
+	}
+}
+
+func assertV2ServiceAndQoSReadback(t *testing.T, raw *ovsdbjson.Client, resources v2Resources, ownerName string) {
+	t.Helper()
+	lb := requireOneRow(t, raw, nbDatabase, tableLoadBalancer, nameWhere(resources.service), []string{colName, colVIPs, colProtocol, colExternalIDs})
+	requireStringMapValue(t, lb, colExternalIDs, ExternalIDKindKey, networkServiceKind)
+	requireStringMapValue(t, lb, colExternalIDs, ExternalIDOwnerNameKey, ownerName)
+	requireString(t, lb, colProtocol, "tcp")
+	vips := rowStringMap(t, lb, colVIPs)
+	if got := vips["192.0.2.230:80"]; got != "10.230.0.10:8080" {
+		t.Fatalf("v2 service VIP = %q, want single reconciled backend", got)
+	}
+
+	qosRows := selectRows(t, raw, nbDatabase, tableQoS, externalIDWhere(ExternalIDNameKey, resources.qosPolicy), []string{colDirection, colPriority, colMatch, colBandwidth, colExternalIDs})
+	if len(qosRows) != 1 {
+		t.Fatalf("v2 qos rows = %d, want 1", len(qosRows))
+	}
+	requireStringMapValue(t, qosRows[0], colExternalIDs, ExternalIDKindKey, "QoSPolicy")
+	requireStringMapValue(t, qosRows[0], colExternalIDs, ExternalIDOwnerNameKey, ownerName)
+	if bandwidth := rowIntMap(t, qosRows[0], colBandwidth); len(bandwidth) != 0 {
+		t.Fatalf("v2 qos bandwidth should be reconciled empty, got %#v", bandwidth)
 	}
 }
 
@@ -403,6 +467,8 @@ func assertV2Cleanup(t *testing.T, rawNB, rawOVS *ovsdbjson.Client, resources v2
 		{table: tableDNS, where: externalIDWhere(dnsNameExternalID, resources.dns), columns: []string{colExternalIDs}},
 		{table: tablePortGroup, where: nameWhere(resources.policy), columns: []string{colName}},
 		{table: tableACL, where: externalIDWhere(ExternalIDNameKey, resources.policy), columns: []string{colExternalIDs}},
+		{table: tableLoadBalancer, where: nameWhere(resources.service), columns: []string{colName}},
+		{table: tableQoS, where: externalIDWhere(ExternalIDNameKey, resources.qosPolicy), columns: []string{colExternalIDs}},
 	}
 	for _, check := range checks {
 		if rows := selectRows(t, rawNB, nbDatabase, check.table, check.where, check.columns); len(rows) != 0 {

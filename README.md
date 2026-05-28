@@ -15,9 +15,10 @@ The current SDK surface covers:
 | OVN Northbound | logical switch/port plus router, router port, ACL, NAT, load balancer, DHCP, DNS, QoS, meter, port group, address set, OVN gateway, HA chassis group, and BFD table builders |
 | OVN Southbound | typed list/get/watch for chassis, port binding, datapath, logical flow, MAC/FDB, multicast, service monitor, RBAC, meter, DNS, and BFD |
 | Open_vSwitch | bridge/port/interface lifecycle plus controller, manager, mirror, QoS, queue, flow table, NetFlow, sFlow, IPFIX, SSL, and AutoAttach fluent table APIs |
-| v2 intent | platform-neutral `VirtualNetwork`, `LogicalSwitchDNS`, `WorkloadAttachment`, `ProviderNetwork`, and `SecurityPolicy` with owner/label metadata, dry-run/reconcile, typed get/inspect, and delete helpers |
+| v2 intent | platform-neutral `VirtualNetwork`, `LogicalSwitchDNS`, `WorkloadAttachment`, `ProviderNetwork`, `SecurityPolicy`, `NetworkService`, and `QoSPolicy` with owner/label metadata, dry-run/reconcile, typed get/inspect, and delete helpers |
+| IPAM | pure Go IPv4 CIDR planning, gateway/reserved/excluded address handling, allocation, release, availability, and overlap checks without running a persistent IPAM service |
 | LinuxRouter | optional Linux-only namespace router model with DNSMasq, SNAT/MASQUERADE/DNAT/port-forward/destination-map, firewall rules, fake executor tests, and a Linux command backend |
-| Diagnostics | read-only `Diagnostics().Doctor` checks for OVSDB connectivity, schema, table counts, port bindings, localnet ports, and OVS bridge mappings; `Diagnostics().AuditOwnership` reports ovnflow-owned resources and orphan/reference risks |
+| Diagnostics | read-only `Diagnostics().Doctor` checks for OVSDB connectivity, schema, table counts, port bindings, localnet ports, and OVS bridge mappings; `Diagnostics().AuditOwnership`, `NetworkStatus`, `ProviderNetworkStatus`, `WorkloadPath`, `CleanupPlan`, and `AdoptPlan` report owned resources, orphan/reference risks, and safe planning data |
 | Runtime | schema-aware `TableRef` create/ensure/update/delete/get/list/watch with optional columns and map/set mutations |
 
 ```go
@@ -88,6 +89,47 @@ if err != nil {
 }
 _ = network
 
+pool := ovnflow.IPAMPool{
+    CIDR:     "10.20.0.0/24",
+    Reserved: []string{"10.20.0.10"},
+}
+nextIP, err := pool.Allocate()
+if err != nil {
+    return err
+}
+_ = nextIP
+
+err = client.OVN().NB().
+    NetworkService("svc-web").
+    Ensure().
+    WithProtocol("tcp").
+    WithOwner("project", "alpha").
+    WithVIP("192.0.2.10", 80,
+        ovnflow.ServiceBackend{Address: "10.20.0.10", Port: 8080},
+        ovnflow.ServiceBackend{Address: "10.20.0.11", Port: 8080},
+    ).
+    Execute(ctx)
+if err != nil {
+    return err
+}
+
+err = client.OVN().NB().
+    QoSPolicy("qos-web").
+    Ensure().
+    WithOwner("project", "alpha").
+    AddRule(ovnflow.QoSRule{
+        Name:      "limit-web",
+        Direction: "from-lport",
+        Priority:  100,
+        Match:     `inport == "web-port"`,
+        Rate:      1000000,
+        Burst:     200000,
+    }).
+    Execute(ctx)
+if err != nil {
+    return err
+}
+
 err = client.ProviderNetwork("public-uplink").
     Ensure().
     WithPhysicalNetwork("physnet-public").
@@ -137,7 +179,26 @@ if err != nil {
 for _, finding := range audit.Findings {
     log.Printf("%s %s: %s", finding.Severity, finding.Code, finding.Message)
 }
+
+status, err := client.NetworkStatus(ctx, "net-web")
+if err != nil {
+    return err
+}
+_ = status
+
+cleanup, err := client.CleanupPlan(ctx, ovnflow.CleanupPlanOptions{
+    Owner: ovnflow.OwnerRef{Kind: "project", Name: "alpha"},
+})
+if err != nil {
+    return err
+}
+_ = cleanup
 ```
+
+The SDK stays neutral: platform concepts such as tenants, organizations,
+departments, users, approval flows, quotas, schedulers, and HA election belong
+in the caller's control plane. Map them onto `OwnerRef`, `Labels`, and ordinary
+metadata when calling ovnflow.
 
 Normal tests are local and dependency-free:
 
@@ -189,5 +250,6 @@ See [v1.0 hardening](docs/v1.0-hardening.md) and
 surface. The [v0.1 scope](docs/v0.1-scope.md) and
 [v0.2 scope](docs/v0.2-scope.md) documents are historical compatibility notes.
 The delivered v2.0.0 high-level, platform-neutral intent APIs are recorded in
-[v2.0 acceptance](docs/v2.0-plan.md). Future v2.x candidates and deeper
-hardening work are tracked in [roadmap](docs/roadmap.md).
+[v2.0 acceptance](docs/v2.0-plan.md). The v2.1 implementation boundary is in
+[v2.1 plan](docs/v2.1-plan.md). Future v2.x candidates and deeper hardening
+work are tracked in [roadmap](docs/roadmap.md).

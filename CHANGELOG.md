@@ -2,6 +2,30 @@
 
 All notable changes to `ovnflow` are tracked here.
 
+## v2.1.0 - 2026-05-28
+
+### Added
+
+- Pure Go IPv4 `IPAMPool` helpers for planning, reserved/excluded addresses,
+  allocation, release, availability, and overlap checks.
+- `NetworkService` intent over OVN `Load_Balancer` VIPs and backends with
+  owner/label metadata, dry-run, reconcile, get, patch, and owned-only delete.
+- `QoSPolicy` intent over OVN `QoS` rules with owner/label metadata, stale-rule
+  cleanup, bandwidth/action map reconciliation, dry-run, reconcile, get, and
+  owned-only delete.
+- Read-only `NetworkStatus`, `ProviderNetworkStatus`, and `WorkloadPath`
+  summaries.
+- Read-only `CleanupPlan` and `AdoptPlan` built from ownership audit data.
+- v2.1 Service/QoS scenarios in the integration mutation gate.
+
+### Hardened
+
+- Service and QoS intent writes reject foreign existing rows before reconcile.
+- Service reconcile deletes stale VIP keys for owned load balancers.
+- QoS reconcile deletes stale owned rules and clears stale bandwidth/action map
+  keys.
+- IPAM rejects excluded gateways and reserved addresses.
+
 ## v2.0.1 - 2026-05-27
 
 ### Added
