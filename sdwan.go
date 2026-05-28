@@ -277,7 +277,7 @@ func (b *SDWANNetworkBuilder) Plan(ctx context.Context) (Plan, error) {
 	}
 	out := Plan{Operations: make([]PlannedOperation, 0, len(apply.Operations))}
 	for _, op := range apply.Operations {
-		out.Operations = append(out.Operations, PlannedOperation{Action: op.Action, Resource: op.Resource, Name: op.Name, Description: op.Description})
+		out.Operations = append(out.Operations, PlannedOperation(op))
 	}
 	return out, nil
 }
