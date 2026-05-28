@@ -186,13 +186,13 @@ func TestIntegrationV2MutationGateIsEnvGated(t *testing.T) {
 		Ensure().
 		WithOwner("project", "v2-"+suffix).
 		WithLabel("suite", "v2").
-		AddRule(QoSRule{Name: "limit-web", Direction: "from-lport", Priority: 100, Match: `inport == "` + resources.attachment + `"`, Rate: 1000000, Burst: 200000}).
+		AddRule(QoSRule{Name: "limit-web", Direction: "from-lport", Priority: 100, Match: `inport == "` + resources.attachment + `"`, Rate: 1000000, Burst: 200000, Switch: resources.virtualNetwork}).
 		Execute(ctx), "ensure qos policy")
 	must(t, sdk.OVN().NB().QoSPolicy(resources.qosPolicy).
 		Ensure().
 		WithOwner("project", "v2-"+suffix).
 		WithLabel("suite", "v2").
-		AddRule(QoSRule{Name: "limit-web", Direction: "from-lport", Priority: 100, Match: `inport == "` + resources.attachment + `"`}).
+		AddRule(QoSRule{Name: "limit-web", Direction: "from-lport", Priority: 100, Match: `inport == "` + resources.attachment + `"`, Switch: resources.virtualNetwork}).
 		Execute(ctx), "repeat ensure qos policy")
 
 	assertV2Readback(t, rawNB, resources, "v2-"+suffix)
