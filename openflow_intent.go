@@ -48,6 +48,8 @@ func (r *OpenFlowBridgeRef) EnsureFlow(name string) *OpenFlowRuleBuilder {
 func (r *OpenFlowBridgeRef) DeleteFlow(name string) *OpenFlowRuleBuilder {
 	builder := r.EnsureFlow(name)
 	builder.delete = true
+	builder.flow.TableID = 0xff
+	builder.flow.CookieMask = ^uint64(0)
 	return builder
 }
 

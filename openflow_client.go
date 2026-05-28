@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -212,7 +213,7 @@ func (s *OpenFlowSession) DeleteFlow(ctx context.Context, flow OpenFlowFlow) err
 	if flow.CookieMask == 0 {
 		flow.CookieMask = ^uint64(0)
 	}
-	return s.flowMod(ctx, openFlowFlowCommandDeleteStrict, flow)
+	return s.flowMod(ctx, openFlowFlowCommandDelete, flow)
 }
 
 func (s *OpenFlowSession) DumpFlows(ctx context.Context, request OpenFlowFlowStatsRequest) ([]OpenFlowMessage, error) {
@@ -264,24 +265,66 @@ func (s *OpenFlowSession) flowMod(ctx context.Context, command uint8, flow OpenF
 }
 
 func (s *OpenFlowSession) write(ctx context.Context, msg OpenFlowMessage) error {
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = s.conn.SetWriteDeadline(deadline)
-	}
-	if err := WriteOpenFlowMessage(s.conn, msg); err != nil {
-		return classifyContext(err, dbOpenFlow, "", "write", "")
-	}
-	return nil
+	return s.withContextDeadline(ctx, true, "write", func() error {
+		return WriteOpenFlowMessage(s.conn, msg)
+	})
 }
 
 func (s *OpenFlowSession) read(ctx context.Context) (OpenFlowMessage, error) {
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = s.conn.SetReadDeadline(deadline)
+	var msg OpenFlowMessage
+	err := s.withContextDeadline(ctx, false, "read", func() error {
+		var readErr error
+		msg, readErr = ReadOpenFlowMessage(s.conn)
+		return readErr
+	})
+	return msg, err
+}
+
+func (s *OpenFlowSession) withContextDeadline(ctx context.Context, write bool, op string, fn func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	msg, err := ReadOpenFlowMessage(s.conn)
+	if err := ctx.Err(); err != nil {
+		return classifyContext(err, dbOpenFlow, "", op, "")
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Time{}
+	}
+	setDeadline := func(value time.Time) error {
+		if write {
+			return s.conn.SetWriteDeadline(value)
+		}
+		return s.conn.SetReadDeadline(value)
+	}
+	if err := setDeadline(deadline); err != nil {
+		return classifyContext(err, dbOpenFlow, "", op, "")
+	}
+	var (
+		stop func() bool
+		wg   sync.WaitGroup
+	)
+	if done := ctx.Done(); done != nil {
+		wg.Add(1)
+		stop = context.AfterFunc(ctx, func() {
+			defer wg.Done()
+			_ = setDeadline(time.Now())
+		})
+	} else {
+		stop = func() bool { return true }
+	}
+	err := fn()
+	if !stop() {
+		wg.Wait()
+	}
+	_ = setDeadline(time.Time{})
 	if err != nil {
-		return OpenFlowMessage{}, classifyContext(err, dbOpenFlow, "", "read", "")
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return classifyContext(ctxErr, dbOpenFlow, "", op, "")
+		}
+		return classifyContext(err, dbOpenFlow, "", op, "")
 	}
-	return msg, nil
+	return classifyContext(ctx.Err(), dbOpenFlow, "", op, "")
 }
 
 func (s *OpenFlowSession) protocolError(msg OpenFlowMessage) error {

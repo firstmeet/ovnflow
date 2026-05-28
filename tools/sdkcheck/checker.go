@@ -568,6 +568,7 @@ func checkOpenFlowAndSDWAN(ctx context.Context, client *ovnflow.Client, opts Opt
 		WithTransport(ovnflow.SDWANTransportWireGuard).
 		AddSite(opts.Prefix+"edge-a", ovnflow.SDWANSite{Router: opts.Prefix + "edge-a", CIDRs: []string{"10.10.0.0/16"}}).
 		AddSite(opts.Prefix+"edge-b", ovnflow.SDWANSite{Router: opts.Prefix + "edge-b", CIDRs: []string{"10.20.0.0/16"}}).
+		AddLink(ovnflow.SDWANLink{From: opts.Prefix + "edge-a", To: opts.Prefix + "edge-b"}).
 		ApplyPlan(ctx)
 	if err != nil {
 		return fmt.Errorf("sdwan apply plan: %w", err)

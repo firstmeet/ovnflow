@@ -35,7 +35,7 @@ Private platform packages can map their own tenant, project, namespace,
 account, organization, department, or user models onto `OwnerRef` and `Labels`.
 Those business models stay outside the foundation SDK.
 
-## Delivered on `codex/v2-next-network-foundation`
+## Delivered in v2.1.0
 
 - `IPAM helpers` for pure Go IPv4 planning, default gateway handling,
   reserved/excluded addresses, allocation, release, availability, and CIDR
@@ -49,6 +49,19 @@ Those business models stay outside the foundation SDK.
   path summaries that degrade into typed findings when a backend is missing.
 - Read-only cleanup and adopt/import plans built from ownership audit data.
   Execution remains out of scope for this planning layer.
+
+## Delivered in v2.2.0
+
+- Native OpenFlow 1.5/1.3 protocol foundations for hello/version negotiation,
+  features request/reply, flow-mod, multipart flow dump envelopes, protocol
+  errors, OXM match encoding/parsing, output/set-field actions, and native
+  socket I/O without `ovs-ofctl`.
+- `client.OpenFlow()` bridge-scoped fluent builders for owned flow add/delete
+  with deterministic cookies, exact named-flow deletes, and optional OVS
+  controller endpoint setup.
+- SD-WAN open primitives for Site, Link, Policy, L2/L3 overlay mode, explicit
+  Partial Mesh links, Hub-Spoke/Full Mesh planning, WireGuard/Geneve/VXLAN
+  transports, dry-run, Apply, Get, Delete, and pluggable backends.
 
 ## v2.x Candidates
 
@@ -70,18 +83,13 @@ The next feature work should build on the delivered v2 primitives:
   provider-network changes.
 - Service and load-balancer hardening over health metadata and richer port
   mappings.
+- Live OpenFlow integration tests against a real OVS bridge controller,
+  including add/delete/dump, protocol error replies, and version fallback.
+- Production SD-WAN backends for Linux routes, WireGuard, OVS tunnel rows, and
+  OpenFlow rule installation.
 - OVS QoS/Queue high-level intent to complement the OVN QoS policy intent.
 - Traffic mirror, capture, and debug-flow helpers over OVS mirror/sampling and
   OVN/SB runtime state.
-
-## In Progress for v2.2.0
-
-- Native OpenFlow 1.5/1.3 protocol support for bridge flow add/delete/dump,
-  OXM match encoding, output/set-field actions, and OVS controller endpoint
-  setup without `ovs-ofctl`.
-- SD-WAN open primitives for Site, Link, Policy, L2/L3 overlay mode, Partial
-  Mesh planning, WireGuard/Geneve/VXLAN transports, and pluggable Apply
-  backends.
 
 ## LinuxRouter Hardening
 

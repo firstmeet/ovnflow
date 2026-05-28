@@ -159,6 +159,14 @@ func (c *Client) SDWAN() *SDWANClient {
 	return &SDWANClient{backend: c.sdwan}
 }
 
+// WithBackend returns an SD-WAN client that uses backend.
+func (c *SDWANClient) WithBackend(backend SDWANBackend) *SDWANClient {
+	if backend == nil {
+		backend = NewInMemorySDWANBackend()
+	}
+	return &SDWANClient{backend: backend}
+}
+
 func NewSDWANClient(backend SDWANBackend) *SDWANClient {
 	if backend == nil {
 		backend = NewInMemorySDWANBackend()
@@ -526,7 +534,7 @@ func planSDWANApply(network SDWANNetwork) SDWANApplyPlan {
 		case SDWANTransportGeneve, SDWANTransportVXLAN:
 			resource = "OVSTunnel"
 		}
-		ops = append(ops, SDWANOperation{Action: IntentActionEnsure, Resource: resource, Name: link.StableName(), Description: "ensure partial-mesh SD-WAN tunnel"})
+		ops = append(ops, SDWANOperation{Action: IntentActionEnsure, Resource: resource, Name: link.StableName(), Description: "ensure SD-WAN tunnel"})
 		if network.Layer == SDWANLayerL3 {
 			ops = append(ops, SDWANOperation{Action: IntentActionEnsure, Resource: "RoutePolicy", Name: link.StableName(), Description: "ensure SD-WAN route and policy-routing state"})
 		} else {
@@ -569,11 +577,25 @@ func normalizeSDWANSites(in []SDWANSite) []SDWANSite {
 
 func normalizeSDWANLinks(network SDWANNetwork) []SDWANLink {
 	links := append([]SDWANLink{}, network.Links...)
-	if network.Topology == SDWANTopologyFullMesh || network.Topology == SDWANTopologyPartialMesh {
+	switch network.Topology {
+	case SDWANTopologyFullMesh:
 		sites := normalizeSDWANSites(network.Sites)
 		for i := 0; i < len(sites); i++ {
 			for j := i + 1; j < len(sites); j++ {
 				links = replaceSDWANLink(links, SDWANLink{From: sites[i].Name, To: sites[j].Name, Transport: network.Transport, Enabled: true})
+			}
+		}
+	case SDWANTopologyHubSpoke:
+		sites := normalizeSDWANSites(network.Sites)
+		for _, hub := range sites {
+			if !strings.EqualFold(hub.Role, "hub") && !hub.Transit && !hub.Relay {
+				continue
+			}
+			for _, spoke := range sites {
+				if spoke.Name == hub.Name || strings.EqualFold(spoke.Role, "hub") || spoke.Transit || spoke.Relay {
+					continue
+				}
+				links = replaceSDWANLink(links, SDWANLink{From: hub.Name, To: spoke.Name, Transport: network.Transport, Enabled: true})
 			}
 		}
 	}
@@ -663,8 +685,13 @@ func (b *InMemorySDWANBackend) ApplySDWAN(_ context.Context, network SDWANNetwor
 		b.plans = map[string]SDWANApplyPlan{}
 	}
 	network = normalizeSDWANNetwork(network)
-	network.Status.State = ResourceStatusPresent
-	network.Status.LastApplied++
+	status := network.Status
+	if current, ok := b.networks[network.Name]; ok {
+		status = current.Status
+	}
+	status.State = ResourceStatusPresent
+	status.LastApplied++
+	network.Status = status
 	b.networks[network.Name] = cloneSDWANNetwork(network)
 	b.plans[network.Name] = cloneSDWANApplyPlan(plan)
 	return nil

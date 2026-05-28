@@ -16,7 +16,7 @@ The current SDK surface covers:
 | OVN Southbound | typed list/get/watch for chassis, port binding, datapath, logical flow, MAC/FDB, multicast, service monitor, RBAC, meter, DNS, and BFD |
 | Open_vSwitch | bridge/port/interface lifecycle plus controller, manager, mirror, QoS, queue, flow table, NetFlow, sFlow, IPFIX, SSL, and AutoAttach fluent table APIs |
 | OpenFlow | native OpenFlow 1.5/1.3 negotiation, message codec, flow add/delete/dump primitives, and fluent owned-rule builders without shelling out to `ovs-ofctl` |
-| SD-WAN | open Site/Link/Tunnel/Policy primitives with Partial Mesh planning, L2/L3 overlay modes, WireGuard/Geneve/VXLAN transports, and pluggable Apply backends |
+| SD-WAN | open Site/Link/Tunnel/Policy primitives with explicit Partial Mesh links, Hub-Spoke/Full Mesh planning, L2/L3 overlay modes, WireGuard/Geneve/VXLAN transports, and pluggable Apply backends |
 | v2 intent | platform-neutral `VirtualNetwork`, `LogicalSwitchDNS`, `WorkloadAttachment`, `ProviderNetwork`, `SecurityPolicy`, `NetworkService`, and `QoSPolicy` with owner/label metadata, dry-run/reconcile, typed get/inspect, and delete helpers |
 | IPAM | pure Go IPv4 CIDR planning, gateway/reserved/excluded address handling, allocation, release, availability, and overlap checks without running a persistent IPAM service |
 | LinuxRouter | optional Linux-only namespace router model with DNSMasq, SNAT/MASQUERADE/DNAT/port-forward/destination-map, firewall rules, fake executor tests, and a Linux command backend |
@@ -107,6 +107,7 @@ err = client.SDWAN().
     WithTransport(ovnflow.SDWANTransportWireGuard).
     AddSite("edge-a", ovnflow.SDWANSite{Router: "edge-a", CIDRs: []string{"10.10.0.0/16"}}).
     AddSite("edge-b", ovnflow.SDWANSite{Router: "edge-b", CIDRs: []string{"10.20.0.0/16"}}).
+    AddLink(ovnflow.SDWANLink{From: "edge-a", To: "edge-b"}).
     Apply(ctx)
 if err != nil {
     return err
@@ -280,5 +281,6 @@ surface. The [v0.1 scope](docs/v0.1-scope.md) and
 [v0.2 scope](docs/v0.2-scope.md) documents are historical compatibility notes.
 The delivered v2.0.0 high-level, platform-neutral intent APIs are recorded in
 [v2.0 acceptance](docs/v2.0-plan.md). The v2.1 implementation boundary is in
-[v2.1 plan](docs/v2.1-plan.md). Future v2.x candidates and deeper hardening
-work are tracked in [roadmap](docs/roadmap.md).
+[v2.1 plan](docs/v2.1-plan.md). The native OpenFlow and SD-WAN foundation
+boundary is in [v2.2 plan](docs/v2.2-plan.md). Future v2.x candidates and
+deeper hardening work are tracked in [roadmap](docs/roadmap.md).

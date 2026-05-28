@@ -351,6 +351,7 @@ func MarshalOpenFlowFlowStatsRequest(version OpenFlowVersion, xid uint32, reques
 	flowBody.Write([]byte{0, 0, 0})
 	writeBE(flowBody, outPort)
 	writeBE(flowBody, outGroup)
+	writeBE(flowBody, uint32(0))
 	writeBE(flowBody, request.Cookie)
 	writeBE(flowBody, request.CookieMask)
 	flowBody.Write(match)
@@ -427,11 +428,11 @@ func marshalOpenFlowActions(actions []OpenFlowAction) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			length := 4 + len(field)
+			length := alignOpenFlowLength(4+len(field), 8)
 			writeBE(out, openFlowActionSetField)
 			writeBE(out, uint16(length))
 			out.Write(field)
-			padTo(out, 8)
+			out.Write(make([]byte, length-4-len(field)))
 		default:
 			return nil, wrap(ErrorUnsupported, "", "", "marshal", "openflow-action", "unsupported OpenFlow action", nil)
 		}
@@ -622,6 +623,12 @@ func applyParsedOXM(match *OpenFlowMatch, field uint8, value, mask []byte) error
 		}
 		v := binary.BigEndian.Uint16(value)
 		match.EthType = &v
+	case openFlowOFBVLANVID:
+		if len(value) != 2 {
+			return invalidOXMLength(field)
+		}
+		v := binary.BigEndian.Uint16(value)
+		match.VLANVID = &v
 	case openFlowOFBIPProto:
 		if len(value) != 1 {
 			return invalidOXMLength(field)
@@ -803,4 +810,14 @@ func padTo(buf *bytes.Buffer, alignment int) {
 	for buf.Len()%alignment != 0 {
 		buf.WriteByte(0)
 	}
+}
+
+func alignOpenFlowLength(length, alignment int) int {
+	if alignment <= 0 {
+		return length
+	}
+	if remainder := length % alignment; remainder != 0 {
+		length += alignment - remainder
+	}
+	return length
 }

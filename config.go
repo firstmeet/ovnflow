@@ -13,6 +13,7 @@ type Config struct {
 	OVNNBAddr string
 	OVNSBAddr string
 	OpenFlow  OpenFlowConfig
+	SDWAN     SDWANBackend
 }
 
 // ConfigFromEnv loads the SDK configuration from the same environment
@@ -68,7 +69,7 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 		sb.close()
 		return nil, err
 	}
-	return &Client{nb: nb, sb: sb, ovs: ovs, of: cfg.OpenFlow}, nil
+	return &Client{nb: nb, sb: sb, ovs: ovs, of: cfg.OpenFlow, sdwan: cfg.SDWAN}, nil
 }
 
 func connectDB(ctx context.Context, database, address string) (*dbClient, error) {
@@ -170,6 +171,17 @@ func (c *Client) LocalOVS() *OVSClient {
 // OpenFlow returns native OpenFlow APIs for local Open_vSwitch bridges.
 func (c *Client) OpenFlow() *OpenFlowClient {
 	return &OpenFlowClient{ovs: c.LocalOVS(), config: c.of, dialer: openFlowNetDialer{}}
+}
+
+// UseSDWANBackend sets the backend used by Client.SDWAN.
+func (c *Client) UseSDWANBackend(backend SDWANBackend) *Client {
+	if c == nil {
+		return c
+	}
+	c.sdwanMu.Lock()
+	defer c.sdwanMu.Unlock()
+	c.sdwan = backend
+	return c
 }
 
 // OVN groups OVN APIs.
