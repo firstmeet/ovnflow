@@ -2,6 +2,27 @@
 
 All notable changes to `ovnflow` are tracked here.
 
+## v2.2.0 - unreleased
+
+### Added
+
+- Native OpenFlow 1.5/1.3 codec and client primitives for hello/features,
+  flow-mod, multipart flow dump, errors, OXM matches, and output/set-field
+  actions.
+- `client.OpenFlow()` fluent owned-rule builders for bridge-scoped add/delete
+  flows with cookie ownership boundaries and optional OVS controller
+  auto-configuration.
+- SD-WAN foundation APIs for Site, Link, Policy, L2/L3 overlay mode,
+  Partial Mesh planning, WireGuard/Geneve/VXLAN transports, dry-run, Apply, Get,
+  and Delete over a pluggable backend.
+
+### Boundaries
+
+- OpenFlow is implemented as native protocol code, not `ovs-ofctl` shelling.
+- SD-WAN remains an open foundation layer; private tenant/user models,
+  scheduler decisions, HA election, and full controller policy loops stay in the
+  caller's control plane.
+
 ## v2.1.0 - 2026-05-28
 
 ### Added

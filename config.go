@@ -12,6 +12,7 @@ type Config struct {
 	OVSAddr   string
 	OVNNBAddr string
 	OVNSBAddr string
+	OpenFlow  OpenFlowConfig
 }
 
 // ConfigFromEnv loads the SDK configuration from the same environment
@@ -22,6 +23,7 @@ func ConfigFromEnv() Config {
 		OVSAddr:   cfg.OVSAddr,
 		OVNNBAddr: cfg.OVNNBAddr,
 		OVNSBAddr: cfg.OVNSBAddr,
+		OpenFlow:  OpenFlowConfig{Endpoint: cfg.OpenFlowAddr},
 	}
 }
 
@@ -30,6 +32,10 @@ type Client struct {
 	nb  *dbClient
 	sb  *dbClient
 	ovs *dbClient
+	of  OpenFlowConfig
+
+	sdwanMu sync.Mutex
+	sdwan   SDWANBackend
 
 	closeOnce sync.Once
 }
@@ -62,7 +68,7 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 		sb.close()
 		return nil, err
 	}
-	return &Client{nb: nb, sb: sb, ovs: ovs}, nil
+	return &Client{nb: nb, sb: sb, ovs: ovs, of: cfg.OpenFlow}, nil
 }
 
 func connectDB(ctx context.Context, database, address string) (*dbClient, error) {
@@ -159,6 +165,11 @@ func (c *Client) OVN() OVN {
 // LocalOVS returns the local Open_vSwitch API.
 func (c *Client) LocalOVS() *OVSClient {
 	return &OVSClient{db: c.ovs}
+}
+
+// OpenFlow returns native OpenFlow APIs for local Open_vSwitch bridges.
+func (c *Client) OpenFlow() *OpenFlowClient {
+	return &OpenFlowClient{ovs: c.LocalOVS(), config: c.of, dialer: openFlowNetDialer{}}
 }
 
 // OVN groups OVN APIs.

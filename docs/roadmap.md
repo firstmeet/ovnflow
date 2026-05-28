@@ -74,6 +74,15 @@ The next feature work should build on the delivered v2 primitives:
 - Traffic mirror, capture, and debug-flow helpers over OVS mirror/sampling and
   OVN/SB runtime state.
 
+## In Progress for v2.2.0
+
+- Native OpenFlow 1.5/1.3 protocol support for bridge flow add/delete/dump,
+  OXM match encoding, output/set-field actions, and OVS controller endpoint
+  setup without `ovs-ofctl`.
+- SD-WAN open primitives for Site, Link, Policy, L2/L3 overlay mode, Partial
+  Mesh planning, WireGuard/Geneve/VXLAN transports, and pluggable Apply
+  backends.
+
 ## LinuxRouter Hardening
 
 LinuxRouter HA orchestration, leader election, failover, VIP movement, and
