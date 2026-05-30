@@ -16,7 +16,7 @@ The current SDK surface covers:
 | OVN Southbound | typed list/get/watch for chassis, port binding, datapath, logical flow, MAC/FDB, multicast, service monitor, RBAC, meter, DNS, and BFD |
 | Open_vSwitch | bridge/port/interface lifecycle plus controller, manager, mirror, QoS, queue, flow table, NetFlow, sFlow, IPFIX, SSL, and AutoAttach fluent table APIs |
 | OpenFlow | native OpenFlow 1.5/1.3 negotiation, message codec, flow add/delete/dump primitives, fluent owned-rule builders without shelling out to `ovs-ofctl`, and live OVS endpoint integration gates |
-| SD-WAN | open Site/Link/Tunnel/Policy primitives with explicit Partial Mesh links, Hub-Spoke/Full Mesh planning, disabled links, L2/L3 overlay modes, WireGuard/Geneve/VXLAN transports, Linux route/OVS tunnel/OpenFlow backend hooks, agent/control-plane primitives, and pluggable Apply backends |
+| SD-WAN | open Site/Link/Tunnel/Policy primitives with explicit Partial Mesh links, Hub-Spoke/Full Mesh planning, direct/relay/transit/auto path modes, disabled links, L2/L3 overlay modes, WireGuard/Geneve/VXLAN transports, Linux route/OVS tunnel/OpenFlow backend hooks, agent/control-plane primitives, and pluggable Apply backends |
 | v2 intent | platform-neutral `VirtualNetwork`, `LogicalSwitchDNS`, `WorkloadAttachment`, `ProviderNetwork`, `SecurityPolicy`, `NetworkService`, and `QoSPolicy` with owner/label metadata, dry-run/reconcile, typed get/inspect, and delete helpers |
 | IPAM | pure Go IPv4 CIDR planning, gateway/reserved/excluded address handling, allocation, release, availability, and overlap checks without running a persistent IPAM service |
 | LinuxRouter | optional Linux-only namespace router model with DNSMasq, SNAT/MASQUERADE/DNAT/port-forward/destination-map, firewall rules, fake executor tests, and a Linux command backend |
@@ -103,11 +103,13 @@ err = client.SDWAN().
     Network("corp-wan").
     Ensure().
     Layer3().
-    TopologyPartialMesh().
+    TopologyHubSpoke().
     WithTransport(ovnflow.SDWANTransportWireGuard).
+    PathModeAuto().
+    AddSite("edge-r", ovnflow.SDWANSite{Router: "edge-r", CIDRs: []string{"10.250.0.0/24"}, Relay: true}).
     AddSite("edge-a", ovnflow.SDWANSite{Router: "edge-a", CIDRs: []string{"10.10.0.0/16"}}).
     AddSite("edge-b", ovnflow.SDWANSite{Router: "edge-b", CIDRs: []string{"10.20.0.0/16"}}).
-    AddLink(ovnflow.SDWANLink{From: "edge-a", To: "edge-b"}).
+    AddLink(ovnflow.SDWANLink{From: "edge-a", To: "edge-b", PathMode: ovnflow.SDWANPathModeDirect}).
     Apply(ctx)
 if err != nil {
     return err

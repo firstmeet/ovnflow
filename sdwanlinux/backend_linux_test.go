@@ -4,6 +4,7 @@ package sdwanlinux
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/firstmeet/ovnflow/v2"
@@ -73,6 +74,145 @@ func TestWireGuardBackendRendersLinuxCommands(t *testing.T) {
 	}
 	if !hasCommand(commands, "ip", "rule", "del", "priority") {
 		t.Fatalf("missing idempotent priority cleanup before rule add: %#v", commands)
+	}
+}
+
+func TestWireGuardRelayPathIncludesSpokeCIDRs(t *testing.T) {
+	exec := &FakeExecutor{}
+	backend, err := NewBackend(Config{LocalSite: "edge-a", Executor: exec})
+	if err != nil {
+		t.Fatalf("NewBackend() = %v", err)
+	}
+	network := ovnflow.SDWANNetwork{
+		Name:      "wan",
+		Layer:     ovnflow.SDWANLayerL3,
+		Transport: ovnflow.SDWANTransportWireGuard,
+		PathMode:  ovnflow.SDWANPathModeRelay,
+		Sites: []ovnflow.SDWANSite{
+			{Name: "edge-a", Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}},
+			{Name: "edge-r", Router: "edge-r", CIDRs: []string{"10.255.0.0/24"}, Relay: true, PublicKey: "relay-key"},
+			{Name: "edge-b", Router: "edge-b", CIDRs: []string{"10.1.0.0/24"}},
+			{Name: "edge-c", Router: "edge-c", CIDRs: []string{"10.2.0.0/24"}},
+		},
+		Links: []ovnflow.SDWANLink{{From: "edge-r", To: "edge-a", PathMode: ovnflow.SDWANPathModeRelay}},
+	}
+	if err := backend.ApplySDWAN(context.Background(), network, ovnflow.SDWANApplyPlan{}); err != nil {
+		t.Fatalf("ApplySDWAN() = %v", err)
+	}
+	commands := exec.Snapshot()
+	if !hasCommandContaining(commands, "wg", "allowed-ips", "10.1.0.0/24") || !hasCommandContaining(commands, "wg", "allowed-ips", "10.2.0.0/24") {
+		t.Fatalf("relay peer allowed-ips missing spoke CIDRs: %#v", commands)
+	}
+	if !hasCommand(commands, "ip", "route", "replace", "10.1.0.0/24") || !hasCommand(commands, "ip", "route", "replace", "10.2.0.0/24") {
+		t.Fatalf("relay routes missing spoke CIDRs: %#v", commands)
+	}
+}
+
+func TestWireGuardAutoPathPrefersDirectAndFallsBackForMissingSpokes(t *testing.T) {
+	exec := &FakeExecutor{}
+	backend, err := NewBackend(Config{LocalSite: "edge-a", Executor: exec})
+	if err != nil {
+		t.Fatalf("NewBackend() = %v", err)
+	}
+	network := ovnflow.SDWANNetwork{
+		Name:      "wan",
+		Layer:     ovnflow.SDWANLayerL3,
+		Transport: ovnflow.SDWANTransportWireGuard,
+		PathMode:  ovnflow.SDWANPathModeAuto,
+		Sites: []ovnflow.SDWANSite{
+			{Name: "edge-a", Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}},
+			{Name: "edge-r", Router: "edge-r", CIDRs: []string{"10.255.0.0/24"}, Transit: true, PublicKey: "relay-key"},
+			{Name: "edge-b", Router: "edge-b", CIDRs: []string{"10.1.0.0/24"}, PublicKey: "direct-key"},
+			{Name: "edge-c", Router: "edge-c", CIDRs: []string{"10.2.0.0/24"}},
+		},
+		Links: []ovnflow.SDWANLink{
+			{From: "edge-a", To: "edge-b", PathMode: ovnflow.SDWANPathModeDirect},
+			{From: "edge-r", To: "edge-a", PathMode: ovnflow.SDWANPathModeAuto},
+		},
+	}
+	if err := backend.ApplySDWAN(context.Background(), network, ovnflow.SDWANApplyPlan{}); err != nil {
+		t.Fatalf("ApplySDWAN() = %v", err)
+	}
+	commands := exec.Snapshot()
+	if !hasCommand(commands, "ip", "route", "replace", "10.1.0.0/24") {
+		t.Fatalf("direct route missing edge-b CIDR: %#v", commands)
+	}
+	if !hasCommand(commands, "ip", "route", "replace", "10.2.0.0/24") {
+		t.Fatalf("relay fallback route missing edge-c CIDR: %#v", commands)
+	}
+	if countCommand(commands, "ip", "route", "replace", "10.1.0.0/24") != 1 {
+		t.Fatalf("edge-b direct CIDR should not also be routed through relay: %#v", commands)
+	}
+	if !hasCommandContaining(commands, "wg", "allowed-ips", "10.2.0.0/24") {
+		t.Fatalf("relay peer missing fallback CIDR: %#v", commands)
+	}
+}
+
+func TestWireGuardDisabledDirectAutoPathFallsBackToRelay(t *testing.T) {
+	exec := &FakeExecutor{}
+	backend, err := NewBackend(Config{LocalSite: "edge-a", Executor: exec})
+	if err != nil {
+		t.Fatalf("NewBackend() = %v", err)
+	}
+	network := ovnflow.SDWANNetwork{
+		Name:      "wan",
+		Layer:     ovnflow.SDWANLayerL3,
+		Transport: ovnflow.SDWANTransportWireGuard,
+		PathMode:  ovnflow.SDWANPathModeAuto,
+		Sites: []ovnflow.SDWANSite{
+			{Name: "edge-a", Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}},
+			{Name: "edge-r", Router: "edge-r", CIDRs: []string{"10.255.0.0/24"}, Relay: true, PublicKey: "relay-key"},
+			{Name: "edge-b", Router: "edge-b", CIDRs: []string{"10.1.0.0/24"}, PublicKey: "direct-key"},
+		},
+		Links: []ovnflow.SDWANLink{
+			{From: "edge-a", To: "edge-b", PathMode: ovnflow.SDWANPathModeDirect, Disabled: true},
+			{From: "edge-r", To: "edge-a", PathMode: ovnflow.SDWANPathModeAuto},
+		},
+	}
+	if err := backend.ApplySDWAN(context.Background(), network, ovnflow.SDWANApplyPlan{}); err != nil {
+		t.Fatalf("ApplySDWAN() = %v", err)
+	}
+	commands := exec.Snapshot()
+	if !hasCommandContaining(commands, "wg", "allowed-ips", "10.1.0.0/24") {
+		t.Fatalf("disabled direct CIDR did not fall back to relay: %#v", commands)
+	}
+	if !hasCommand(commands, "ip", "link", "delete") {
+		t.Fatalf("disabled direct link did not request cleanup: %#v", commands)
+	}
+}
+
+func TestDisabledDirectCleanupRunsBeforeRelayFallbackInstall(t *testing.T) {
+	exec := &FakeExecutor{}
+	backend, err := NewBackend(Config{LocalSite: "edge-a", Executor: exec})
+	if err != nil {
+		t.Fatalf("NewBackend() = %v", err)
+	}
+	network := ovnflow.SDWANNetwork{
+		Name:      "wan",
+		Layer:     ovnflow.SDWANLayerL3,
+		Transport: ovnflow.SDWANTransportWireGuard,
+		PathMode:  ovnflow.SDWANPathModeAuto,
+		Sites: []ovnflow.SDWANSite{
+			{Name: "edge-a", Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}},
+			{Name: "edge-r", Router: "edge-r", CIDRs: []string{"10.255.0.0/24"}, Relay: true, PublicKey: "relay-key"},
+			{Name: "edge-b", Router: "edge-b", CIDRs: []string{"10.1.0.0/24"}, PublicKey: "direct-key"},
+		},
+		Links: []ovnflow.SDWANLink{
+			{Name: "z-relay", From: "edge-a", To: "edge-r", PathMode: ovnflow.SDWANPathModeAuto},
+			{Name: "a-direct", From: "edge-a", To: "edge-b", PathMode: ovnflow.SDWANPathModeDirect, Disabled: true},
+		},
+	}
+	if err := backend.ApplySDWAN(context.Background(), network, ovnflow.SDWANApplyPlan{}); err != nil {
+		t.Fatalf("ApplySDWAN() = %v", err)
+	}
+	commands := exec.Snapshot()
+	deleteIndex := firstCommandIndex(commands, "ip", "link", "delete")
+	relayRouteIndex := firstCommandIndex(commands, "ip", "route", "replace", "10.1.0.0/24")
+	if deleteIndex < 0 || relayRouteIndex < 0 {
+		t.Fatalf("missing direct cleanup or relay fallback route: %#v", commands)
+	}
+	if deleteIndex > relayRouteIndex {
+		t.Fatalf("direct cleanup ran after relay fallback install: delete=%d route=%d commands=%#v", deleteIndex, relayRouteIndex, commands)
 	}
 }
 
@@ -278,6 +418,87 @@ func hasCommand(commands []Command, program string, args ...string) bool {
 		}
 		if ok {
 			return true
+		}
+	}
+	return false
+}
+
+func hasCommandContaining(commands []Command, program string, args ...string) bool {
+	for _, command := range commands {
+		if command.Program != program {
+			continue
+		}
+		matched := true
+		for _, want := range args {
+			found := false
+			for _, got := range command.Args {
+				if got == want || containsArgValue(got, want) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+func countCommand(commands []Command, program string, args ...string) int {
+	count := 0
+	for _, command := range commands {
+		if command.Program != program || len(command.Args) < len(args) {
+			continue
+		}
+		ok := true
+		for i, arg := range args {
+			if command.Args[i] != arg {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			count++
+		}
+	}
+	return count
+}
+
+func firstCommandIndex(commands []Command, program string, args ...string) int {
+	for index, command := range commands {
+		if command.Program != program || len(command.Args) < len(args) {
+			continue
+		}
+		ok := true
+		for i, arg := range args {
+			if command.Args[i] != arg {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return index
+		}
+	}
+	return -1
+}
+
+func containsArgValue(got, want string) bool {
+	if got == want {
+		return true
+	}
+	for _, part := range []string{",", ";"} {
+		if strings.Contains(got, part) {
+			for _, value := range strings.Split(got, part) {
+				if value == want {
+					return true
+				}
+			}
 		}
 	}
 	return false

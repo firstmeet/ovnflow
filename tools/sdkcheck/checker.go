@@ -564,17 +564,19 @@ func checkOpenFlowAndSDWAN(ctx context.Context, client *ovnflow.Client, opts Opt
 	}
 	sdwanPlan, err := client.SDWAN().Network(opts.Prefix+"wan").Ensure().
 		Layer3().
-		TopologyPartialMesh().
+		TopologyHubSpoke().
 		WithTransport(ovnflow.SDWANTransportWireGuard).
+		PathModeAuto().
 		AddSite(opts.Prefix+"edge-a", ovnflow.SDWANSite{Router: opts.Prefix + "edge-a", CIDRs: []string{"10.10.0.0/16"}}).
 		AddSite(opts.Prefix+"edge-b", ovnflow.SDWANSite{Router: opts.Prefix + "edge-b", CIDRs: []string{"10.20.0.0/16"}}).
-		AddLink(ovnflow.SDWANLink{From: opts.Prefix + "edge-a", To: opts.Prefix + "edge-b"}).
+		AddSite(opts.Prefix+"edge-r", ovnflow.SDWANSite{Router: opts.Prefix + "edge-r", CIDRs: []string{"10.250.0.0/24"}, Relay: true}).
+		AddLink(ovnflow.SDWANLink{From: opts.Prefix + "edge-a", To: opts.Prefix + "edge-b", PathMode: ovnflow.SDWANPathModeDirect}).
 		ApplyPlan(ctx)
 	if err != nil {
 		return fmt.Errorf("sdwan apply plan: %w", err)
 	}
-	if len(sdwanPlan.Operations) < 4 {
-		return fmt.Errorf("sdwan operations = %d, want at least 4", len(sdwanPlan.Operations))
+	if !hasPlanOperation(sdwanPlan, "SDWANPath") {
+		return fmt.Errorf("sdwan plan missing SDWANPath operation: %#v", sdwanPlan.Operations)
 	}
 	controlPlane := ovnflow.NewInMemorySDWANControlPlane()
 	if _, err := controlPlane.RegisterAgent(ctx, ovnflow.SDWANAgent{
@@ -602,6 +604,15 @@ func checkOpenFlowAndSDWAN(ctx context.Context, client *ovnflow.Client, opts Opt
 	}
 	_ = sdwanlinux.Config{LocalSite: opts.Prefix + "edge-a"}
 	return nil
+}
+
+func hasPlanOperation(plan ovnflow.SDWANApplyPlan, resource string) bool {
+	for _, op := range plan.Operations {
+		if op.Resource == resource {
+			return true
+		}
+	}
+	return false
 }
 
 func cleanupNB(ctx context.Context, nb *ovnflow.NBClient, ls, lsp, lr, lrp, aclMatch, natIP, lb, dhcp, dns, qosMatch, meter, meterBand, pg, addrSet, gw, ha, hag, bfdIP string) {

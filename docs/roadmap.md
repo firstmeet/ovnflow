@@ -76,6 +76,17 @@ Those business models stay outside the foundation SDK.
 - SD-WAN disabled-link semantics and site/link attributes for backend-specific
   runtime settings while preserving the existing backend interface.
 
+## Delivered in v2.4.0
+
+- SD-WAN direct, relay, transit, and auto path modes without changing the
+  `SDWANBackend` interface.
+- Relay/transit-aware WireGuard AllowedIPs and Linux policy-route rendering in
+  `sdwanlinux`.
+- Auto path behavior that keeps enabled P2P direct links preferred and moves
+  only missing or disabled direct destinations through relay/transit links.
+- Release workflow Windows unit validation for ordinary non-Linux test
+  compatibility.
+
 ## v2.x Candidates
 
 The next feature work should build on the delivered v2 primitives:

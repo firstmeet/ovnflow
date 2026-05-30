@@ -2,6 +2,21 @@
 
 All notable changes to `ovnflow` are tracked here.
 
+## v2.4.0 - 2026-05-30
+
+### Added
+
+- SD-WAN path modes for direct P2P, relay, transit, and auto fallback while
+  keeping empty path mode compatible with the v2.3 direct behavior.
+- Hub/relay aware WireGuard route and AllowedIPs planning in `sdwanlinux`, so
+  auto mode prefers enabled direct links and uses relay/transit links only for
+  missing or disabled direct paths.
+
+### Hardened
+
+- Release validation now includes a Windows unit job, proving ordinary tests do
+  not require Linux tools, root, WireGuard, OVS, WSL, or Docker.
+
 ## v2.3.0 - 2026-05-29
 
 ### Added

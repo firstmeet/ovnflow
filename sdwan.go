@@ -31,6 +31,15 @@ const (
 	SDWANTopologyFullMesh    SDWANTopology = "full-mesh"
 )
 
+type SDWANPathMode string
+
+const (
+	SDWANPathModeDirect  SDWANPathMode = "direct"
+	SDWANPathModeRelay   SDWANPathMode = "relay"
+	SDWANPathModeTransit SDWANPathMode = "transit"
+	SDWANPathModeAuto    SDWANPathMode = "auto"
+)
+
 type SDWANBackend interface {
 	GetSDWAN(context.Context, string) (*SDWANNetwork, error)
 	ApplySDWAN(context.Context, SDWANNetwork, SDWANApplyPlan) error
@@ -62,6 +71,7 @@ type SDWANNetwork struct {
 	Layer     SDWANLayer
 	Topology  SDWANTopology
 	Transport SDWANTransport
+	PathMode  SDWANPathMode
 	Sites     []SDWANSite
 	Links     []SDWANLink
 	Policies  []SDWANPolicy
@@ -88,6 +98,7 @@ type SDWANLink struct {
 	From       string
 	To         string
 	Transport  SDWANTransport
+	PathMode   SDWANPathMode
 	EndpointA  string
 	EndpointB  string
 	AllowedIPs []string
@@ -128,6 +139,7 @@ type SDWANLinkStatus struct {
 	From      string
 	To        string
 	Transport SDWANTransport
+	PathMode  SDWANPathMode
 	Ready     bool
 }
 
@@ -240,6 +252,31 @@ func (b *SDWANNetworkBuilder) TopologyHubSpoke() *SDWANNetworkBuilder {
 
 func (b *SDWANNetworkBuilder) WithTransport(transport SDWANTransport) *SDWANNetworkBuilder {
 	b.network.Transport = transport
+	return b
+}
+
+func (b *SDWANNetworkBuilder) WithPathMode(mode SDWANPathMode) *SDWANNetworkBuilder {
+	b.network.PathMode = mode
+	return b
+}
+
+func (b *SDWANNetworkBuilder) PathModeDirect() *SDWANNetworkBuilder {
+	b.network.PathMode = SDWANPathModeDirect
+	return b
+}
+
+func (b *SDWANNetworkBuilder) PathModeRelay() *SDWANNetworkBuilder {
+	b.network.PathMode = SDWANPathModeRelay
+	return b
+}
+
+func (b *SDWANNetworkBuilder) PathModeTransit() *SDWANNetworkBuilder {
+	b.network.PathMode = SDWANPathModeTransit
+	return b
+}
+
+func (b *SDWANNetworkBuilder) PathModeAuto() *SDWANNetworkBuilder {
+	b.network.PathMode = SDWANPathModeAuto
 	return b
 }
 
@@ -441,6 +478,12 @@ func (n SDWANNetwork) Validate() error {
 	if !validSDWANTransport(n.Transport) {
 		return wrap(ErrorValidation, "", "", "validate", n.Name, "unsupported SD-WAN transport", nil)
 	}
+	if n.PathMode == "" {
+		n.PathMode = SDWANPathModeDirect
+	}
+	if !validSDWANPathMode(n.PathMode) {
+		return wrap(ErrorValidation, "", "", "validate", n.Name, "unsupported SD-WAN path mode", nil)
+	}
 	if n.Owner.Kind != "" || n.Owner.Name != "" || n.Owner.ID != "" {
 		if err := n.Owner.Validate(); err != nil {
 			return err
@@ -453,6 +496,7 @@ func (n SDWANNetwork) Validate() error {
 		return wrap(ErrorValidation, "", "", "validate", n.Name, "at least two SD-WAN sites are required", nil)
 	}
 	siteNames := map[string]bool{}
+	relaySites := map[string]bool{}
 	for _, site := range n.Sites {
 		if err := site.Validate(n.Layer); err != nil {
 			return err
@@ -461,9 +505,15 @@ func (n SDWANNetwork) Validate() error {
 			return wrap(ErrorConflict, "", "", "validate", site.Name, "duplicate SD-WAN site", nil)
 		}
 		siteNames[site.Name] = true
+		if strings.EqualFold(site.Role, "hub") || site.Transit || site.Relay {
+			relaySites[site.Name] = true
+		}
 	}
 	for _, link := range n.Links {
 		if err := link.Validate(siteNames, n.Transport); err != nil {
+			return err
+		}
+		if err := validateSDWANLinkPathEndpoint(link, relaySites); err != nil {
 			return err
 		}
 	}
@@ -512,6 +562,18 @@ func (l SDWANLink) Validate(sites map[string]bool, fallback SDWANTransport) erro
 	}
 	if !validSDWANTransport(transport) {
 		return wrap(ErrorValidation, "", "", "validate", l.StableName(), "unsupported SD-WAN link transport", nil)
+	}
+	if l.PathMode != "" && !validSDWANPathMode(l.PathMode) {
+		return wrap(ErrorValidation, "", "", "validate", l.StableName(), "unsupported SD-WAN link path mode", nil)
+	}
+	return nil
+}
+
+func validateSDWANLinkPathEndpoint(l SDWANLink, relaySites map[string]bool) error {
+	if l.PathMode == SDWANPathModeRelay || l.PathMode == SDWANPathModeTransit || l.PathMode == SDWANPathModeAuto {
+		if !relaySites[l.From] && !relaySites[l.To] {
+			return wrap(ErrorValidation, "", "", "validate", l.StableName(), "relay, transit, and auto links must touch a hub, transit, or relay site", nil)
+		}
 	}
 	return nil
 }
@@ -573,6 +635,9 @@ func planSDWANApply(network SDWANNetwork) SDWANApplyPlan {
 		} else {
 			ops = append(ops, SDWANOperation{Action: IntentActionEnsure, Resource: "OpenFlowRule", Name: link.StableName(), Description: "ensure L2 overlay forwarding flow"})
 		}
+		if link.PathMode == SDWANPathModeRelay || link.PathMode == SDWANPathModeTransit || link.PathMode == SDWANPathModeAuto {
+			ops = append(ops, SDWANOperation{Action: IntentActionEnsure, Resource: "SDWANPath", Name: link.StableName(), Description: "ensure SD-WAN path selection and relay compatibility"})
+		}
 	}
 	for _, policy := range network.Policies {
 		ops = append(ops, SDWANOperation{Action: IntentActionEnsure, Resource: "SDWANPolicy", Name: policy.Name, Description: "ensure SD-WAN traffic policy"})
@@ -590,6 +655,9 @@ func normalizeSDWANNetwork(in SDWANNetwork) SDWANNetwork {
 	}
 	if out.Transport == "" {
 		out.Transport = SDWANTransportWireGuard
+	}
+	if out.PathMode == "" {
+		out.PathMode = SDWANPathModeDirect
 	}
 	out.Sites = normalizeSDWANSites(out.Sites)
 	out.Links = normalizeSDWANLinks(out)
@@ -610,6 +678,7 @@ func normalizeSDWANSites(in []SDWANSite) []SDWANSite {
 
 func normalizeSDWANLinks(network SDWANNetwork) []SDWANLink {
 	links := append([]SDWANLink{}, network.Links...)
+	relaySites := relaySDWANSiteNames(network.Sites)
 	switch network.Topology {
 	case SDWANTopologyFullMesh:
 		sites := normalizeSDWANSites(network.Sites)
@@ -639,6 +708,9 @@ func normalizeSDWANLinks(network SDWANNetwork) []SDWANLink {
 		if links[i].Transport == "" {
 			links[i].Transport = network.Transport
 		}
+		if links[i].PathMode == "" {
+			links[i].PathMode = defaultSDWANLinkPathMode(network.PathMode, links[i], relaySites)
+		}
 		if links[i].Disabled {
 			links[i].Enabled = false
 		} else if !links[i].Enabled {
@@ -649,6 +721,26 @@ func normalizeSDWANLinks(network SDWANNetwork) []SDWANLink {
 	}
 	sort.Slice(links, func(i, j int) bool { return links[i].StableName() < links[j].StableName() })
 	return links
+}
+
+func defaultSDWANLinkPathMode(networkMode SDWANPathMode, link SDWANLink, relaySites map[string]bool) SDWANPathMode {
+	if networkMode == "" || networkMode == SDWANPathModeDirect {
+		return SDWANPathModeDirect
+	}
+	if relaySites[link.From] || relaySites[link.To] {
+		return networkMode
+	}
+	return SDWANPathModeDirect
+}
+
+func relaySDWANSiteNames(sites []SDWANSite) map[string]bool {
+	out := map[string]bool{}
+	for _, site := range sites {
+		if strings.EqualFold(site.Role, "hub") || site.Transit || site.Relay {
+			out[site.Name] = true
+		}
+	}
+	return out
 }
 
 func ensureAutoSDWANLink(base []SDWANLink, link SDWANLink) []SDWANLink {
@@ -704,6 +796,10 @@ func validSDWANLayer(value SDWANLayer) bool {
 
 func validSDWANTopology(value SDWANTopology) bool {
 	return value == SDWANTopologyPartialMesh || value == SDWANTopologyHubSpoke || value == SDWANTopologyFullMesh
+}
+
+func validSDWANPathMode(value SDWANPathMode) bool {
+	return value == SDWANPathModeDirect || value == SDWANPathModeRelay || value == SDWANPathModeTransit || value == SDWANPathModeAuto
 }
 
 func validSDWANTransport(value SDWANTransport) bool {

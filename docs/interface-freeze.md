@@ -98,3 +98,8 @@ iptables, so the GitHub Release job waits for both backends before publishing.
 v2.3 keeps the original `SDWANBackend` interface stable and adds production
 runtime support through the injectable Linux-only `sdwanlinux` package plus
 neutral SD-WAN agent/control-plane primitives in the root package.
+
+v2.4 keeps `SDWANBackend` and existing SD-WAN method signatures stable while
+adding optional SD-WAN path-mode fields for direct, relay, transit, and auto
+fallback. Callers should use keyed struct literals for v2 intent structs so new
+optional fields remain source-compatible.

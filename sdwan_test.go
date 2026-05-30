@@ -183,6 +183,148 @@ func TestSDWANFullMeshPreservesExplicitDisabledLink(t *testing.T) {
 	}
 }
 
+func TestSDWANPathModeDefaultsToDirectAndNormalizesLinks(t *testing.T) {
+	network, err := NewSDWANClient(nil).Network("wan").Ensure().
+		AddSite("edge-a", SDWANSite{Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}}).
+		AddSite("edge-b", SDWANSite{Router: "edge-b", CIDRs: []string{"10.1.0.0/24"}}).
+		AddLink(SDWANLink{From: "edge-a", To: "edge-b"}).
+		networkForTest(context.Background())
+	if err != nil {
+		t.Fatalf("networkForTest() = %v", err)
+	}
+	if network.PathMode != SDWANPathModeDirect {
+		t.Fatalf("network path mode = %q, want direct", network.PathMode)
+	}
+	if len(network.Links) != 1 || network.Links[0].PathMode != SDWANPathModeDirect {
+		t.Fatalf("link path mode not defaulted to direct: %#v", network.Links)
+	}
+}
+
+func TestSDWANHubSpokeAutoRelayPlansTransitLinks(t *testing.T) {
+	network, err := NewSDWANClient(nil).Network("wan").Ensure().
+		TopologyHubSpoke().
+		PathModeAuto().
+		AddSite("edge-r", SDWANSite{Router: "edge-r", CIDRs: []string{"10.255.0.0/24"}, Relay: true}).
+		AddSite("edge-a", SDWANSite{Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}}).
+		AddSite("edge-b", SDWANSite{Router: "edge-b", CIDRs: []string{"10.1.0.0/24"}}).
+		networkForTest(context.Background())
+	if err != nil {
+		t.Fatalf("networkForTest() = %v", err)
+	}
+	if len(network.Links) != 2 {
+		t.Fatalf("links = %d, want relay-spoke links: %#v", len(network.Links), network.Links)
+	}
+	for _, name := range []string{"edge-a--edge-r", "edge-b--edge-r"} {
+		link, ok := findSDWANLinkForTest(network.Links, name)
+		if !ok {
+			t.Fatalf("missing auto relay link %s: %#v", name, network.Links)
+		}
+		if link.PathMode != SDWANPathModeAuto {
+			t.Fatalf("link %s path mode = %q, want auto", name, link.PathMode)
+		}
+	}
+	plan := planSDWANApply(network)
+	for _, name := range []string{"edge-a--edge-r", "edge-b--edge-r"} {
+		if !hasSDWANOperation(plan, "SDWANPath", name) {
+			t.Fatalf("plan missing SDWANPath %s: %#v", name, plan.Operations)
+		}
+	}
+}
+
+func TestSDWANAutoPathPreservesExplicitDirectFallback(t *testing.T) {
+	network, err := NewSDWANClient(nil).Network("wan").Ensure().
+		TopologyHubSpoke().
+		PathModeAuto().
+		AddSite("edge-r", SDWANSite{Router: "edge-r", CIDRs: []string{"10.255.0.0/24"}, Transit: true}).
+		AddSite("edge-a", SDWANSite{Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}}).
+		AddSite("edge-b", SDWANSite{Router: "edge-b", CIDRs: []string{"10.1.0.0/24"}}).
+		AddLink(SDWANLink{From: "edge-a", To: "edge-b", PathMode: SDWANPathModeDirect}).
+		networkForTest(context.Background())
+	if err != nil {
+		t.Fatalf("networkForTest() = %v", err)
+	}
+	direct, ok := findSDWANLinkForTest(network.Links, "edge-a--edge-b")
+	if !ok {
+		t.Fatalf("missing explicit direct link: %#v", network.Links)
+	}
+	if direct.PathMode != SDWANPathModeDirect {
+		t.Fatalf("direct link path mode = %q, want direct", direct.PathMode)
+	}
+	plan := planSDWANApply(network)
+	if hasSDWANOperation(plan, "SDWANPath", "edge-a--edge-b") {
+		t.Fatalf("direct link unexpectedly planned as fallback path: %#v", plan.Operations)
+	}
+	for _, name := range []string{"edge-a--edge-r", "edge-b--edge-r"} {
+		if !hasSDWANOperation(plan, "SDWANPath", name) {
+			t.Fatalf("plan missing relay fallback path %s: %#v", name, plan.Operations)
+		}
+	}
+}
+
+func TestSDWANPathModeRelayDoesNotMarkSpokeDirectLinksAsRelay(t *testing.T) {
+	network, err := NewSDWANClient(nil).Network("wan").Ensure().
+		PathModeRelay().
+		AddSite("edge-r", SDWANSite{Router: "edge-r", CIDRs: []string{"10.255.0.0/24"}, Relay: true}).
+		AddSite("edge-a", SDWANSite{Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}}).
+		AddSite("edge-b", SDWANSite{Router: "edge-b", CIDRs: []string{"10.1.0.0/24"}}).
+		AddLink(SDWANLink{From: "edge-a", To: "edge-b"}).
+		AddLink(SDWANLink{From: "edge-a", To: "edge-r"}).
+		networkForTest(context.Background())
+	if err != nil {
+		t.Fatalf("networkForTest() = %v", err)
+	}
+	direct, ok := findSDWANLinkForTest(network.Links, "edge-a--edge-b")
+	if !ok {
+		t.Fatalf("missing spoke direct link: %#v", network.Links)
+	}
+	if direct.PathMode != SDWANPathModeDirect {
+		t.Fatalf("spoke direct link path mode = %q, want direct", direct.PathMode)
+	}
+	relay, ok := findSDWANLinkForTest(network.Links, "edge-a--edge-r")
+	if !ok {
+		t.Fatalf("missing relay link: %#v", network.Links)
+	}
+	if relay.PathMode != SDWANPathModeRelay {
+		t.Fatalf("relay link path mode = %q, want relay", relay.PathMode)
+	}
+}
+
+func TestSDWANPathModeValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		builder *SDWANNetworkBuilder
+	}{
+		{
+			name: "bad network path mode",
+			builder: NewSDWANClient(nil).Network("wan").Ensure().
+				WithPathMode(SDWANPathMode("bad")).
+				AddSite("edge-a", SDWANSite{Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}}).
+				AddSite("edge-b", SDWANSite{Router: "edge-b", CIDRs: []string{"10.1.0.0/24"}}),
+		},
+		{
+			name: "bad link path mode",
+			builder: NewSDWANClient(nil).Network("wan").Ensure().
+				AddSite("edge-a", SDWANSite{Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}}).
+				AddSite("edge-b", SDWANSite{Router: "edge-b", CIDRs: []string{"10.1.0.0/24"}}).
+				AddLink(SDWANLink{From: "edge-a", To: "edge-b", PathMode: SDWANPathMode("bad")}),
+		},
+		{
+			name: "relay path without relay endpoint",
+			builder: NewSDWANClient(nil).Network("wan").Ensure().
+				AddSite("edge-a", SDWANSite{Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}}).
+				AddSite("edge-b", SDWANSite{Router: "edge-b", CIDRs: []string{"10.1.0.0/24"}}).
+				AddLink(SDWANLink{From: "edge-a", To: "edge-b", PathMode: SDWANPathModeRelay}),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.builder.Validate(); !IsKind(err, ErrorValidation) {
+				t.Fatalf("Validate() = %v, want validation", err)
+			}
+		})
+	}
+}
+
 func TestSDWANInMemoryBackendPreservesObservedStatus(t *testing.T) {
 	backend := NewInMemorySDWANBackend()
 	ctx := context.Background()
@@ -251,4 +393,13 @@ func hasSDWANOperation(plan SDWANApplyPlan, resource, name string) bool {
 		}
 	}
 	return false
+}
+
+func findSDWANLinkForTest(links []SDWANLink, name string) (SDWANLink, bool) {
+	for _, link := range links {
+		if link.StableName() == name {
+			return link, true
+		}
+	}
+	return SDWANLink{}, false
 }

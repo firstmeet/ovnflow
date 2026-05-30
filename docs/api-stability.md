@@ -20,6 +20,9 @@ Compatibility rules:
 
 - Existing stable methods will not be removed or change semantics within the
   v1 major line.
+- Public structs should be initialized with keyed fields. v2 may add new
+  optional fields to stable structs such as SD-WAN intent types without changing
+  method signatures or existing field meanings.
 - New OVN/OVS schema columns may appear as new optional helpers.
 - Optional columns continue to degrade at runtime when unsupported by the
   connected schema.

@@ -180,6 +180,14 @@ func (b *Backend) ApplySDWAN(ctx context.Context, network ovnflow.SDWANNetwork, 
 		}
 	}
 	for _, link := range network.Links {
+		if !linkTouchesSite(link, b.localSite) || (!link.Disabled && link.Enabled) {
+			continue
+		}
+		if err := b.deleteLink(ctx, network, link); err != nil {
+			return err
+		}
+	}
+	for _, link := range network.Links {
 		if !linkTouchesSite(link, b.localSite) {
 			continue
 		}
@@ -188,9 +196,6 @@ func (b *Backend) ApplySDWAN(ctx context.Context, network ovnflow.SDWANNetwork, 
 			return &ovnflow.Error{Kind: ovnflow.ErrorValidation, Operation: "apply", Object: link.StableName(), Message: "remote site not found"}
 		}
 		if link.Disabled || !link.Enabled {
-			if err := b.deleteLink(ctx, network, link); err != nil {
-				return err
-			}
 			continue
 		}
 		switch link.Transport {
@@ -325,7 +330,7 @@ func (b *Backend) renderWireGuardCommands(network ovnflow.SDWANNetwork, local, r
 	if endpoint != "" {
 		peerArgs = append(peerArgs, "endpoint", endpoint)
 	}
-	allowedIPs := allowedIPsForRemote(remote, link)
+	allowedIPs := allowedIPsForRemote(network, remote, link, b.localSite)
 	if len(allowedIPs) > 0 {
 		peerArgs = append(peerArgs, "allowed-ips", strings.Join(allowedIPs, ","))
 	}
@@ -342,7 +347,7 @@ func (b *Backend) renderWireGuardCommands(network ovnflow.SDWANNetwork, local, r
 func (b *Backend) renderRouteCommands(network ovnflow.SDWANNetwork, remote ovnflow.SDWANSite, link ovnflow.SDWANLink) []Command {
 	iface := b.tunnelInterface(network, link)
 	var commands []Command
-	for _, cidr := range allowedIPsForRemote(remote, link) {
+	for _, cidr := range allowedIPsForRemote(network, remote, link, b.localSite) {
 		priority := strconv.Itoa(routeRulePriority(network, link, cidr))
 		commands = append(commands, Command{Program: "ip", Args: []string{"route", "replace", cidr, "dev", iface, "table", strconv.Itoa(b.routeTable)}})
 		commands = append(commands, Command{Program: "ip", Args: []string{"rule", "del", "priority", priority}, IgnoreNotFound: true})
@@ -354,7 +359,7 @@ func (b *Backend) renderRouteCommands(network ovnflow.SDWANNetwork, remote ovnfl
 func (b *Backend) renderRouteDeleteCommands(network ovnflow.SDWANNetwork, remote ovnflow.SDWANSite, link ovnflow.SDWANLink) []Command {
 	iface := b.tunnelInterface(network, link)
 	var commands []Command
-	for _, cidr := range allowedIPsForRemote(remote, link) {
+	for _, cidr := range allowedIPsForRemote(network, remote, link, b.localSite) {
 		priority := strconv.Itoa(routeRulePriority(network, link, cidr))
 		commands = append(commands, Command{Program: "ip", Args: []string{"rule", "del", "priority", priority}, IgnoreNotFound: true})
 		commands = append(commands, Command{Program: "ip", Args: []string{"rule", "del", "to", cidr, "lookup", strconv.Itoa(b.routeTable)}, IgnoreNotFound: true})
@@ -614,11 +619,64 @@ func remoteSiteName(link ovnflow.SDWANLink, local string) string {
 	return link.From
 }
 
-func allowedIPsForRemote(remote ovnflow.SDWANSite, link ovnflow.SDWANLink) []string {
+func linkActsAsRelayPath(network ovnflow.SDWANNetwork, link ovnflow.SDWANLink, local string) bool {
+	mode := link.PathMode
+	if mode == "" {
+		mode = network.PathMode
+	}
+	if mode != ovnflow.SDWANPathModeRelay && mode != ovnflow.SDWANPathModeTransit && mode != ovnflow.SDWANPathModeAuto {
+		return false
+	}
+	remote := remoteSite(network, link, local)
+	return isRelaySite(remote)
+}
+
+func isRelaySite(site ovnflow.SDWANSite) bool {
+	return strings.EqualFold(site.Role, "hub") || site.Transit || site.Relay
+}
+
+func allowedIPsForRemote(network ovnflow.SDWANNetwork, remote ovnflow.SDWANSite, link ovnflow.SDWANLink, local string) []string {
 	if len(link.AllowedIPs) > 0 {
 		return uniqueSorted(link.AllowedIPs)
 	}
-	return uniqueSorted(remote.CIDRs)
+	cidrs := append([]string{}, remote.CIDRs...)
+	if linkActsAsRelayPath(network, link, local) {
+		for _, site := range network.Sites {
+			if site.Name == local || site.Name == remote.Name || isRelaySite(site) {
+				continue
+			}
+			if pathModeForLink(network, link) == ovnflow.SDWANPathModeAuto && hasEnabledDirectLink(network, local, site.Name) {
+				continue
+			}
+			cidrs = append(cidrs, site.CIDRs...)
+		}
+	}
+	return uniqueSorted(cidrs)
+}
+
+func pathModeForLink(network ovnflow.SDWANNetwork, link ovnflow.SDWANLink) ovnflow.SDWANPathMode {
+	if link.PathMode != "" {
+		return link.PathMode
+	}
+	if network.PathMode != "" {
+		return network.PathMode
+	}
+	return ovnflow.SDWANPathModeDirect
+}
+
+func hasEnabledDirectLink(network ovnflow.SDWANNetwork, a, b string) bool {
+	for _, link := range network.Links {
+		if link.Disabled || !link.Enabled {
+			continue
+		}
+		if pathModeForLink(network, link) != ovnflow.SDWANPathModeDirect {
+			continue
+		}
+		if linkTouchesSite(link, a) && linkTouchesSite(link, b) {
+			return true
+		}
+	}
+	return false
 }
 
 func endpointForRemote(link ovnflow.SDWANLink, local string) string {
