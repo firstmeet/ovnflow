@@ -313,6 +313,88 @@ func TestIntegrationSDWANWireGuardLinuxRouteLifecycle(t *testing.T) {
 	}
 }
 
+func TestIntegrationSDWANWireGuardAutoPathRoutePreference(t *testing.T) {
+	if !ovnflow.EnvGateEnabled(os.Getenv(ovnflow.EnvSDWANBackendChecks)) ||
+		!ovnflow.EnvGateEnabled(os.Getenv(ovnflow.EnvSDWANPrivilegedChecks)) ||
+		!ovnflow.EnvGateEnabled(os.Getenv(ovnflow.EnvWireGuardChecks)) ||
+		!ovnflow.EnvGateEnabled(os.Getenv(ovnflow.EnvLinuxRouteChecks)) {
+		t.Skipf("set %s=1, %s=1, %s=1, and %s=1 to run privileged SD-WAN auto path checks",
+			ovnflow.EnvSDWANBackendChecks, ovnflow.EnvSDWANPrivilegedChecks, ovnflow.EnvWireGuardChecks, ovnflow.EnvLinuxRouteChecks)
+	}
+	if os.Geteuid() != 0 {
+		t.Fatal("privileged SD-WAN auto path checks require root or equivalent CAP_NET_ADMIN")
+	}
+	requireCommand(t, "ip")
+	requireCommand(t, "wg")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	suffix := integrationSuffix()
+	networkName := "ofwa" + suffix
+	keyPath := t.TempDir() + "/wg.key"
+	privateKey, _ := wireGuardKeyPair(t, ctx)
+	_, relayPublicKey := wireGuardKeyPair(t, ctx)
+	_, directPublicKey := wireGuardKeyPair(t, ctx)
+	if err := os.WriteFile(keyPath, []byte(privateKey+"\n"), 0o600); err != nil {
+		t.Fatalf("write WireGuard private key: %v", err)
+	}
+
+	backend, err := NewBackend(Config{
+		LocalSite:       "edge-a",
+		InterfacePrefix: "of",
+		RouteTable:      51822,
+	})
+	if err != nil {
+		t.Fatalf("NewBackend() = %v", err)
+	}
+	direct := ovnflow.SDWANLink{From: "edge-a", To: "edge-b", Transport: ovnflow.SDWANTransportWireGuard, PathMode: ovnflow.SDWANPathModeDirect}
+	relay := ovnflow.SDWANLink{From: "edge-a", To: "edge-r", Transport: ovnflow.SDWANTransportWireGuard, PathMode: ovnflow.SDWANPathModeAuto}
+	baseNetwork := ovnflow.SDWANNetwork{
+		Name:      networkName,
+		Layer:     ovnflow.SDWANLayerL3,
+		Transport: ovnflow.SDWANTransportWireGuard,
+		PathMode:  ovnflow.SDWANPathModeAuto,
+		Sites: []ovnflow.SDWANSite{
+			{Name: "edge-a", Router: "edge-a", CIDRs: []string{"10.0.0.0/24"}, Attributes: map[string]string{"wireguard_private_key_file": keyPath}},
+			{Name: "edge-r", Router: "edge-r", CIDRs: []string{"10.255.0.0/24"}, Relay: true, Endpoint: "127.0.0.1:51821", PublicKey: relayPublicKey},
+			{Name: "edge-b", Router: "edge-b", CIDRs: []string{"198.51.100.10/32"}, Endpoint: "127.0.0.1:51822", PublicKey: directPublicKey},
+		},
+		Links: []ovnflow.SDWANLink{direct, relay},
+	}
+	directIface := backend.wireGuardInterface(baseNetwork, direct)
+	relayIface := backend.wireGuardInterface(baseNetwork, relay)
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_ = backend.DeleteSDWAN(cleanupCtx, networkName)
+		_ = (SystemExecutor{}).Run(cleanupCtx, Command{Program: "ip", Args: []string{"link", "delete", directIface}, IgnoreNotFound: true})
+		_ = (SystemExecutor{}).Run(cleanupCtx, Command{Program: "ip", Args: []string{"link", "delete", relayIface}, IgnoreNotFound: true})
+	})
+
+	if err := backend.ApplySDWAN(ctx, baseNetwork, ovnflow.SDWANApplyPlan{}); err != nil {
+		t.Fatalf("ApplySDWAN(direct preferred) = %v", err)
+	}
+	assertRouteViaInterface(t, ctx, "51822", "198.51.100.10/32", directIface)
+
+	fallbackNetwork := baseNetwork
+	fallbackNetwork.Links = []ovnflow.SDWANLink{
+		{From: "edge-a", To: "edge-b", Transport: ovnflow.SDWANTransportWireGuard, PathMode: ovnflow.SDWANPathModeDirect, Disabled: true},
+		relay,
+	}
+	if err := backend.ApplySDWAN(ctx, fallbackNetwork, ovnflow.SDWANApplyPlan{}); err != nil {
+		t.Fatalf("ApplySDWAN(relay fallback) = %v", err)
+	}
+	assertRouteViaInterface(t, ctx, "51822", "198.51.100.10/32", relayIface)
+}
+
+func assertRouteViaInterface(t *testing.T, ctx context.Context, table, cidr, iface string) {
+	t.Helper()
+	output, err := exec.CommandContext(ctx, "ip", "route", "show", "table", table, cidr).CombinedOutput()
+	if err != nil || !strings.Contains(string(output), iface) {
+		t.Fatalf("route table %s missing %s route via %s: err=%v output=%s", table, cidr, iface, err, string(output))
+	}
+}
+
 func requireCommand(t *testing.T, name string) {
 	t.Helper()
 	if _, err := exec.LookPath(name); err != nil {

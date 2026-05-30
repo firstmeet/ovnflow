@@ -1,3 +1,47 @@
+# ovnflow v2.4.0
+
+`ovnflow` v2.4.0 adds SD-WAN path-mode compatibility for direct P2P,
+relay/transit, and auto fallback planning. It keeps scheduling, health checks,
+NAT traversal, and HA decisions in the caller's control plane.
+
+Install after release with:
+
+```sh
+go get github.com/firstmeet/ovnflow/v2@v2.4.0
+```
+
+## Highlights
+
+- Added `SDWANPathModeDirect`, `SDWANPathModeRelay`,
+  `SDWANPathModeTransit`, and `SDWANPathModeAuto`.
+- Added builder helpers `PathModeDirect`, `PathModeRelay`,
+  `PathModeTransit`, `PathModeAuto`, and `WithPathMode`.
+- `sdwanlinux` now expands WireGuard AllowedIPs and policy routes for
+  relay/transit peers, while auto mode keeps direct P2P routes preferred and
+  falls back through relay only when a direct link is missing or disabled.
+- Release gates now include Windows unit validation in addition to Linux,
+  Docker, privileged SD-WAN, and LinuxRouter checks.
+
+## Boundaries
+
+- This is not a STUN/TURN/ICE NAT traversal controller.
+- The SDK exposes path primitives and backend route compatibility; callers
+  still decide health checks, direct-link disablement, scheduling, and HA.
+- Empty path mode remains equivalent to direct mode for v2.3 compatibility.
+
+## Validation
+
+- `go test -count=1 ./...`
+- `go vet ./...`
+- `go -C tools/sdkcheck test -count=1 ./...`
+- `GOOS=linux GOARCH=amd64 go test -c ./sdwanlinux`
+- Windows unit job in release workflow.
+- Docker OVN/OVS integration, live OpenFlow endpoint checks, SD-WAN OVS tunnel
+  and OpenFlow hook checks, mutation gates, privileged SD-WAN WireGuard/route
+  checks, and privileged LinuxRouter matrix in GitHub Actions.
+
+---
+
 # ovnflow v2.3.0
 
 `ovnflow` v2.3.0 completes the first production-facing SD-WAN backend layer and
