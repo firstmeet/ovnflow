@@ -2,6 +2,22 @@
 
 All notable changes to `ovnflow` are tracked here.
 
+## v2.4.1 - 2026-06-26
+
+### Fixed
+
+- OVSDB connection configuration now accepts comma-separated endpoint lists and
+  passes each endpoint to libovsdb, allowing OVS, OVN Northbound, and OVN
+  Southbound clients to try multiple database endpoints.
+
+### Hardened
+
+- OVSDB endpoint list parsing now trims whitespace and rejects empty entries
+  before opening a client connection.
+- Windows/WSL integration configuration validation now checks every
+  comma-separated endpoint, so mixed non-`tcp:` entries cannot bypass the
+  integration-test safety guard.
+
 ## v2.4.0 - 2026-05-30
 
 ### Added

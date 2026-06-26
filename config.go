@@ -2,6 +2,7 @@ package ovnflow
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 
@@ -74,19 +75,18 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 }
 
 func connectDB(ctx context.Context, database, address string) (*dbClient, error) {
+	address = strings.TrimSpace(address)
 	if address == "" {
 		return nil, wrap(ErrorValidation, database, "", "connect", "", "endpoint is required", nil)
+	}
+	opts, err := ovsdbEndpointOptions(address)
+	if err != nil {
+		return nil, wrap(ErrorValidation, database, "", "connect", "", "invalid endpoint list", err)
 	}
 
 	var (
 		raw ovsclient.Client
-		err error
 	)
-	endpoints := strings.Split(address, ",")
-	opts := make([]ovsclient.Option, 0, len(endpoints))
-	for _, ep := range endpoints {
-		opts = append(opts, ovsclient.WithEndpoint(ep))
-	}
 	switch database {
 	case dbOVNNorthbound:
 		dbModel, modelErr := nbDBModel()
@@ -120,6 +120,31 @@ func connectDB(ctx context.Context, database, address string) (*dbClient, error)
 	d := &dbClient{database: database, address: address, raw: raw, executor: raw, schema: newSchemaRegistry(database, raw.Schema())}
 	d.watches = newWatchManager(d)
 	return d, nil
+}
+
+func ovsdbEndpointOptions(address string) ([]ovsclient.Option, error) {
+	endpoints, err := splitEndpointList(address)
+	if err != nil {
+		return nil, err
+	}
+	opts := make([]ovsclient.Option, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		opts = append(opts, ovsclient.WithEndpoint(endpoint))
+	}
+	return opts, nil
+}
+
+func splitEndpointList(address string) ([]string, error) {
+	parts := strings.Split(strings.TrimSpace(address), ",")
+	endpoints := make([]string, 0, len(parts))
+	for _, part := range parts {
+		endpoint := strings.TrimSpace(part)
+		if endpoint == "" {
+			return nil, errors.New("endpoint must not be empty")
+		}
+		endpoints = append(endpoints, endpoint)
+	}
+	return endpoints, nil
 }
 
 func (d *dbClient) close() {

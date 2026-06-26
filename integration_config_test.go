@@ -120,6 +120,30 @@ func TestIntegrationConfigRejectsNonTCPEndpoints(t *testing.T) {
 	}
 }
 
+func TestIntegrationConfigValidatesEachEndpointInList(t *testing.T) {
+	cfg := IntegrationConfig{
+		OVSAddr:        " tcp:127.0.0.1:6640, tcp:127.0.0.2:6640 ",
+		OVNNBAddr:      "tcp:127.0.0.1:6641",
+		OVNSBAddr:      "tcp:127.0.0.1:6642",
+		OpenFlowAddr:   "tcp:127.0.0.1:6653",
+		ResourcePrefix: DefaultIntegrationResourcePrefix,
+		BridgeName:     DefaultIntegrationBridge,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with tcp endpoint list = %v", err)
+	}
+
+	cfg.OVSAddr = "tcp:127.0.0.1:6640, unix:/var/run/openvswitch/db.sock"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() succeeded with mixed endpoint list, want error")
+	}
+
+	cfg.OVSAddr = "tcp:127.0.0.1:6640,"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() succeeded with trailing comma, want error")
+	}
+}
+
 func TestIntegrationConfigRejectsEmptySafetyNames(t *testing.T) {
 	base := IntegrationConfig{
 		OVSAddr:        "tcp:127.0.0.1:6640",

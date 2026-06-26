@@ -115,8 +115,24 @@ func (c IntegrationConfig) Validate() error {
 		EnvOVNSBAddr:    c.OVNSBAddr,
 		EnvOpenFlowAddr: c.OpenFlowAddr,
 	} {
-		if strings.TrimSpace(endpoint) != "" && !strings.HasPrefix(strings.TrimSpace(endpoint), "tcp:") {
-			return fmt.Errorf("%s must use a tcp: endpoint for Windows/WSL integration tests", name)
+		if err := validateIntegrationTCPEndpoints(name, endpoint); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateIntegrationTCPEndpoints(name, endpointList string) error {
+	if strings.TrimSpace(endpointList) == "" {
+		return nil
+	}
+	endpoints, err := splitEndpointList(endpointList)
+	if err != nil {
+		return fmt.Errorf("%s has invalid endpoint list: %w", name, err)
+	}
+	for _, endpoint := range endpoints {
+		if !strings.HasPrefix(endpoint, "tcp:") {
+			return fmt.Errorf("%s must use tcp: endpoints for Windows/WSL integration tests", name)
 		}
 	}
 	return nil

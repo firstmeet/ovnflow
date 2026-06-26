@@ -1,3 +1,40 @@
+# ovnflow v2.4.1
+
+`ovnflow` v2.4.1 is a patch release for OVSDB endpoint configuration. It keeps
+the v2.4 SD-WAN API unchanged and allows SDK clients to try multiple OVSDB
+endpoints for OVS, OVN Northbound, and OVN Southbound connections.
+
+Install after release with:
+
+```sh
+go get github.com/firstmeet/ovnflow/v2@v2.4.1
+```
+
+## Highlights
+
+- OVSDB addresses can now be configured as comma-separated endpoint lists, for
+  example `tcp:127.0.0.1:6640,tcp:127.0.0.2:6640`.
+- Each endpoint is passed to libovsdb as its own `WithEndpoint` option, letting
+  libovsdb use its built-in multi-endpoint connection behavior.
+- Endpoint parsing trims whitespace and rejects empty entries before opening a
+  client connection.
+- Windows/WSL integration configuration now validates every comma-separated
+  endpoint and continues to require `tcp:` endpoints.
+
+## Compatibility
+
+- Existing single-endpoint configuration remains unchanged.
+- Empty endpoint configuration still returns a validation error.
+- The v2.4 SD-WAN path-mode API is unchanged.
+
+## Validation
+
+- `go test ./linuxrouter ./...`
+- GitHub Actions `test` workflow on `main`.
+- GitHub Actions release workflow for tag `v2.4.1`.
+
+---
+
 # ovnflow v2.4.0
 
 `ovnflow` v2.4.0 adds SD-WAN path-mode compatibility for direct P2P,

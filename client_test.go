@@ -3,6 +3,7 @@ package ovnflow
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -51,5 +52,22 @@ func TestConfigFromEnvUsesIntegrationVariables(t *testing.T) {
 	cfg := ConfigFromEnv()
 	if cfg.OVSAddr != "tcp:127.0.0.1:6640" || cfg.OVNNBAddr != "tcp:127.0.0.1:6641" || cfg.OVNSBAddr != "tcp:127.0.0.1:6642" {
 		t.Fatalf("ConfigFromEnv() = %#v", cfg)
+	}
+}
+
+func TestSplitEndpointListTrimsAndRejectsEmptySegments(t *testing.T) {
+	got, err := splitEndpointList(" tcp:127.0.0.1:6640, tcp:127.0.0.2:6640 ")
+	if err != nil {
+		t.Fatalf("splitEndpointList() = %v, want nil", err)
+	}
+	want := []string{"tcp:127.0.0.1:6640", "tcp:127.0.0.2:6640"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("splitEndpointList() = %v, want %v", got, want)
+	}
+
+	for _, address := range []string{"", " ", "tcp:127.0.0.1:6640,", "tcp:127.0.0.1:6640, ,tcp:127.0.0.2:6640"} {
+		if _, err := splitEndpointList(address); err == nil {
+			t.Fatalf("splitEndpointList(%q) succeeded, want error", address)
+		}
 	}
 }
