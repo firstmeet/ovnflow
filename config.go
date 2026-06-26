@@ -2,6 +2,7 @@ package ovnflow
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	ovsclient "github.com/ovn-kubernetes/libovsdb/client"
@@ -81,25 +82,30 @@ func connectDB(ctx context.Context, database, address string) (*dbClient, error)
 		raw ovsclient.Client
 		err error
 	)
+	endpoints := strings.Split(address, ",")
+	opts := make([]ovsclient.Option, 0, len(endpoints))
+	for _, ep := range endpoints {
+		opts = append(opts, ovsclient.WithEndpoint(ep))
+	}
 	switch database {
 	case dbOVNNorthbound:
 		dbModel, modelErr := nbDBModel()
 		if modelErr != nil {
 			return nil, wrap(ErrorInvalidSchema, database, "", "model", "", "", modelErr)
 		}
-		raw, err = ovsclient.NewOVSDBClient(dbModel, ovsclient.WithEndpoint(address))
+		raw, err = ovsclient.NewOVSDBClient(dbModel, opts...)
 	case dbOVNSouthbound:
 		dbModel, modelErr := sbDBModel()
 		if modelErr != nil {
 			return nil, wrap(ErrorInvalidSchema, database, "", "model", "", "", modelErr)
 		}
-		raw, err = ovsclient.NewOVSDBClient(dbModel, ovsclient.WithEndpoint(address))
+		raw, err = ovsclient.NewOVSDBClient(dbModel, opts...)
 	case dbOpenVSwitch:
 		dbModel, modelErr := ovsDBModel()
 		if modelErr != nil {
 			return nil, wrap(ErrorInvalidSchema, database, "", "model", "", "", modelErr)
 		}
-		raw, err = ovsclient.NewOVSDBClient(dbModel, ovsclient.WithEndpoint(address))
+		raw, err = ovsclient.NewOVSDBClient(dbModel, opts...)
 	}
 	if err != nil {
 		return nil, wrap(ErrorInvalidSchema, database, "", "client", "", "", err)
