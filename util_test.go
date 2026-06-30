@@ -65,6 +65,11 @@ func TestClassifyTransactErrorMapsKnownFailures(t *testing.T) {
 	}{
 		{name: "duplicate", err: errors.New("constraint violation: duplicate key"), want: ErrorAlreadyExists},
 		{name: "missing", err: errors.New("row not found"), want: ErrorNotFound},
+		{name: "not connected", err: errors.New("not connected"), want: ErrorUnavailable},
+		{name: "connection refused", err: errors.New("dial tcp 127.0.0.1:6641: connect: connection refused"), want: ErrorUnavailable},
+		{name: "transport closing", err: errors.New("transport is closing"), want: ErrorUnavailable},
+		{name: "closed network connection", err: errors.New("use of closed network connection"), want: ErrorUnavailable},
+		{name: "broken pipe", err: errors.New("write tcp: broken pipe"), want: ErrorUnavailable},
 		{name: "conflict", err: errors.New("transaction aborted"), want: ErrorConflict},
 	}
 

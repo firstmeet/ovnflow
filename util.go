@@ -130,6 +130,9 @@ func classifyTransactError(err error, database, table, op, object string) error 
 		return classifyContext(err, database, table, op, object)
 	}
 	msg := err.Error()
+	if isDisconnectError(err) {
+		return wrap(ErrorUnavailable, database, table, op, object, "", err)
+	}
 	switch {
 	case strings.Contains(msg, "constraint violation"), strings.Contains(msg, "duplicate"):
 		return wrap(ErrorAlreadyExists, database, table, op, object, "", err)
@@ -144,6 +147,34 @@ func classifyTransactError(err error, database, table, op, object string) error 
 		}
 		return wrap(ErrorConflict, database, table, op, object, "", err)
 	}
+}
+
+func isDisconnectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, phrase := range []string{
+		"not connected",
+		"connection refused",
+		"connection reset",
+		"connection aborted",
+		"broken pipe",
+		"transport is closing",
+		"use of closed network connection",
+		"client is closed",
+		"server closed",
+		"no route to host",
+	} {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func checkOperationResults(results []libovsdb.OperationResult, database, table, op, object string) error {

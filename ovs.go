@@ -402,9 +402,9 @@ func (b *BridgeBuilder) executeEnsureOnce(ctx context.Context) error {
 	if len(ops) == 0 {
 		return nil
 	}
-	results, err := b.client.db.executor.Transact(ctx, ops...)
+	results, err := b.client.db.transact(ctx, tableBridge, string(b.mode), b.name, ops...)
 	if err != nil {
-		return classifyTransactError(err, dbOpenVSwitch, tableBridge, string(b.mode), b.name)
+		return err
 	}
 	return ensureAffected(results, mustAffectNonInsertOps(ops), dbOpenVSwitch, tableBridge, string(b.mode), b.name)
 }
@@ -698,9 +698,9 @@ func (b *BridgeBuilder) executeDelete(ctx context.Context) error {
 			})
 		}
 	}
-	results, err := b.client.db.executor.Transact(ctx, ops...)
+	results, err := b.client.db.transact(ctx, tableBridge, "delete", b.name, ops...)
 	if err != nil {
-		return classifyTransactError(err, dbOpenVSwitch, tableBridge, "delete", b.name)
+		return err
 	}
 	return ensureAffected(results, mustAffect, dbOpenVSwitch, tableBridge, "delete", b.name)
 }
@@ -779,15 +779,15 @@ func (b *BridgeBuilder) executeDeletePort(ctx context.Context) error {
 			})
 		}
 	}
-	results, err := b.client.db.executor.Transact(ctx, ops...)
+	results, err := b.client.db.transact(ctx, tablePort, "delete", b.deletePort, ops...)
 	if err != nil {
-		return classifyTransactError(err, dbOpenVSwitch, tablePort, "delete", b.deletePort)
+		return err
 	}
 	return ensureAffected(results, mustAffect, dbOpenVSwitch, tablePort, "delete", b.deletePort)
 }
 
 func (o *OVSClient) selectBridges(ctx context.Context, name string) ([]OVSBridge, error) {
-	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+	results, err := o.db.transact(ctx, tableBridge, "select", name, libovsdb.Operation{
 		Op:    libovsdb.OperationSelect,
 		Table: tableBridge,
 		Where: conditionName(name),
@@ -796,16 +796,13 @@ func (o *OVSClient) selectBridges(ctx context.Context, name string) ([]OVSBridge
 		),
 	})
 	if err != nil {
-		return nil, classifyTransactError(err, dbOpenVSwitch, tableBridge, "select", name)
-	}
-	if err := checkOperationResults(results, dbOpenVSwitch, tableBridge, "select", name); err != nil {
 		return nil, err
 	}
 	return decodeOVSBridges(results), nil
 }
 
 func (o *OVSClient) selectAllBridges(ctx context.Context) ([]OVSBridge, error) {
-	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+	results, err := o.db.transact(ctx, tableBridge, "select", "", libovsdb.Operation{
 		Op:    libovsdb.OperationSelect,
 		Table: tableBridge,
 		Where: []libovsdb.Condition{},
@@ -814,9 +811,6 @@ func (o *OVSClient) selectAllBridges(ctx context.Context) ([]OVSBridge, error) {
 		),
 	})
 	if err != nil {
-		return nil, classifyTransactError(err, dbOpenVSwitch, tableBridge, "select", "")
-	}
-	if err := checkOperationResults(results, dbOpenVSwitch, tableBridge, "select", ""); err != nil {
 		return nil, err
 	}
 	return decodeOVSBridges(results), nil
@@ -852,16 +846,13 @@ func (o *OVSClient) selectBridgeMirrorsForPort(ctx context.Context, bridge OVSBr
 	}
 	var out []string
 	for _, mirrorUUID := range uniqueStrings(bridge.Mirrors) {
-		results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+		results, err := o.db.transact(ctx, tableMirror, "select", mirrorUUID, libovsdb.Operation{
 			Op:      libovsdb.OperationSelect,
 			Table:   tableMirror,
 			Where:   conditionUUID(mirrorUUID),
 			Columns: o.db.schema.existingColumns(tableMirror, colUUID, colSelectSrcPort, colSelectDstPort, colOutputPort),
 		})
 		if err != nil {
-			return nil, classifyTransactError(err, dbOpenVSwitch, tableMirror, "select", mirrorUUID)
-		}
-		if err := checkOperationResults(results, dbOpenVSwitch, tableMirror, "select", mirrorUUID); err != nil {
 			return nil, err
 		}
 		if len(results) == 0 || len(results[0].Rows) == 0 {
@@ -902,48 +893,39 @@ func interfaceUsedByOtherPorts(ports []OVSPort, deletedPortUUID, ifaceUUID strin
 }
 
 func (o *OVSClient) selectPorts(ctx context.Context, name string) ([]OVSPort, error) {
-	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+	results, err := o.db.transact(ctx, tablePort, "select", name, libovsdb.Operation{
 		Op:      libovsdb.OperationSelect,
 		Table:   tablePort,
 		Where:   conditionName(name),
 		Columns: o.db.schema.existingColumns(tablePort, colUUID, colName, colInterfaces, colQoS, colExternalIDs, colOtherConfig),
 	})
 	if err != nil {
-		return nil, classifyTransactError(err, dbOpenVSwitch, tablePort, "select", name)
-	}
-	if err := checkOperationResults(results, dbOpenVSwitch, tablePort, "select", name); err != nil {
 		return nil, err
 	}
 	return decodeOVSPorts(results)
 }
 
 func (o *OVSClient) selectAllPorts(ctx context.Context) ([]OVSPort, error) {
-	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+	results, err := o.db.transact(ctx, tablePort, "select", "", libovsdb.Operation{
 		Op:      libovsdb.OperationSelect,
 		Table:   tablePort,
 		Where:   []libovsdb.Condition{},
 		Columns: o.db.schema.existingColumns(tablePort, colUUID, colName, colInterfaces, colQoS, colExternalIDs, colOtherConfig),
 	})
 	if err != nil {
-		return nil, classifyTransactError(err, dbOpenVSwitch, tablePort, "select", "")
-	}
-	if err := checkOperationResults(results, dbOpenVSwitch, tablePort, "select", ""); err != nil {
 		return nil, err
 	}
 	return decodeOVSPorts(results)
 }
 
 func (o *OVSClient) selectControllers(ctx context.Context, target string) ([]OVSController, error) {
-	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+	results, err := o.db.transact(ctx, tableController, "select", target, libovsdb.Operation{
 		Op:      libovsdb.OperationSelect,
 		Table:   tableController,
 		Where:   []libovsdb.Condition{libovsdb.NewCondition(colTarget, libovsdb.ConditionEqual, target)},
 		Columns: o.db.schema.existingColumns(tableController, colUUID, colTarget, colExternalIDs, colOtherConfig),
 	})
 	if err != nil {
-		return nil, classifyTransactError(err, dbOpenVSwitch, tableController, "select", target)
-	}
-	if err := checkOperationResults(results, dbOpenVSwitch, tableController, "select", target); err != nil {
 		return nil, err
 	}
 	return decodeOVSControllers(results), nil
@@ -968,16 +950,13 @@ func decodeOVSControllers(results []libovsdb.OperationResult) []OVSController {
 func (o *OVSClient) selectPortsByUUID(ctx context.Context, ids []string) ([]OVSPort, error) {
 	var rows []OVSPort
 	for _, id := range uniqueStrings(ids) {
-		results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+		results, err := o.db.transact(ctx, tablePort, "select", id, libovsdb.Operation{
 			Op:      libovsdb.OperationSelect,
 			Table:   tablePort,
 			Where:   conditionUUID(id),
 			Columns: o.db.schema.existingColumns(tablePort, colUUID, colName, colInterfaces, colQoS, colExternalIDs, colOtherConfig),
 		})
 		if err != nil {
-			return nil, classifyTransactError(err, dbOpenVSwitch, tablePort, "select", id)
-		}
-		if err := checkOperationResults(results, dbOpenVSwitch, tablePort, "select", id); err != nil {
 			return nil, err
 		}
 		ports, err := decodeOVSPorts(results)
@@ -1008,16 +987,13 @@ func decodeOVSPorts(results []libovsdb.OperationResult) ([]OVSPort, error) {
 }
 
 func (o *OVSClient) openVSwitchUUID(ctx context.Context) (string, error) {
-	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+	results, err := o.db.transact(ctx, tableOpenVSwitch, "select", "", libovsdb.Operation{
 		Op:      libovsdb.OperationSelect,
 		Table:   tableOpenVSwitch,
 		Where:   []libovsdb.Condition{},
 		Columns: []string{colUUID},
 	})
 	if err != nil {
-		return "", classifyTransactError(err, dbOpenVSwitch, tableOpenVSwitch, "select", "")
-	}
-	if err := checkOperationResults(results, dbOpenVSwitch, tableOpenVSwitch, "select", ""); err != nil {
 		return "", err
 	}
 	if len(results) == 0 || len(results[0].Rows) == 0 {

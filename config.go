@@ -5,9 +5,12 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 
 	ovsclient "github.com/ovn-kubernetes/libovsdb/client"
 )
+
+const defaultReconnectBackoff = 50 * time.Millisecond
 
 // Config configures the three OVSDB connections used by ovnflow.
 type Config struct {
@@ -44,11 +47,15 @@ type Client struct {
 }
 
 type dbClient struct {
-	database string
-	address  string
-	raw      ovsclient.Client
-	executor executor
-	schema   *SchemaRegistry
+	mu           sync.RWMutex
+	reconnectMu  sync.Mutex
+	database     string
+	address      string
+	raw          ovsclient.Client
+	executor     executor
+	schema       *SchemaRegistry
+	reconnect    func(context.Context) error
+	retryBackoff time.Duration
 
 	watchesMu sync.Mutex
 	watches   *watchManager
@@ -79,36 +86,10 @@ func connectDB(ctx context.Context, database, address string) (*dbClient, error)
 	if address == "" {
 		return nil, wrap(ErrorValidation, database, "", "connect", "", "endpoint is required", nil)
 	}
-	opts, err := ovsdbEndpointOptions(address)
-	if err != nil {
-		return nil, wrap(ErrorValidation, database, "", "connect", "", "invalid endpoint list", err)
-	}
 
-	var (
-		raw ovsclient.Client
-	)
-	switch database {
-	case dbOVNNorthbound:
-		dbModel, modelErr := nbDBModel()
-		if modelErr != nil {
-			return nil, wrap(ErrorInvalidSchema, database, "", "model", "", "", modelErr)
-		}
-		raw, err = ovsclient.NewOVSDBClient(dbModel, opts...)
-	case dbOVNSouthbound:
-		dbModel, modelErr := sbDBModel()
-		if modelErr != nil {
-			return nil, wrap(ErrorInvalidSchema, database, "", "model", "", "", modelErr)
-		}
-		raw, err = ovsclient.NewOVSDBClient(dbModel, opts...)
-	case dbOpenVSwitch:
-		dbModel, modelErr := ovsDBModel()
-		if modelErr != nil {
-			return nil, wrap(ErrorInvalidSchema, database, "", "model", "", "", modelErr)
-		}
-		raw, err = ovsclient.NewOVSDBClient(dbModel, opts...)
-	}
+	raw, err := newOVSDBRawClient(database, address)
 	if err != nil {
-		return nil, wrap(ErrorInvalidSchema, database, "", "client", "", "", err)
+		return nil, err
 	}
 	if err := raw.Connect(ctx); err != nil {
 		return nil, classifyContext(err, database, "", "connect", "")
@@ -117,9 +98,120 @@ func connectDB(ctx context.Context, database, address string) (*dbClient, error)
 		raw.Close()
 		return nil, wrap(ErrorInvalidSchema, database, "", "schema", "", "", err)
 	}
-	d := &dbClient{database: database, address: address, raw: raw, executor: raw, schema: newSchemaRegistry(database, raw.Schema())}
+	d := &dbClient{database: database, address: address, raw: raw, executor: raw, schema: newSchemaRegistry(database, raw.Schema()), retryBackoff: defaultReconnectBackoff}
+	d.reconnect = d.defaultReconnect
 	d.watches = newWatchManager(d)
 	return d, nil
+}
+
+func newOVSDBRawClient(database, address string) (ovsclient.Client, error) {
+	opts, err := ovsdbEndpointOptions(address)
+	if err != nil {
+		return nil, wrap(ErrorValidation, database, "", "connect", "", "invalid endpoint list", err)
+	}
+
+	switch database {
+	case dbOVNNorthbound:
+		dbModel, modelErr := nbDBModel()
+		if modelErr != nil {
+			return nil, wrap(ErrorInvalidSchema, database, "", "model", "", "", modelErr)
+		}
+		return ovsclient.NewOVSDBClient(dbModel, opts...)
+	case dbOVNSouthbound:
+		dbModel, modelErr := sbDBModel()
+		if modelErr != nil {
+			return nil, wrap(ErrorInvalidSchema, database, "", "model", "", "", modelErr)
+		}
+		return ovsclient.NewOVSDBClient(dbModel, opts...)
+	case dbOpenVSwitch:
+		dbModel, modelErr := ovsDBModel()
+		if modelErr != nil {
+			return nil, wrap(ErrorInvalidSchema, database, "", "model", "", "", modelErr)
+		}
+		return ovsclient.NewOVSDBClient(dbModel, opts...)
+	default:
+		return nil, wrap(ErrorValidation, database, "", "connect", "", "unsupported database", nil)
+	}
+}
+
+func (d *dbClient) defaultReconnect(ctx context.Context) error {
+	raw, err := newOVSDBRawClient(d.database, d.address)
+	if err != nil {
+		return err
+	}
+	if err := raw.Connect(ctx); err != nil {
+		raw.Close()
+		return classifyContext(err, d.database, "", "connect", "")
+	}
+	if err := validateDatabaseSchema(raw.Schema(), requiredSchema(d.database)); err != nil {
+		raw.Close()
+		return wrap(ErrorInvalidSchema, d.database, "", "schema", "", "", err)
+	}
+	old := d.swapRaw(raw)
+	if old != nil {
+		old.Close()
+	}
+	return nil
+}
+
+func (d *dbClient) currentExecutor() executor {
+	if d == nil {
+		return nil
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.executor != nil {
+		return d.executor
+	}
+	return d.raw
+}
+
+func (d *dbClient) swapRaw(raw ovsclient.Client) ovsclient.Client {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	old := d.raw
+	d.raw = raw
+	d.executor = raw
+	return old
+}
+
+func (d *dbClient) rawClient() ovsclient.Client {
+	if d == nil {
+		return nil
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.raw
+}
+
+func (d *dbClient) reconnectAfterDisconnect(ctx context.Context, table, op, object string) error {
+	if d == nil {
+		return wrap(ErrorUnavailable, "", table, op, object, "database client is nil", nil)
+	}
+	if d.reconnect == nil {
+		return wrap(ErrorUnavailable, d.database, table, op, object, "database reconnect is not configured", nil)
+	}
+	if d.retryBackoff > 0 {
+		timer := time.NewTimer(d.retryBackoff)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return classifyContext(ctx.Err(), d.database, table, op, object)
+		}
+	}
+	d.reconnectMu.Lock()
+	defer d.reconnectMu.Unlock()
+	if err := d.reconnect(ctx); err != nil {
+		if KindOf(err) != "" {
+			return err
+		}
+		return classifyTransactError(err, d.database, table, "reconnect", object)
+	}
+	return nil
 }
 
 func ovsdbEndpointOptions(address string) ([]ovsclient.Option, error) {
@@ -157,8 +249,13 @@ func (d *dbClient) close() {
 	if watches != nil {
 		watches.close()
 	}
-	if d.raw != nil {
-		d.raw.Close()
+	d.mu.Lock()
+	raw := d.raw
+	d.raw = nil
+	d.executor = nil
+	d.mu.Unlock()
+	if raw != nil {
+		raw.Close()
 	}
 }
 
@@ -176,17 +273,17 @@ func (c *Client) Close() {
 
 // RawNB returns the underlying libovsdb client for OVN Northbound.
 func (c *Client) RawNB() ovsclient.Client {
-	return c.nb.raw
+	return c.nb.rawClient()
 }
 
 // RawSB returns the underlying libovsdb client for OVN Southbound.
 func (c *Client) RawSB() ovsclient.Client {
-	return c.sb.raw
+	return c.sb.rawClient()
 }
 
 // RawOVS returns the underlying libovsdb client for Open_vSwitch.
 func (c *Client) RawOVS() ovsclient.Client {
-	return c.ovs.raw
+	return c.ovs.rawClient()
 }
 
 // OVN returns OVN Northbound and Southbound APIs.

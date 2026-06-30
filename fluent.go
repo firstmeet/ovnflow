@@ -576,10 +576,7 @@ func (d *dbClient) transact(ctx context.Context, table, op, object string, ops .
 	if d == nil {
 		return nil, wrap(ErrorUnavailable, "", table, op, object, "database client is nil", nil)
 	}
-	exec := d.executor
-	if exec == nil {
-		exec = d.raw
-	}
+	exec := d.currentExecutor()
 	if exec == nil {
 		return nil, wrap(ErrorUnavailable, "", table, op, object, "database executor is nil", nil)
 	}
@@ -594,6 +591,16 @@ func (d *dbClient) transact(ctx context.Context, table, op, object string, ops .
 		}
 	}
 	results, err := exec.Transact(ctx, ops...)
+	if err != nil && isDisconnectError(err) && d.canRetryTransaction(op, ops) {
+		if reconnectErr := d.reconnectAfterDisconnect(ctx, table, op, object); reconnectErr != nil {
+			return nil, reconnectErr
+		}
+		exec = d.currentExecutor()
+		if exec == nil {
+			return nil, wrap(ErrorUnavailable, d.database, table, op, object, "database executor is nil after reconnect", nil)
+		}
+		results, err = exec.Transact(ctx, ops...)
+	}
 	if err != nil {
 		return nil, classifyTransactError(err, d.database, table, op, object)
 	}
@@ -601,6 +608,21 @@ func (d *dbClient) transact(ctx context.Context, table, op, object string, ops .
 		return nil, err
 	}
 	return results, nil
+}
+
+func (d *dbClient) canRetryTransaction(op string, ops []libovsdb.Operation) bool {
+	if len(ops) == 0 {
+		return false
+	}
+	if op == string(tableModeCreate) || op == string(nbModeCreate) {
+		return false
+	}
+	for _, operation := range ops {
+		if operation.Op == libovsdb.OperationInsert {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *dbClient) validateOperationColumns(op libovsdb.Operation) error {

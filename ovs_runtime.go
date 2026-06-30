@@ -97,16 +97,13 @@ func (o *OVSClient) GetOpenVSwitch(ctx context.Context) (*OpenVSwitch, error) {
 	if o == nil || o.db == nil {
 		return nil, ErrBackendUnavailable
 	}
-	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+	results, err := o.db.transact(ctx, tableOpenVSwitch, "get", "", libovsdb.Operation{
 		Op:      libovsdb.OperationSelect,
 		Table:   tableOpenVSwitch,
 		Where:   []libovsdb.Condition{},
 		Columns: o.db.schema.existingColumns(tableOpenVSwitch, colUUID, colBridges, colManagerOptions, colSSL, colExternalIDs, colOtherConfig),
 	})
 	if err != nil {
-		return nil, classifyTransactError(err, dbOpenVSwitch, tableOpenVSwitch, "get", "")
-	}
-	if err := checkOperationResults(results, dbOpenVSwitch, tableOpenVSwitch, "get", ""); err != nil {
 		return nil, err
 	}
 	if len(results) == 0 || len(results[0].Rows) == 0 {
@@ -197,7 +194,7 @@ func (o *OVSClient) mutateOpenVSwitchExternalIDsCAS(ctx context.Context, root *O
 		return nil
 	}
 	timeout := 0
-	results, err := o.db.executor.Transact(ctx, libovsdb.Operation{
+	results, err := o.db.transact(ctx, tableOpenVSwitch, op, object, libovsdb.Operation{
 		Op:      libovsdb.OperationWait,
 		Table:   tableOpenVSwitch,
 		Where:   conditionUUID(root.UUID),
@@ -212,7 +209,7 @@ func (o *OVSClient) mutateOpenVSwitchExternalIDsCAS(ctx context.Context, root *O
 		Mutations: mutations,
 	})
 	if err != nil {
-		return classifyTransactError(err, dbOpenVSwitch, tableOpenVSwitch, op, object)
+		return err
 	}
 	return ensureAffected(results, []int{1}, dbOpenVSwitch, tableOpenVSwitch, op, object)
 }

@@ -1,3 +1,44 @@
+# ovnflow v2.4.2
+
+`ovnflow` v2.4.2 is a patch release for OVSDB connection recovery. It keeps the
+public API unchanged while making fluent SDK operations recover from stale
+libovsdb connections after OVN/OVS restarts.
+
+Install after release with:
+
+```sh
+go get github.com/firstmeet/ovnflow/v2@v2.4.2
+```
+
+## Highlights
+
+- Connection-loss errors such as `not connected`, `connection refused`,
+  `broken pipe`, `use of closed network connection`, and `transport is closing`
+  are now classified as `ErrorUnavailable`.
+- Select, non-insert ensure/update phases, and delete transactions rebuild the
+  underlying OVSDB client and retry once after a detected disconnect.
+- OVS Bridge, Port, Interface, Manager, and Open_vSwitch root helpers now route
+  through the shared transaction layer.
+- Create-only transactions still do not retry automatically, avoiding duplicate
+  inserts when the server might have committed before the transport failed.
+
+## Compatibility
+
+- No public API change.
+- Existing caller-side reconcile retries remain useful while OVN central is
+  starting or databases are not ready yet.
+- The v2.4 SD-WAN path-mode API is unchanged.
+
+## Validation
+
+- `go test ./...`
+- `go test -race -count=1 ./...`
+- `go vet ./...`
+- GitHub Actions `test` workflow on `main`.
+- GitHub Actions release workflow for tag `v2.4.2`.
+
+---
+
 # ovnflow v2.4.1
 
 `ovnflow` v2.4.1 is a patch release for OVSDB endpoint configuration. It keeps
