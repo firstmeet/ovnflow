@@ -2,6 +2,25 @@
 
 All notable changes to `ovnflow` are tracked here.
 
+## v2.4.2 - 2026-06-30
+
+### Fixed
+
+- OVSDB fluent operations now classify disconnected transport errors such as
+  `not connected`, `connection refused`, `broken pipe`, and
+  `transport is closing` as `ErrorUnavailable` instead of generic conflicts.
+- OVSDB select, non-insert ensure/update phases, and delete transactions now
+  rebuild the underlying libovsdb client and retry once after a detected
+  disconnect.
+
+### Hardened
+
+- Open_vSwitch helpers now route through the shared transaction layer, so
+  Bridge, Port, Interface, Manager, and Open_vSwitch root operations share the
+  same disconnect handling.
+- The Open_vSwitch runtime schema declaration now includes common metadata
+  columns used by the SDK on Bridge, Port, and Interface rows.
+
 ## v2.4.1 - 2026-06-26
 
 ### Fixed

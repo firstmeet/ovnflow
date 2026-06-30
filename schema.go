@@ -257,9 +257,9 @@ func requiredSchema(database string) map[string][]string {
 	case dbOpenVSwitch:
 		return map[string][]string{
 			tableOpenVSwitch: {colBridges, colExternalIDs},
-			tableBridge:      {colName, colPorts},
-			tablePort:        {colName, colInterfaces},
-			tableInterface:   {colName, colType},
+			tableBridge:      {colName, colPorts, colExternalIDs, colOtherConfig},
+			tablePort:        {colName, colInterfaces, colExternalIDs, colOtherConfig},
+			tableInterface:   {colName, colType, colExternalIDs, colOptions},
 			tableController:  {colTarget, colExternalIDs, colOtherConfig},
 			tableManager:     {colTarget, colExternalIDs, colOtherConfig},
 			tableMirror:      {colName, colSelectSrcPort, colSelectDstPort, colOutputPort},
